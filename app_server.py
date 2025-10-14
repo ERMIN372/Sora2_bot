@@ -1,4 +1,4 @@
-"""FastAPI server exposing YooKassa webhook and return endpoints."""
+"""Unified FastAPI application exposing health, payments and Telegram webhooks."""
 from __future__ import annotations
 
 import asyncio
@@ -8,11 +8,13 @@ from decimal import Decimal, InvalidOperation
 from ipaddress import ip_address, ip_network
 from typing import Dict, Optional
 
-from aiogram import Bot
-from fastapi import APIRouter, Request, Response
+from aiogram import Bot, Dispatcher, types
+from fastapi import APIRouter, FastAPI, Header, Request, Response
 from fastapi.responses import HTMLResponse
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.types import ASGIApp
 
-from config import Config
+from config import CFG, Config
 from db import Database
 from utils import check_subscription
 import yookassa_client
@@ -26,6 +28,28 @@ YOOKASSA_IP_RANGES = [
     ip_network("77.75.154.128/25"),
     ip_network("2a02:5180::/32"),
 ]
+
+MAX_REQUEST_SIZE = 2 * 1024 * 1024  # 2 MiB
+
+
+class BodySizeLimitMiddleware(BaseHTTPMiddleware):
+    """Reject requests that exceed a predefined size."""
+
+    def __init__(self, app: ASGIApp, *, max_body_size: int) -> None:  # type: ignore[override]
+        super().__init__(app)
+        self._max_body_size = max_body_size
+
+    async def dispatch(self, request: Request, call_next):  # type: ignore[override]
+        content_length = request.headers.get("content-length")
+        if content_length:
+            try:
+                length = int(content_length)
+            except ValueError:
+                return Response(status_code=400)
+            if length > self._max_body_size:
+                log.warning("Request body too large: %s bytes", length)
+                return Response(status_code=413)
+        return await call_next(request)
 
 
 class YooKassaProcessor:
@@ -44,7 +68,12 @@ class YooKassaProcessor:
         user_id = metadata.get("user_id")
         items = metadata.get("items", 0)
         if payment_id is None or user_id is None:
-            log.warning("Incomplete YooKassa payment payload from %s: id=%s user_id=%s", source, payment_id, user_id)
+            log.warning(
+                "Incomplete YooKassa payment payload from %s: id=%s user_id=%s",
+                source,
+                payment_id,
+                user_id,
+            )
             return
         try:
             user_id_int = int(user_id)
@@ -159,60 +188,6 @@ class YooKassaProcessor:
         return await self._db.get_payment_by_order_id("yookassa", order_id)
 
 
-def create_router(processor: YooKassaProcessor, config: Config) -> APIRouter:
-    router = APIRouter()
-
-    @router.post(config.yookassa_webhook_path)
-    async def webhook(request: Request) -> Response:
-        remote = request.client.host if request.client else "unknown"
-        log.info("Received YooKassa webhook from %s", remote)
-        if not config.yookassa_test_mode and not _is_ip_allowed(remote):
-            log.warning("Rejected YooKassa webhook from unauthorized IP %s", remote)
-            return Response(status_code=403)
-        try:
-            payload = await request.json()
-        except Exception:
-            log.exception("Failed to parse YooKassa webhook body")
-            return Response(status_code=400)
-        if payload.get("type") != "notification":
-            log.warning("Unexpected YooKassa webhook type: %s", payload.get("type"))
-            return Response(status_code=400)
-        event = payload.get("event")
-        obj = payload.get("object") or {}
-        payment_id = obj.get("id")
-        if not payment_id:
-            log.warning("Webhook without payment id: %s", payload)
-            return Response(status_code=400)
-        if event == "payment.succeeded":
-            log.info("Payment %s succeeded via webhook", payment_id)
-        try:
-            payment = await asyncio.to_thread(yookassa_client.get_payment, payment_id)
-        except Exception:  # pragma: no cover - network interaction
-            log.exception("Failed to re-fetch YooKassa payment %s", payment_id)
-            return Response(status_code=200)
-        await processor.process_payment(payment, source="webhook")
-        return Response(status_code=200)
-
-    @router.get(config.yookassa_return_path)
-    async def return_page(order_id: Optional[str] = None) -> HTMLResponse:
-        if not order_id:
-            return HTMLResponse("<h1>Платёж не найден</h1>", status_code=400)
-        record = await processor.get_payment_by_order_id(order_id)
-        if not record:
-            body = "<h1>Платёж не найден</h1>"
-        else:
-            status = record.get("status", "pending")
-            if status == "succeeded":
-                body = "<h1>Оплата принята</h1><p>Спасибо за покупку!</p>"
-            elif status == "canceled":
-                body = "<h1>Оплата отменена</h1><p>Средства не списаны.</p>"
-            else:
-                body = "<h1>Платёж обрабатывается</h1><p>Проверьте баланс позже.</p>"
-        return HTMLResponse(body)
-
-    return router
-
-
 def _is_ip_allowed(ip: Optional[str]) -> bool:
     if not ip:
         return False
@@ -236,4 +211,125 @@ async def poll_pending_payments(processor: YooKassaProcessor, interval: int) -> 
         await asyncio.sleep(interval)
 
 
-__all__ = ["YooKassaProcessor", "create_router", "poll_pending_payments"]
+def _health_router() -> APIRouter:
+    router = APIRouter()
+
+    @router.get("/healthz")
+    async def healthz() -> Dict[str, object]:
+        return {"ok": True, "mode": CFG.BOT_MODE}
+
+    return router
+
+
+def _yookassa_router(
+    *, config: Config, processor: Optional[YooKassaProcessor]
+) -> APIRouter:
+    router = APIRouter()
+
+    @router.post(config.yookassa_webhook_path)
+    async def webhook(request: Request) -> Response:
+        if processor is None:
+            return Response(status_code=503)
+        remote = request.client.host if request.client else "unknown"
+        log.info("Received YooKassa webhook from %s", remote)
+        if not config.yookassa_test_mode and not _is_ip_allowed(remote):
+            log.warning("Rejected YooKassa webhook from unauthorized IP %s", remote)
+            return Response(status_code=403)
+        try:
+            payload = await request.json()
+        except Exception:
+            log.exception("Failed to parse YooKassa webhook body")
+            return Response(status_code=400)
+        if payload.get("type") != "notification":
+            log.warning("Unexpected YooKassa webhook type: %s", payload.get("type"))
+            return Response(status_code=400)
+        event = payload.get("event")
+        obj = payload.get("object") or {}
+        payment_id = obj.get("id")
+        if not payment_id:
+            log.warning("Webhook without payment id")
+            return Response(status_code=400)
+        if event == "payment.succeeded":
+            log.info("Payment %s succeeded via webhook", payment_id)
+        try:
+            payment = await asyncio.to_thread(yookassa_client.get_payment, payment_id)
+        except Exception:  # pragma: no cover - network interaction
+            log.exception("Failed to re-fetch YooKassa payment %s", payment_id)
+            return Response(status_code=200)
+        await processor.process_payment(payment, source="webhook")
+        return Response(status_code=200)
+
+    @router.get(config.yookassa_return_path)
+    async def return_page(order_id: Optional[str] = None) -> HTMLResponse:
+        if processor is None:
+            return HTMLResponse("<h1>Сервис временно недоступен</h1>", status_code=503)
+        if not order_id:
+            return HTMLResponse("<h1>Платёж не найден</h1>", status_code=400)
+        record = await processor.get_payment_by_order_id(order_id)
+        if not record:
+            body = "<h1>Платёж не найден</h1>"
+        else:
+            status = record.get("status", "pending")
+            if status == "succeeded":
+                body = "<h1>Оплата принята</h1><p>Спасибо за покупку!</p>"
+            elif status == "canceled":
+                body = "<h1>Оплата отменена</h1><p>Средства не списаны.</p>"
+            else:
+                body = "<h1>Платёж обрабатывается</h1><p>Проверьте баланс позже.</p>"
+        return HTMLResponse(body)
+
+    return router
+
+
+def _telegram_router(dp: Dispatcher) -> APIRouter:
+    router = APIRouter()
+
+    # [TG_WEBHOOK_ROUTE]
+    @router.post(CFG.WEBHOOK_PATH)
+    async def tg_webhook(
+        request: Request,
+        x_telegram_bot_api_secret_token: str | None = Header(default=None),
+    ) -> Response:
+        # Проверка секрета
+        if x_telegram_bot_api_secret_token != CFG.TELEGRAM_SECRET_TOKEN:
+            return Response(status_code=403)
+
+        try:
+            data = await request.json()
+        except Exception:
+            return Response(status_code=400)
+
+        update = types.Update(**data)
+        # ВАЖНО: process_update, а не polling
+        await dp.process_update(update)
+        return Response(status_code=200)
+
+    return router
+
+
+# [FASTAPI_APP_FACTORY]
+def create_app(
+    *, config: Config, dp: Dispatcher, bot: Bot, db: Database
+) -> tuple[FastAPI, Optional[YooKassaProcessor]]:
+    processor: Optional[YooKassaProcessor] = None
+    if config.yookassa_enabled and config.public_base_url:
+        processor = YooKassaProcessor(db=db, config=config, bot=bot)
+    else:
+        log.info("YooKassa integration disabled or misconfigured")
+
+    app = FastAPI()
+    app.add_middleware(BodySizeLimitMiddleware, max_body_size=MAX_REQUEST_SIZE)
+
+    app.include_router(_health_router())
+    app.include_router(_telegram_router(dp))
+    app.include_router(_yookassa_router(config=config, processor=processor))
+
+    return app, processor
+
+
+__all__ = [
+    "BodySizeLimitMiddleware",
+    "YooKassaProcessor",
+    "create_app",
+    "poll_pending_payments",
+]

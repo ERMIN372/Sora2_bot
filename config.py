@@ -46,7 +46,6 @@ class Config:
     price_thirty_rub: int = 3570
     subscription_chat_id: Optional[str] = None
     yookassa_poll_interval: int = 60
-    yookassa_server_port: int = 8080
     google_sheet_id: str = ""
     google_service_account: Dict[str, object] = field(default_factory=dict)
     gs_users_sheet: str = "users"
@@ -117,13 +116,17 @@ def _load_service_account_info() -> Dict[str, object]:
 def load_config() -> Config:
     """Load configuration from the process environment."""
 
-    bot_token = os.getenv("BOT_TOKEN")
+    bot_token = os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("BOT_TOKEN")
     if not bot_token:
-        raise RuntimeError("BOT_TOKEN environment variable is required")
+        raise RuntimeError(
+            "TELEGRAM_BOT_TOKEN environment variable is required (BOT_TOKEN is accepted for backwards compatibility)"
+        )
 
-    sora_api_key = os.getenv("SORA_API_KEY")
+    sora_api_key = os.getenv("OPENAI_API_KEY") or os.getenv("SORA_API_KEY")
     if not sora_api_key:
-        raise RuntimeError("SORA_API_KEY environment variable is required")
+        raise RuntimeError(
+            "OPENAI_API_KEY environment variable is required (SORA_API_KEY is accepted for backwards compatibility)"
+        )
 
     sora_api_url = os.getenv("SORA_API_URL", Config.sora_api_url)
     database_path = os.getenv("DATABASE_PATH", Config.database_path)
@@ -165,8 +168,61 @@ def load_config() -> Config:
         price_thirty_rub=_get_env_int("PRICE_THIRTY_RUB", Config.price_thirty_rub),
         subscription_chat_id=os.getenv("SUBSCRIPTION_CHAT_ID"),
         yookassa_poll_interval=_get_env_int("YOOKASSA_POLL_INTERVAL", Config.yookassa_poll_interval),
-        yookassa_server_port=_get_env_int("YOOKASSA_SERVER_PORT", Config.yookassa_server_port),
     )
 
 
-__all__ = ["Config", "load_config"]
+@dataclass(frozen=True)
+class RuntimeConfig:
+    """Runtime configuration that controls the bot launch mode."""
+
+    BOT_MODE: str
+    WEBHOOK_HOST: str
+    WEBHOOK_PATH: str
+    WEBHOOK_URL: str
+    TELEGRAM_SECRET_TOKEN: str
+    HOST: str
+    PORT: int
+
+
+def _normalise_path(path: str) -> str:
+    if not path.startswith("/"):
+        path = f"/{path}"
+    return path.rstrip("/") or "/"
+
+
+def _load_runtime_config() -> RuntimeConfig:
+    mode = (os.getenv("BOT_MODE", "polling") or "polling").strip().lower()
+    if mode not in {"polling", "webhook"}:
+        raise RuntimeError(
+            "BOT_MODE must be one of 'polling' or 'webhook'"
+        )
+
+    webhook_host_raw = os.getenv("WEBHOOK_HOST", "").strip()
+    webhook_host = webhook_host_raw.rstrip("/")
+    webhook_path = _normalise_path(os.getenv("WEBHOOK_PATH", "/tg/webhook").strip() or "/tg/webhook")
+    webhook_url = f"{webhook_host}{webhook_path}" if webhook_host else webhook_path
+    secret_token = os.getenv("TELEGRAM_SECRET_TOKEN", "").strip()
+    host = os.getenv("HOST", "0.0.0.0") or "0.0.0.0"
+    port = _get_env_int("PORT", 8080)
+
+    if mode == "webhook":
+        if not webhook_host.startswith("https://"):
+            raise RuntimeError("WEBHOOK_HOST must start with https:// when BOT_MODE=webhook")
+        if not secret_token:
+            raise RuntimeError("TELEGRAM_SECRET_TOKEN must be set when BOT_MODE=webhook")
+
+    return RuntimeConfig(
+        BOT_MODE=mode,
+        WEBHOOK_HOST=webhook_host,
+        WEBHOOK_PATH=webhook_path,
+        WEBHOOK_URL=webhook_url,
+        TELEGRAM_SECRET_TOKEN=secret_token,
+        HOST=host,
+        PORT=port,
+    )
+
+
+CFG = _load_runtime_config()
+
+
+__all__ = ["Config", "RuntimeConfig", "CFG", "load_config"]
