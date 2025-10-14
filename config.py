@@ -1,9 +1,12 @@
 """Application configuration utilities for the Sora Telegram bot."""
 from __future__ import annotations
 
+import base64
+import binascii
+import json
 import os
-from dataclasses import dataclass
-from typing import Optional
+from dataclasses import dataclass, field
+from typing import Dict, Optional
 
 from dotenv import load_dotenv
 
@@ -14,9 +17,9 @@ load_dotenv()
 class Config:
     """Configuration values loaded from the environment.
 
-    The bot relies on a single Telegram bot token and an API key for the Sora
-    video generation service.  A SQLite database is used by default for local
-    development, but the location can be customised via ``DATABASE_PATH``.
+    The bot relies on a single Telegram bot token, an API key for the Sora
+    video generation service, and a Google Sheet that acts as the persistent
+    datastore for users, payments, and jobs.
     """
 
     bot_token: str
@@ -44,6 +47,11 @@ class Config:
     subscription_chat_id: Optional[str] = None
     yookassa_poll_interval: int = 60
     yookassa_server_port: int = 8080
+    google_sheet_id: str = ""
+    google_service_account: Dict[str, object] = field(default_factory=dict)
+    gs_users_sheet: str = "users"
+    gs_payments_sheet: str = "payments"
+    gs_jobs_sheet: str = "jobs"
 
     @property
     def aiogram_redis_url(self) -> Optional[str]:
@@ -85,6 +93,27 @@ def _get_env_bool(key: str, default: bool) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _load_service_account_info() -> Dict[str, object]:
+    raw = os.getenv("GOOGLE_SA_JSON_BASE64")
+    if not raw:
+        raise RuntimeError("GOOGLE_SA_JSON_BASE64 environment variable is required")
+    raw = raw.strip()
+    try:
+        decoded = base64.b64decode(raw, validate=True)
+        text = decoded.decode("utf-8")
+    except (binascii.Error, UnicodeDecodeError):
+        text = raw
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(
+            "GOOGLE_SA_JSON_BASE64 must contain JSON or base64-encoded JSON"
+        ) from exc
+    if not isinstance(data, dict):
+        raise RuntimeError("Service account JSON must decode to an object")
+    return data
+
+
 def load_config() -> Config:
     """Load configuration from the process environment."""
 
@@ -98,12 +127,24 @@ def load_config() -> Config:
 
     sora_api_url = os.getenv("SORA_API_URL", Config.sora_api_url)
     database_path = os.getenv("DATABASE_PATH", Config.database_path)
+    google_sheet_id = os.getenv("GOOGLE_SHEET_ID")
+    if not google_sheet_id:
+        raise RuntimeError("GOOGLE_SHEET_ID environment variable is required")
+    service_account = _load_service_account_info()
+    users_sheet = os.getenv("GS_USERS_SHEET", Config.gs_users_sheet)
+    payments_sheet = os.getenv("GS_PAYMENTS_SHEET", Config.gs_payments_sheet)
+    jobs_sheet = os.getenv("GS_JOBS_SHEET", Config.gs_jobs_sheet)
 
     return Config(
         bot_token=bot_token,
         sora_api_key=sora_api_key,
         sora_api_url=sora_api_url,
         database_path=database_path,
+        google_sheet_id=google_sheet_id,
+        google_service_account=service_account,
+        gs_users_sheet=users_sheet,
+        gs_payments_sheet=payments_sheet,
+        gs_jobs_sheet=jobs_sheet,
         jobs_concurrency=_get_env_int("JOBS_CONCURRENCY", Config.jobs_concurrency),
         max_jobs_per_user=_get_env_int("MAX_JOBS_PER_USER", Config.max_jobs_per_user),
         credits_per_payment=_get_env_int("CREDITS_PER_PAYMENT", Config.credits_per_payment),

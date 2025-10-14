@@ -25,7 +25,7 @@ log = logging.getLogger(__name__)
 async def create_app(config: Config) -> dict[str, Any]:
     bot = Bot(token=config.bot_token, parse_mode="HTML")
     dp = Dispatcher(bot)
-    db = Database(config.database_path)
+    db = Database()
     sora_client = SoraClient(config=config)
     job_queue = JobQueue(db=db, sora_client=sora_client, config=config)
     payments = TelegramStarPaymentProcessor(db=db, config=config)
@@ -56,8 +56,7 @@ async def create_app(config: Config) -> dict[str, Any]:
     register_handlers(dp, db=db, config=config, job_queue=job_queue, payments=payments)
 
     async def on_startup(dispatcher: Dispatcher) -> None:
-        await db.connect()
-        await db.run_migrations()
+        await db.init()
         await job_queue.start()
         if config.yookassa_enabled and config.public_base_url and fastapi_app and yookassa_processor:
             try:

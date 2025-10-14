@@ -1,24 +1,22 @@
-"""Database helpers and migrations for the Sora Telegram bot."""
+"""Database helpers implemented on top of Google Sheets."""
 from __future__ import annotations
 
-import asyncio
 import json
 from dataclasses import dataclass
 from datetime import datetime
-from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional
 
-import aiosqlite
+import gsheets_db
 
 
 @dataclass
 class User:
     telegram_id: int
-    username: Optional[str]
     credits: int
     bonus_granted: bool
     created_at: datetime
     updated_at: datetime
+    notes: str = ""
 
 
 @dataclass
@@ -31,268 +29,132 @@ class GenerationJobRecord:
     error: Optional[str]
     created_at: datetime
     updated_at: datetime
+    image_file_id: Optional[str] = None
+    sora_req_id: Optional[str] = None
+    size: Optional[str] = None
+    seconds: Optional[int] = None
+    model: Optional[str] = None
 
 
-@dataclass
-class Payment:
-    id: int
-    user_id: int
-    provider_payment_charge_id: str
-    telegram_payment_charge_id: str
-    amount: int
-    credits_added: int
-    provider: str
-    ext_id: str
-    items: int
-    status: str
-    metadata: Optional[str]
-    created_at: datetime
+def _parse_datetime(value: str) -> datetime:
+    if not value:
+        return datetime.utcfromtimestamp(0)
+    try:
+        return datetime.fromisoformat(value)
+    except ValueError:
+        return datetime.utcfromtimestamp(0)
 
 
-MIGRATIONS: List[Tuple[str, str]] = [
-    (
-        "0001_users",
-        """
-    CREATE TABLE IF NOT EXISTS users (
-        telegram_id INTEGER PRIMARY KEY,
-        username TEXT,
-        credits INTEGER NOT NULL DEFAULT 0,
-        created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-        updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
-    );
-    """,
-    ),
-    (
-        "0002_jobs",
-        """
-    CREATE TABLE IF NOT EXISTS jobs (
-        id TEXT PRIMARY KEY,
-        user_id INTEGER NOT NULL,
-        prompt TEXT NOT NULL,
-        status TEXT NOT NULL,
-        video_url TEXT,
-        error TEXT,
-        created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-        updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-        FOREIGN KEY (user_id) REFERENCES users(telegram_id)
-    );
-    """,
-    ),
-    (
-        "0003_payments",
-        """
-    CREATE TABLE IF NOT EXISTS payments (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id INTEGER NOT NULL,
-        provider_payment_charge_id TEXT NOT NULL,
-        telegram_payment_charge_id TEXT NOT NULL,
-        amount INTEGER NOT NULL,
-        credits_added INTEGER NOT NULL,
-        created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-        FOREIGN KEY (user_id) REFERENCES users(telegram_id)
-    );
-    """,
-    ),
-    (
-        "0004_users_bonus",
-        """
-    ALTER TABLE users ADD COLUMN bonus_granted INTEGER NOT NULL DEFAULT 0;
-    """,
-    ),
-    (
-        "0005_payments_yookassa",
-        """
-    ALTER TABLE payments ADD COLUMN provider TEXT NOT NULL DEFAULT 'stars';
-    ALTER TABLE payments ADD COLUMN ext_id TEXT NOT NULL DEFAULT '';
-    ALTER TABLE payments ADD COLUMN items INTEGER NOT NULL DEFAULT 0;
-    ALTER TABLE payments ADD COLUMN status TEXT NOT NULL DEFAULT 'succeeded';
-    ALTER TABLE payments ADD COLUMN metadata TEXT;
-    UPDATE payments SET ext_id = provider_payment_charge_id WHERE provider = 'stars' AND ext_id = '';
-    UPDATE payments SET items = credits_added WHERE provider = 'stars' AND items = 0;
-    UPDATE payments SET status = 'succeeded' WHERE provider = 'stars' AND status = 'succeeded';
-    CREATE INDEX IF NOT EXISTS idx_payments_provider_ext ON payments(provider, ext_id);
-    """,
-    ),
-]
+def _user_from_dict(data: Dict[str, Any]) -> User:
+    return User(
+        telegram_id=int(data.get("user_id", 0)),
+        credits=int(data.get("credits", 0)),
+        bonus_granted=bool(data.get("bonus_granted")),
+        created_at=_parse_datetime(data.get("created_at", "")),
+        updated_at=_parse_datetime(data.get("updated_at", "")),
+        notes=str(data.get("notes", "")) if data.get("notes") is not None else "",
+    )
+
+
+def _job_from_dict(data: Dict[str, Any]) -> GenerationJobRecord:
+    video_url = data.get("video_url") or None
+    error = data.get("error") or None
+    image_file_id = data.get("image_file_id") or None
+    sora_req_id = data.get("sora_req_id") or None
+    size = data.get("size") or None
+    seconds_value = data.get("seconds")
+    try:
+        seconds = int(seconds_value) if seconds_value not in (None, "") else None
+    except (TypeError, ValueError):
+        seconds = None
+    model = data.get("model") or None
+    return GenerationJobRecord(
+        id=str(data.get("job_id", "")),
+        user_id=int(data.get("user_id", 0)),
+        prompt=str(data.get("prompt", "")),
+        status=str(data.get("status", "")),
+        video_url=video_url,
+        error=error,
+        created_at=_parse_datetime(data.get("created_at", "")),
+        updated_at=_parse_datetime(data.get("updated_at", "")),
+        image_file_id=image_file_id,
+        sora_req_id=sora_req_id,
+        size=size,
+        seconds=seconds,
+        model=model,
+    )
+
+
+def _normalise_job_status(status: str) -> str:
+    status_lower = (status or "").lower()
+    if status_lower in {"queued", "running", "completed", "failed"}:
+        return status_lower
+    if status_lower in {"processing", "pending", "in_progress"}:
+        return "running"
+    if status_lower in {"errored", "error"}:
+        return "failed"
+    return status_lower or "queued"
+
+
+def _parse_metadata(value: Optional[str]) -> Dict[str, Any]:
+    if not value:
+        return {}
+    try:
+        parsed = json.loads(value)
+        if isinstance(parsed, dict):
+            return parsed
+    except json.JSONDecodeError:
+        pass
+    return {"raw": value}
 
 
 class Database:
-    """Lightweight async wrapper around :mod:`aiosqlite` with migrations."""
+    """Thin proxy to the Google Sheets data access layer."""
 
-    def __init__(self, path: str) -> None:
-        self._path = Path(path)
-        self._connection: Optional[aiosqlite.Connection] = None
-        self._lock = asyncio.Lock()
+    def __init__(self, *_: Any, **__: Any) -> None:
+        """Signature kept for compatibility; configuration is read from env."""
 
-    async def connect(self) -> None:
-        if self._connection is not None:
-            return
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-        self._connection = await aiosqlite.connect(self._path.as_posix())
-        self._connection.row_factory = aiosqlite.Row
-        await self._connection.execute("PRAGMA foreign_keys = ON;")
-        await self._connection.commit()
+    async def init(self) -> None:
+        await gsheets_db.init()
 
-    async def close(self) -> None:
-        if self._connection is not None:
-            await self._connection.close()
-            self._connection = None
+    async def close(self) -> None:  # pragma: no cover - nothing to close
+        return None
 
-    async def execute(self, query: str, params: Iterable[Any] = ()) -> None:
-        if self._connection is None:
-            raise RuntimeError("Database connection has not been initialised")
-        async with self._lock:
-            await self._connection.execute(query, tuple(params))
-            await self._connection.commit()
-
-    async def executescript(self, script: str) -> None:
-        if self._connection is None:
-            raise RuntimeError("Database connection has not been initialised")
-        async with self._lock:
-            await self._connection.executescript(script)
-            await self._connection.commit()
-
-    async def fetchone(self, query: str, params: Iterable[Any] = ()) -> Optional[aiosqlite.Row]:
-        if self._connection is None:
-            raise RuntimeError("Database connection has not been initialised")
-        async with self._lock:
-            cursor = await self._connection.execute(query, tuple(params))
-            row = await cursor.fetchone()
-            await cursor.close()
-            return row
-
-    async def fetchall(self, query: str, params: Iterable[Any] = ()) -> List[aiosqlite.Row]:
-        if self._connection is None:
-            raise RuntimeError("Database connection has not been initialised")
-        async with self._lock:
-            cursor = await self._connection.execute(query, tuple(params))
-            rows = await cursor.fetchall()
-            await cursor.close()
-            return rows
-
-    async def run_migrations(self) -> None:
-        await self.connect()
-        await self.execute(
-            """
-            CREATE TABLE IF NOT EXISTS schema_migrations (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                name TEXT NOT NULL UNIQUE,
-                applied_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
-            );
-            """
-        )
-        for name, migration in MIGRATIONS:
-            row = await self.fetchone(
-                "SELECT 1 FROM schema_migrations WHERE name = ?", (name,)
-            )
-            if row:
-                continue
-            await self.executescript(migration)
-            await self.execute(
-                "INSERT INTO schema_migrations (name) VALUES (?)",
-                (name,),
-            )
-
-    # -- DAO helpers -----------------------------------------------------
+    # ------------------------------------------------------------------
+    # Users
+    # ------------------------------------------------------------------
 
     async def ensure_user(self, telegram_id: int, username: Optional[str]) -> User:
-        await self.execute(
-            "INSERT INTO users (telegram_id, username) VALUES (?, ?)"
-            " ON CONFLICT(telegram_id) DO UPDATE SET"
-            " username = excluded.username,"
-            " updated_at = CURRENT_TIMESTAMP",
-            (telegram_id, username),
-        )
-        row = await self.fetchone(
-            """
-            SELECT telegram_id, username, credits, bonus_granted, created_at, updated_at
-              FROM users
-             WHERE telegram_id = ?
-            """,
-            (telegram_id,),
-        )
-        return User(
-            telegram_id=row["telegram_id"],
-            username=row["username"],
-            credits=row["credits"],
-            bonus_granted=bool(row["bonus_granted"]),
-            created_at=datetime.fromisoformat(row["created_at"]),
-            updated_at=datetime.fromisoformat(row["updated_at"]),
-        )
+        data = await gsheets_db.get_or_create_user(telegram_id)
+        return _user_from_dict(data)
 
     async def get_user_credits(self, telegram_id: int) -> int:
-        row = await self.fetchone(
-            "SELECT credits FROM users WHERE telegram_id = ?",
-            (telegram_id,),
-        )
-        return int(row["credits"]) if row else 0
+        data = await gsheets_db.get_or_create_user(telegram_id)
+        return int(data.get("credits", 0))
 
     async def add_credits(self, telegram_id: int, amount: int) -> int:
-        await self.execute(
-            "UPDATE users SET credits = credits + ?, updated_at = CURRENT_TIMESTAMP WHERE telegram_id = ?",
-            (amount, telegram_id),
-        )
-        return await self.get_user_credits(telegram_id)
+        return await gsheets_db.add_credits(telegram_id, amount)
 
     async def deduct_credit(self, telegram_id: int, amount: int = 1) -> bool:
-        row = await self.fetchone(
-            "SELECT credits FROM users WHERE telegram_id = ?",
-            (telegram_id,),
-        )
-        if not row or row["credits"] < amount:
+        try:
+            await gsheets_db.add_credits(telegram_id, -amount)
+            return True
+        except ValueError:
             return False
-        await self.execute(
-            "UPDATE users SET credits = credits - ?, updated_at = CURRENT_TIMESTAMP WHERE telegram_id = ?",
-            (amount, telegram_id),
-        )
-        return True
 
-    async def create_job(self, job: GenerationJobRecord) -> None:
-        await self.execute(
-            """
-            INSERT INTO jobs (id, user_id, prompt, status, video_url, error)
-            VALUES (?, ?, ?, ?, ?, ?)
-            """,
-            (job.id, job.user_id, job.prompt, job.status, job.video_url, job.error),
-        )
+    async def is_bonus_granted(self, telegram_id: int) -> bool:
+        data = await gsheets_db.get_or_create_user(telegram_id)
+        return bool(data.get("bonus_granted"))
 
-    async def update_job(self, job_id: str, status: str, *, video_url: Optional[str] = None, error: Optional[str] = None) -> None:
-        await self.execute(
-            """
-            UPDATE jobs
-               SET status = ?,
-                   video_url = COALESCE(?, video_url),
-                   error = ?,
-                   updated_at = CURRENT_TIMESTAMP
-             WHERE id = ?
-            """,
-            (status, video_url, error, job_id),
-        )
+    async def mark_bonus_granted(self, telegram_id: int) -> None:
+        await gsheets_db.mark_bonus_granted(telegram_id)
 
-    async def list_pending_jobs(self, *, limit: int) -> List[GenerationJobRecord]:
-        rows = await self.fetchall(
-            """
-            SELECT id, user_id, prompt, status, video_url, error, created_at, updated_at
-              FROM jobs
-             WHERE status IN ('queued', 'processing')
-             ORDER BY created_at ASC
-             LIMIT ?
-            """,
-            (limit,),
-        )
-        return [
-            GenerationJobRecord(
-                id=row["id"],
-                user_id=row["user_id"],
-                prompt=row["prompt"],
-                status=row["status"],
-                video_url=row["video_url"],
-                error=row["error"],
-                created_at=datetime.fromisoformat(row["created_at"]),
-                updated_at=datetime.fromisoformat(row["updated_at"]),
-            )
-            for row in rows
-        ]
+    async def count_active_jobs(self, user_id: int) -> int:
+        return await gsheets_db.count_jobs_by_status(user_id, ("queued", "running"))
+
+    # ------------------------------------------------------------------
+    # Payments
+    # ------------------------------------------------------------------
 
     async def record_payment(
         self,
@@ -303,33 +165,19 @@ class Database:
         amount: int,
         credits_added: int,
     ) -> None:
-        await self.execute(
-            """
-            INSERT INTO payments (
-                user_id,
-                provider_payment_charge_id,
-                telegram_payment_charge_id,
-                amount,
-                credits_added,
-                provider,
-                ext_id,
-                items,
-                status,
-                metadata
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                user_id,
-                provider_payment_charge_id,
-                telegram_payment_charge_id,
-                amount,
-                credits_added,
-                "stars",
-                provider_payment_charge_id,
-                credits_added,
-                "succeeded",
-                "{}",
-            ),
+        metadata = {
+            "telegram_payment_charge_id": telegram_payment_charge_id,
+            "credits_added": credits_added,
+        }
+        await gsheets_db.create_payment_record(
+            "stars",
+            provider_payment_charge_id,
+            user_id,
+            amount,
+            credits_added,
+            "succeeded",
+            payload=telegram_payment_charge_id,
+            metadata=metadata,
         )
 
     async def create_payment_record(
@@ -342,34 +190,16 @@ class Database:
         status: str,
         payload: str,
     ) -> None:
-        payload_str = payload or "{}"
-        await self.execute(
-            """
-            INSERT INTO payments (
-                user_id,
-                provider_payment_charge_id,
-                telegram_payment_charge_id,
-                amount,
-                credits_added,
-                provider,
-                ext_id,
-                items,
-                status,
-                metadata
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                user_id,
-                "",
-                "",
-                amount_cp,
-                0,
-                provider,
-                ext_id,
-                items,
-                status,
-                payload_str,
-            ),
+        metadata = _parse_metadata(payload)
+        await gsheets_db.create_payment_record(
+            provider,
+            ext_id,
+            user_id,
+            amount_cp,
+            items,
+            status,
+            payload=payload,
+            metadata=metadata,
         )
 
     async def update_payment_status_by_ext(
@@ -381,56 +211,23 @@ class Database:
         credits_added: Optional[int] = None,
         metadata: Optional[str] = None,
     ) -> None:
-        assignments = ["status = ?"]
-        params: List[Any] = [status]
-        if credits_added is not None:
-            assignments.append("credits_added = ?")
-            params.append(credits_added)
+        record = await gsheets_db.get_payment_by_ext(provider, ext_id)
+        existing_metadata = _parse_metadata(record.get("metadata") if record else None)
         if metadata is not None:
-            assignments.append("metadata = ?")
-            params.append(metadata or "{}")
-        params.extend([provider, ext_id])
-        await self.execute(
-            f"UPDATE payments SET {', '.join(assignments)} WHERE provider = ? AND ext_id = ?",
-            params,
+            incoming = _parse_metadata(metadata)
+            existing_metadata.update(incoming)
+        if credits_added is not None:
+            existing_metadata["credits_added"] = credits_added
+        metadata_str = json.dumps(existing_metadata) if existing_metadata else ""
+        await gsheets_db.update_payment_status_by_ext(
+            provider,
+            ext_id,
+            status,
+            metadata=metadata_str,
         )
 
     async def get_payment_by_ext(self, provider: str, ext_id: str) -> Optional[Dict[str, Any]]:
-        row = await self.fetchone(
-            """
-            SELECT id,
-                   user_id,
-                   provider_payment_charge_id,
-                   telegram_payment_charge_id,
-                   amount,
-                   credits_added,
-                   provider,
-                   ext_id,
-                   items,
-                   status,
-                   metadata,
-                   created_at
-              FROM payments
-             WHERE provider = ? AND ext_id = ?
-            """,
-            (provider, ext_id),
-        )
-        if not row:
-            return None
-        return {
-            "id": row["id"],
-            "user_id": row["user_id"],
-            "provider_payment_charge_id": row["provider_payment_charge_id"],
-            "telegram_payment_charge_id": row["telegram_payment_charge_id"],
-            "amount": row["amount"],
-            "credits_added": row["credits_added"],
-            "provider": row["provider"],
-            "ext_id": row["ext_id"],
-            "items": row["items"],
-            "status": row["status"],
-            "metadata": row["metadata"],
-            "created_at": row["created_at"],
-        }
+        return await gsheets_db.get_payment_by_ext(provider, ext_id)
 
     async def list_payments_by_status(
         self,
@@ -439,164 +236,56 @@ class Database:
         statuses: Iterable[str],
         limit: int = 50,
     ) -> List[Dict[str, Any]]:
-        status_list = list(statuses)
-        if not status_list:
-            return []
-        placeholders = ",".join("?" for _ in status_list)
-        params: List[Any] = [provider, *status_list, limit]
-        rows = await self.fetchall(
-            f"""
-            SELECT id,
-                   user_id,
-                   provider_payment_charge_id,
-                   telegram_payment_charge_id,
-                   amount,
-                   credits_added,
-                   provider,
-                   ext_id,
-                   items,
-                   status,
-                   metadata,
-                   created_at
-              FROM payments
-             WHERE provider = ? AND status IN ({placeholders})
-             ORDER BY created_at ASC
-             LIMIT ?
-            """,
-            params,
-        )
-        return [
-            {
-                "id": row["id"],
-                "user_id": row["user_id"],
-                "provider_payment_charge_id": row["provider_payment_charge_id"],
-                "telegram_payment_charge_id": row["telegram_payment_charge_id"],
-                "amount": row["amount"],
-                "credits_added": row["credits_added"],
-                "provider": row["provider"],
-                "ext_id": row["ext_id"],
-                "items": row["items"],
-                "status": row["status"],
-                "metadata": row["metadata"],
-                "created_at": row["created_at"],
-            }
-            for row in rows
-        ]
+        return await gsheets_db.list_payments_by_status(provider=provider, statuses=statuses, limit=limit)
 
     async def get_payment_by_order_id(self, provider: str, order_id: str) -> Optional[Dict[str, Any]]:
-        try:
-            row = await self.fetchone(
-                """
-                SELECT id,
-                       user_id,
-                       provider_payment_charge_id,
-                       telegram_payment_charge_id,
-                       amount,
-                       credits_added,
-                       provider,
-                       ext_id,
-                       items,
-                       status,
-                       metadata,
-                       created_at
-                  FROM payments
-                 WHERE provider = ? AND json_extract(metadata, '$.idemp') = ?
-                """,
-                (provider, order_id),
-            )
-        except aiosqlite.OperationalError:
-            # Fallback when JSON1 extension is unavailable: scan in Python.
-            rows = await self.fetchall(
-                """
-                SELECT id,
-                       user_id,
-                       provider_payment_charge_id,
-                       telegram_payment_charge_id,
-                       amount,
-                       credits_added,
-                       provider,
-                       ext_id,
-                       items,
-                       status,
-                       metadata,
-                       created_at
-                  FROM payments
-                 WHERE provider = ?
-                """,
-                (provider,),
-            )
-            for candidate in rows:
-                metadata = candidate["metadata"]
-                if not metadata:
-                    continue
-                try:
-                    payload = json.loads(metadata)
-                except json.JSONDecodeError:
-                    continue
-                if payload.get("idemp") == order_id or payload.get("order_id") == order_id:
-                    row = candidate
-                    break
-            else:
-                row = None
-        if not row:
-            return None
-        return {
-            "id": row["id"],
-            "user_id": row["user_id"],
-            "provider_payment_charge_id": row["provider_payment_charge_id"],
-            "telegram_payment_charge_id": row["telegram_payment_charge_id"],
-            "amount": row["amount"],
-            "credits_added": row["credits_added"],
-            "provider": row["provider"],
-            "ext_id": row["ext_id"],
-            "items": row["items"],
-            "status": row["status"],
-            "metadata": row["metadata"],
-            "created_at": row["created_at"],
-        }
+        return await gsheets_db.get_payment_by_order_id(provider, order_id)
 
-    async def is_bonus_granted(self, telegram_id: int) -> bool:
-        row = await self.fetchone(
-            "SELECT bonus_granted FROM users WHERE telegram_id = ?",
-            (telegram_id,),
-        )
-        return bool(row and row["bonus_granted"])
+    # ------------------------------------------------------------------
+    # Jobs
+    # ------------------------------------------------------------------
 
-    async def mark_bonus_granted(self, telegram_id: int) -> None:
-        await self.execute(
-            "UPDATE users SET bonus_granted = 1, updated_at = CURRENT_TIMESTAMP WHERE telegram_id = ?",
-            (telegram_id,),
+    async def create_job(self, job: GenerationJobRecord) -> None:
+        await gsheets_db.create_job(
+            job.id,
+            job.user_id,
+            job.prompt,
+            job.image_file_id,
+            job.size or "",
+            job.seconds or 0,
+            job.model or "",
         )
 
-    async def count_active_jobs(self, user_id: int) -> int:
-        row = await self.fetchone(
-            "SELECT COUNT(*) AS count FROM jobs WHERE user_id = ? AND status IN ('queued', 'processing')",
-            (user_id,),
-        )
-        return int(row["count"]) if row else 0
+    async def update_job(
+        self,
+        job_id: str,
+        status: str,
+        *,
+        video_url: Optional[str] = None,
+        error: Optional[str] = None,
+    ) -> None:
+        normalised_status = _normalise_job_status(status)
+        updates: Dict[str, Any] = {}
+        if video_url is not None:
+            updates["video_url"] = video_url
+        if error is not None:
+            updates["error"] = error
+        await gsheets_db.update_job_status(job_id, normalised_status, **updates)
+
+    async def list_pending_jobs(self, *, limit: int) -> List[GenerationJobRecord]:
+        jobs = await gsheets_db.list_jobs_by_status(["queued", "running"])
+        pending = [_job_from_dict(job) for job in jobs]
+        return pending[:limit]
 
     async def get_job(self, job_id: str) -> Optional[GenerationJobRecord]:
-        row = await self.fetchone(
-            "SELECT id, user_id, prompt, status, video_url, error, created_at, updated_at FROM jobs WHERE id = ?",
-            (job_id,),
-        )
-        if not row:
+        data = await gsheets_db.get_job(job_id)
+        if not data:
             return None
-        return GenerationJobRecord(
-            id=row["id"],
-            user_id=row["user_id"],
-            prompt=row["prompt"],
-            status=row["status"],
-            video_url=row["video_url"],
-            error=row["error"],
-            created_at=datetime.fromisoformat(row["created_at"]),
-            updated_at=datetime.fromisoformat(row["updated_at"]),
-        )
+        return _job_from_dict(data)
 
 
 __all__ = [
     "Database",
     "User",
     "GenerationJobRecord",
-    "Payment",
 ]
