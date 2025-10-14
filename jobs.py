@@ -73,7 +73,10 @@ class JobQueue:
         model: str,
         image_file_id: Optional[str] = None,
     ) -> GenerationJobRecord:
-        settings = {"size": size, "model": model}
+        forced_model = self._config.sora_model
+        if model != forced_model:
+            log.debug("Ignoring requested model %s; using %s", model, forced_model)
+        settings = {"size": size, "model": forced_model}
         if image_file_id:
             settings["image_file_id"] = image_file_id
         job_id = await self._sora_client.submit_job(prompt=prompt, settings=settings)
@@ -89,7 +92,7 @@ class JobQueue:
             updated_at=now,
             image_file_id=image_file_id,
             size=size,
-            model=model,
+            model=forced_model,
         )
         await self._db.create_job(record)
         await self.enqueue(job_id=job_id, user_id=user_id, prompt=prompt)

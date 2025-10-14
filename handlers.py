@@ -5,6 +5,7 @@ import asyncio
 import logging
 import time
 from dataclasses import dataclass, field
+import re
 from typing import Dict, Literal, Optional, Tuple
 
 from aiogram import Bot, Dispatcher
@@ -34,19 +35,9 @@ SIZE_OPTIONS: Dict[str, str] = {
     "horizontal": "1280x720",
 }
 
-MODEL_OPTIONS: Dict[str, str] = {
-    "sora2": "Sora-2",
-    "sora2pro": "Sora-2 Pro",
-}
-
 SIZE_LABEL_KEYS: Dict[str, str] = {
     "vertical": "chips.vertical",
     "horizontal": "chips.horizontal",
-}
-
-MODEL_LABEL_KEYS: Dict[str, str] = {
-    "sora2": "chips.model_basic",
-    "sora2pro": "chips.model_pro",
 }
 
 PAYMENT_PACKAGES: Tuple[Tuple[int, str], ...] = (
@@ -59,10 +50,14 @@ PAYMENT_PACKAGES: Tuple[Tuple[int, str], ...] = (
 MAIN_MENU_BUTTONS = {
     i18n.t("buttons.generate_text"),
     i18n.t("buttons.generate_photo"),
-    i18n.t("buttons.choose_model"),
     i18n.t("buttons.top_up"),
     i18n.t("buttons.help"),
 }
+
+_PRO_REQUEST_PATTERN = re.compile(
+    r"\b(?:sora(?:[-\s]?2)?[-\s]*pro|sora2pro|model\s*[:=]?\s*pro|pro-?версия|pro version)\b",
+    re.IGNORECASE,
+)
 
 
 class GenerationStates(StatesGroup):
@@ -93,7 +88,6 @@ class UserSession:
     """Transient per-user settings and cached context."""
 
     last_size: str = SIZE_OPTIONS["horizontal"]
-    last_model: str = MODEL_OPTIONS["sora2"]
     pending_order: Optional[OrderContext] = None
     awaiting_payment: bool = False
     last_launch_key: Optional[str] = None
@@ -118,10 +112,7 @@ def _main_keyboard() -> ReplyKeyboardMarkup:
         keyboard=[
             [KeyboardButton(text=i18n.t("buttons.generate_text"))],
             [KeyboardButton(text=i18n.t("buttons.generate_photo"))],
-            [
-                KeyboardButton(text=i18n.t("buttons.choose_model")),
-                KeyboardButton(text=i18n.t("buttons.top_up")),
-            ],
+            [KeyboardButton(text=i18n.t("buttons.top_up"))],
             [KeyboardButton(text=i18n.t("buttons.help"))],
         ],
         resize_keyboard=True,
@@ -133,32 +124,17 @@ def _mark_selected(label: str, selected: bool) -> str:
 
 
 def _build_options_keyboard(session: UserSession, context: str) -> InlineKeyboardMarkup:
-    rows: list[list[InlineKeyboardButton]] = []
-    include_size = context in {"text", "photo"}
-    if include_size:
-        size_row = []
-        for token, value in SIZE_OPTIONS.items():
-            label_key = SIZE_LABEL_KEYS[token]
-            label = i18n.t(label_key)
-            size_row.append(
-                InlineKeyboardButton(
-                    text=_mark_selected(label, session.last_size == value),
-                    callback_data=f"opt:size:{context}:{token}",
-                )
-            )
-        rows.append(size_row)
-    model_row = []
-    for token, value in MODEL_OPTIONS.items():
-        label_key = MODEL_LABEL_KEYS[token]
+    size_row = []
+    for token, value in SIZE_OPTIONS.items():
+        label_key = SIZE_LABEL_KEYS[token]
         label = i18n.t(label_key)
-        model_row.append(
+        size_row.append(
             InlineKeyboardButton(
-                text=_mark_selected(label, session.last_model == value),
-                callback_data=f"opt:model:{context}:{token}",
+                text=_mark_selected(label, session.last_size == value),
+                callback_data=f"opt:size:{context}:{token}",
             )
         )
-    rows.append(model_row)
-    return InlineKeyboardMarkup(inline_keyboard=rows)
+    return InlineKeyboardMarkup(inline_keyboard=[size_row])
 
 
 def _build_confirmation_keyboard(*, can_launch: bool, include_back: bool = True) -> InlineKeyboardMarkup:
@@ -198,6 +174,7 @@ def _create_order(
     *,
     flow: Literal["text", "photo"],
     prompt: str,
+    config: Config,
     session: UserSession,
     image_file_id: Optional[str] = None,
 ) -> OrderContext:
@@ -205,21 +182,43 @@ def _create_order(
         flow=flow,
         prompt=prompt,
         size=session.last_size,
-        model=session.last_model,
+        model=config.sora_model,
         image_file_id=image_file_id,
     )
 
 
+def _detect_pro_request(text: Optional[str]) -> bool:
+    if not text:
+        return False
+    normalised = text.strip().lower()
+    if normalised in {"pro", "pro-версия", "pro версия", "pro version"}:
+        return True
+    return bool(_PRO_REQUEST_PATTERN.search(text))
+
+
+_MODEL_DIRECTIVE_PATTERN = re.compile(
+    r"model\s*(?:[:=]\s*)?(?:sora(?:[-\s]?2)?[-\s]*pro|sora2pro|pro)",
+    re.IGNORECASE,
+)
+_MODEL_NAME_PATTERN = re.compile(r"sora(?:[-\s]?2)?[-\s]*pro", re.IGNORECASE)
+
+
+def _strip_pro_directives(text: str) -> str:
+    cleaned = _MODEL_DIRECTIVE_PATTERN.sub("", text)
+    cleaned = _MODEL_NAME_PATTERN.sub("", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned)
+    return cleaned.strip()
+
+
+async def _notify_pro_unavailable(message: Message) -> None:
+    await message.answer(i18n.t("errors.pro_unavailable"))
+
+
 async def _send_options_prompt(message: Message, *, session: UserSession, context: str) -> None:
     if context == "photo":
-        body = i18n.t("flow.photo.prompt", size=session.last_size, model=session.last_model)
-    elif context == "model":
-        body = (
-            f"{i18n.t('model.prompt')}\n"
-            f"{i18n.t('model.current', model=session.last_model)}"
-        )
+        body = i18n.t("flow.photo.prompt", size=session.last_size)
     else:
-        body = i18n.t("flow.text.prompt", size=session.last_size, model=session.last_model)
+        body = i18n.t("flow.text.prompt", size=session.last_size)
     await message.answer(body, reply_markup=_build_options_keyboard(session, context))
 
 
@@ -239,7 +238,6 @@ async def _send_order_confirmation(
             "flow.confirm.photo",
             prompt=prompt_text,
             size=order.size,
-            model=order.model,
             price=price_text,
         )
     else:
@@ -247,7 +245,6 @@ async def _send_order_confirmation(
             "flow.confirm.text",
             prompt=prompt_text,
             size=order.size,
-            model=order.model,
             price=price_text,
         )
     keyboard = _build_confirmation_keyboard(can_launch=can_launch, include_back=include_back)
@@ -425,13 +422,6 @@ async def generate_photo_menu(message: Message, db: Database, state: FSMContext)
     await _send_options_prompt(message, session=session, context="photo")
 
 
-async def choose_model_menu(message: Message, db: Database, state: FSMContext) -> None:
-    await state.finish()
-    user_id = await _ensure_user(message, db)
-    session = SESSION_MANAGER.get(user_id)
-    await _send_options_prompt(message, session=session, context="model")
-
-
 async def help_button(message: Message, db: Database, state: FSMContext) -> None:
     await help_command(message, db, state)
 
@@ -450,12 +440,16 @@ async def handle_text_input(
 ) -> None:
     user_id = await _ensure_user(message, db)
     session = SESSION_MANAGER.get(user_id)
-    prompt = (message.text or "").strip()
+    raw_prompt = (message.text or "").strip()
+    prompt = raw_prompt
+    if _detect_pro_request(raw_prompt):
+        await _notify_pro_unavailable(message)
+        prompt = _strip_pro_directives(raw_prompt)
     if not prompt:
         await message.answer(i18n.t("flow.no_prompt"))
         return
     await state.finish()
-    order = _create_order(flow="text", prompt=prompt, session=session)
+    order = _create_order(flow="text", prompt=prompt, config=config, session=session)
     await _show_confirmation_and_balance(
         message=message,
         order=order,
@@ -477,10 +471,15 @@ async def handle_photo_input(
         await _send_options_prompt(message, session=session, context="photo")
         return
     largest = max(message.photo, key=lambda item: item.file_size or 0)
-    caption = (message.caption or "").strip()
+    raw_caption = (message.caption or "").strip()
+    caption = raw_caption
+    if _detect_pro_request(raw_caption):
+        await _notify_pro_unavailable(message)
+        caption = _strip_pro_directives(raw_caption)
     order = _create_order(
         flow="photo",
         prompt=caption,
+        config=config,
         session=session,
         image_file_id=largest.file_id,
     )
@@ -509,23 +508,14 @@ async def option_callback_handler(callback: CallbackQuery, state: FSMContext) ->
         value = SIZE_OPTIONS.get(token)
         if value:
             session.last_size = value
-    elif option_type == "model":
-        value = MODEL_OPTIONS.get(token)
-        if value:
-            session.last_model = value
     await callback.answer()
     try:
+        if context == "photo":
+            body = i18n.t("flow.photo.prompt", size=session.last_size)
+        else:
+            body = i18n.t("flow.text.prompt", size=session.last_size)
         await callback.message.edit_text(
-            (
-                i18n.t("flow.text.prompt", size=session.last_size, model=session.last_model)
-                if context == "text"
-                else i18n.t("flow.photo.prompt", size=session.last_size, model=session.last_model)
-                if context == "photo"
-                else (
-                    f"{i18n.t('model.prompt')}\n"
-                    f"{i18n.t('model.current', model=session.last_model)}"
-                )
-            ),
+            body,
             reply_markup=_build_options_keyboard(session, context),
         )
     except Exception:  # pragma: no cover - Telegram may block edits on old messages
@@ -736,6 +726,11 @@ def register_handlers(
         state="*",
     )
     dp.register_message_handler(
+        lambda message, state: _notify_pro_unavailable(message),
+        Command("pro"),
+        state="*",
+    )
+    dp.register_message_handler(
         lambda message, state: top_up_menu(message, db, state, config),
         Command("buy_card"),
         state="*",
@@ -748,11 +743,6 @@ def register_handlers(
     dp.register_message_handler(
         lambda message, state: generate_photo_menu(message, db, state),
         lambda message: message.text == i18n.t("buttons.generate_photo"),
-        state="*",
-    )
-    dp.register_message_handler(
-        lambda message, state: choose_model_menu(message, db, state),
-        lambda message: message.text == i18n.t("buttons.choose_model"),
         state="*",
     )
     dp.register_message_handler(
