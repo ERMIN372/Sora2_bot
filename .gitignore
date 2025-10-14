@@ -209,7 +209,8 @@ __marimo__/
 # env и секреты
 .env
 *.env
-.env.* 
+.env.*
+!.env.example
 # виртуалки и IDE
 .venv/
 venv/
