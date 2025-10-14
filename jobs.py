@@ -113,7 +113,7 @@ class JobQueue:
 
     async def _process_job(self, pending: PendingJob) -> None:
         log.info("Processing job %s", pending.job_id)
-        await self._db.update_job(pending.job_id, "processing")
+        await self._db.update_job(pending.job_id, "running")
         try:
             try:
                 result = await self._sora_client.fetch_job(pending.job_id)
@@ -137,7 +137,7 @@ class JobQueue:
                 )
                 await self._db.add_credits(pending.user_id, self._config.credits_per_generation)
             else:
-                # Job still processing - requeue for later polling
+                # Job still running - requeue for later polling
                 await self._db.update_job(pending.job_id, result.status)
                 await asyncio.sleep(3)
                 await self.enqueue(job_id=pending.job_id, user_id=pending.user_id, prompt=pending.prompt)
