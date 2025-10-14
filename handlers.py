@@ -7,12 +7,11 @@ import time
 from dataclasses import dataclass, field
 from typing import Dict, Literal, Optional, Tuple
 
-from aiogram import Dispatcher
+from aiogram import Bot, Dispatcher
 from aiogram.dispatcher import FSMContext
 from aiogram.dispatcher.filters import Command, CommandStart
 from aiogram.dispatcher.filters.state import State, StatesGroup
 from aiogram.types import (
-    Bot,
     CallbackQuery,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
