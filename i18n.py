@@ -99,12 +99,11 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
             "Параметры: <code>size=1280x720</code>"
         ),
         "help.main": (
-            "Используйте кнопки меню, чтобы выбрать режим генерации, модель или пополнить баланс.\n"
+            "Используйте кнопки меню, чтобы выбрать режим генерации или пополнить баланс.\n"
             "Можете также просто описать желаемый ролик текстом."
         ),
         "buttons.generate_text": "🎬 Сгенерировать по тексту",
         "buttons.generate_photo": "🖼️ Сгенерировать по фото",
-        "buttons.choose_model": "🧠 Выбрать модель",
         "buttons.top_up": "💳 Пополнить баланс",
         "buttons.help": "ℹ️ Помощь",
         "buttons.launch": "🚀 Запустить",
@@ -114,36 +113,29 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "buttons.payment_open": "💳 Перейти к оплате",
         "chips.vertical": "Вертикаль",
         "chips.horizontal": "Горизонталь",
-        "chips.model_basic": "Sora-2",
-        "chips.model_pro": "Sora-2 Pro",
         "flow.text.prompt": (
-            "Опишите, что нужно создать. Текущий кадр: {size}. Модель: {model}.\n"
+            "Опишите, что нужно создать. Текущий кадр: {size}. Модель: Sora-2.\n"
             "Используйте подсказки ниже или пришлите описание."
         ),
         "flow.photo.prompt": (
             "Пришлите фото и, при желании, подпись-промпт.\n"
-            "Текущий кадр: {size}. Модель: {model}."
+            "Текущий кадр: {size}. Модель: Sora-2."
         ),
         "flow.confirm.text": (
             "✍️ Запрос: {prompt}\n"
-            "🎛 Кадр: {size} · Модель: {model}\n"
+            "🎛 Кадр: {size} · Модель: Sora-2\n"
             "Стоимость: {price}"
         ),
         "flow.confirm.photo": (
             "📎 Референс принят.\n"
             "✍️ Запрос: {prompt}\n"
-            "🎛 Кадр: {size} · Модель: {model}\n"
+            "🎛 Кадр: {size} · Модель: Sora-2\n"
             "Стоимость: {price}"
         ),
         "flow.no_prompt": "Добавьте описание. Пример: <code>кот идёт по неону, киберпанк</code>",
         "flow.order_submitted": "🧾 Заказ принят. Место в очереди: {queue_pos}. Пришлём видео сюда.",
         "flow.duplicate": "Задача уже в очереди.",
         "flow.not_enough": "Недостаточно кредитов. Выберите пакет ниже.",
-        "model.prompt": (
-            "Sora-2 — базовая модель. Sora-2 Pro — расширенные возможности и качество.\n"
-            "Выберите модель ниже."
-        ),
-        "model.current": "Текущая модель: {model}.",
         "status.running": "⚙️ Генерирую…",
         "status.completed_file": "✅ Готово. Отправляю ролик.",
         "status.completed_url": "Готово: {url}",
@@ -169,6 +161,7 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "web.return.success": "<h1>Оплата принята</h1><p>Спасибо за покупку!</p>",
         "web.return.canceled": "<h1>Оплата отменена</h1><p>Средства не списаны.</p>",
         "web.return.pending": "<h1>Платёж обрабатывается</h1><p>Проверьте баланс позже.</p>",
+        "errors.pro_unavailable": "Pro-версия недоступна. Используется Sora-2.",
     }
 }
 

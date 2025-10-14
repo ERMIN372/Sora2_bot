@@ -4,6 +4,7 @@ from __future__ import annotations
 import base64
 import binascii
 import json
+import logging
 import os
 from dataclasses import dataclass, field
 from typing import Dict, Optional
@@ -11,6 +12,8 @@ from typing import Dict, Optional
 from dotenv import load_dotenv
 
 load_dotenv()
+
+log = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -25,6 +28,7 @@ class Config:
     bot_token: str
     sora_api_key: str
     sora_api_url: str = "https://api.sora.ai/v1"
+    sora_model: str = "sora-2"
     database_path: str = "./bot.db"
     jobs_concurrency: int = 2
     max_jobs_per_user: int = 3
@@ -129,6 +133,10 @@ def load_config() -> Config:
         )
 
     sora_api_url = os.getenv("SORA_API_URL", Config.sora_api_url)
+    raw_model = os.getenv("SORA_MODEL", Config.sora_model)
+    if (raw_model or "").strip().lower() != "sora-2":
+        log.warning("Unsupported SORA_MODEL value %r; forcing 'sora-2'", raw_model)
+    sora_model = Config.sora_model
     database_path = os.getenv("DATABASE_PATH", Config.database_path)
     google_sheet_id = os.getenv("GOOGLE_SHEET_ID")
     if not google_sheet_id:
@@ -148,6 +156,7 @@ def load_config() -> Config:
         gs_users_sheet=users_sheet,
         gs_payments_sheet=payments_sheet,
         gs_jobs_sheet=jobs_sheet,
+        sora_model=sora_model,
         jobs_concurrency=_get_env_int("JOBS_CONCURRENCY", Config.jobs_concurrency),
         max_jobs_per_user=_get_env_int("MAX_JOBS_PER_USER", Config.max_jobs_per_user),
         credits_per_payment=_get_env_int("CREDITS_PER_PAYMENT", Config.credits_per_payment),
