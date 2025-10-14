@@ -17,6 +17,7 @@ from starlette.types import ASGIApp
 from config import CFG, Config
 from db import Database
 from utils import check_subscription
+from i18n import i18n
 import yookassa_client
 
 log = logging.getLogger(__name__)
@@ -113,8 +114,8 @@ class YooKassaProcessor:
                 credits_added=items_int,
                 metadata=metadata_str,
             )
-            await self._grant_bonus_if_applicable(user_id_int)
-            await self._notify_success(user_id_int, items_int)
+            bonus_status = await self._grant_bonus_if_applicable(user_id_int)
+            await self._notify_success(user_id_int, items_int, bonus_status)
         elif status in {"pending", "waiting_for_capture", "canceled"}:
             await self._db.update_payment_status_by_ext(
                 "yookassa",
@@ -148,22 +149,30 @@ class YooKassaProcessor:
                 continue
             await self.process_payment(payment, source="poller")
 
-    async def _notify_success(self, user_id: int, items: int) -> None:
-        if items <= 0:
-            return
+    async def _notify_success(
+        self, user_id: int, items: int, bonus_status: Optional[str]
+    ) -> None:
         try:
-            await self._bot.send_message(
-                user_id, f"Зачислено {items} кредитов. Спасибо!"
-            )
+            if items > 0:
+                await self._bot.send_message(
+                    user_id,
+                    i18n.t("payment.yookassa.received", credits=items),
+                )
+            if bonus_status == "granted":
+                await self._bot.send_message(user_id, i18n.t("bonus.granted"))
+            elif bonus_status == "already":
+                await self._bot.send_message(user_id, i18n.t("bonus.already"))
         except Exception:  # pragma: no cover - Telegram API interaction
             log.exception("Failed to notify user %s about YooKassa success", user_id)
 
-    async def _grant_bonus_if_applicable(self, user_id: int) -> None:
+    async def _grant_bonus_if_applicable(self, user_id: int) -> Optional[str]:
         if await self._db.is_bonus_granted(user_id):
-            return
+            return "already"
         if await check_subscription(self._bot, user_id, self._config):
             await self._db.add_credits(user_id, 2)
             await self._db.mark_bonus_granted(user_id)
+            return "granted"
+        return None
 
     def _extract_metadata(self, payment) -> dict:
         metadata = getattr(payment, "metadata", None) or {}
@@ -262,20 +271,20 @@ def _yookassa_router(
     @router.get(config.yookassa_return_path)
     async def return_page(order_id: Optional[str] = None) -> HTMLResponse:
         if processor is None:
-            return HTMLResponse("<h1>Сервис временно недоступен</h1>", status_code=503)
+            return HTMLResponse(i18n.t("web.return.unavailable"), status_code=503)
         if not order_id:
-            return HTMLResponse("<h1>Платёж не найден</h1>", status_code=400)
+            return HTMLResponse(i18n.t("web.return.not_found"), status_code=400)
         record = await processor.get_payment_by_order_id(order_id)
         if not record:
-            body = "<h1>Платёж не найден</h1>"
+            body = i18n.t("web.return.not_found")
         else:
             status = record.get("status", "pending")
             if status == "succeeded":
-                body = "<h1>Оплата принята</h1><p>Спасибо за покупку!</p>"
+                body = i18n.t("web.return.success")
             elif status == "canceled":
-                body = "<h1>Оплата отменена</h1><p>Средства не списаны.</p>"
+                body = i18n.t("web.return.canceled")
             else:
-                body = "<h1>Платёж обрабатывается</h1><p>Проверьте баланс позже.</p>"
+                body = i18n.t("web.return.pending")
         return HTMLResponse(body)
 
     return router
