@@ -5,6 +5,10 @@ import asyncio
 import logging
 from typing import Awaitable, Callable, TypeVar
 
+from aiogram import Bot
+
+from config import Config
+
 
 T = TypeVar("T")
 log = logging.getLogger(__name__)
@@ -51,3 +55,20 @@ async def run_cancellable(task: Awaitable[T]) -> T:
 
 
 __all__ = ["async_retry", "run_cancellable"]
+
+
+async def check_subscription(bot: Bot, user_id: int, config: Config) -> bool:
+    """Check whether *user_id* is a member of the configured subscription chat."""
+
+    chat_id = config.subscription_chat_id
+    if not chat_id:
+        return False
+    try:
+        member = await bot.get_chat_member(chat_id, user_id)
+    except Exception:  # pragma: no cover - Telegram API interaction
+        log.warning("Failed to verify subscription for user %s", user_id, exc_info=True)
+        return False
+    return member.status in {"creator", "administrator", "member"}
+
+
+__all__.append("check_subscription")

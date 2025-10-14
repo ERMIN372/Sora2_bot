@@ -8,6 +8,7 @@ from aiogram.types import Message
 
 from config import Config
 from db import Database
+from utils import check_subscription
 
 
 @dataclass
@@ -50,6 +51,11 @@ class TelegramStarPaymentProcessor:
             amount=successful_payment.total_amount,
             credits_added=credits_added,
         )
+
+        if not await self._db.is_bonus_granted(user.id):
+            if await check_subscription(message.bot, user.id, self._config):
+                await self._db.add_credits(user.id, 2)
+                await self._db.mark_bonus_granted(user.id)
 
         return PaymentResult(
             user_id=user.id,
