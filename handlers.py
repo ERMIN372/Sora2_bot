@@ -16,51 +16,55 @@ from jobs import JobQueue
 from payments_stars import TelegramStarPaymentProcessor
 import yookassa_client
 
+from i18n import format_prompt, i18n
+
 log = logging.getLogger(__name__)
 
 
 async def _send_job_update(dp: Dispatcher, job: GenerationJobRecord) -> None:
     try:
-        await dp.bot.send_message(
-            job.user_id,
-            _format_job_message(job),
-        )
+        await dp.bot.send_message(job.user_id, _format_job_message(job))
     except Exception:  # pragma: no cover - external dependency
         log.exception("Failed to send job update to %s", job.user_id)
 
 
 def _format_job_message(job: GenerationJobRecord) -> str:
-    if job.status == "completed" and job.video_url:
-        return (
-            "🎉 Your video is ready!\n"
-            f"Prompt: {job.prompt}\n"
-            f"Download: {job.video_url}"
-        )
+    if job.status == "completed":
+        prompt = format_prompt(job.prompt)
+        if job.video_url:
+            return i18n.t("job.completed_with_url", url=job.video_url, prompt=prompt)
+        return i18n.t("job.completed_no_url", prompt=prompt)
     if job.status == "failed":
-        return (
-            "⚠️ Video generation failed. Your credit has been refunded.\n"
-            f"Reason: {job.error or 'Unknown'}"
-        )
-    return f"⏳ Job {job.id} is {job.status}."
+        return i18n.t("job.failed", error=job.error or i18n.t("errors.unknown"))
+    if job.status == "running":
+        return i18n.t("job.status.running")
+    if job.status == "queued":
+        return i18n.t("job.status.queued")
+    return i18n.t(
+        "job.status.generic",
+        job_id=job.id,
+        status=job.status or i18n.t("errors.unknown"),
+    )
 
 
 async def start_command(message: Message, db: Database) -> None:
     await db.ensure_user(message.from_user.id, message.from_user.username)
-    await message.answer(
-        "👋 Welcome to the Sora bot!\n"
-        "Use /generate <prompt> to create a video once you have credits."
-    )
+    await message.answer(i18n.t("start.welcome"))
 
 
 async def balance_command(message: Message, db: Database) -> None:
     credits = await db.get_user_credits(message.from_user.id)
-    await message.answer(f"You have {credits} credits available.")
+    bonus_granted = await db.is_bonus_granted(message.from_user.id)
+    bonus_status = (
+        i18n.t("bonus.status.received") if bonus_granted else i18n.t("bonus.status.not_received")
+    )
+    await message.answer(i18n.t("balance.info", credits=credits, bonus_status=bonus_status))
 
 
 async def generate_command(message: Message, *, db: Database, config: Config, job_queue: JobQueue) -> None:
     prompt = _extract_prompt(message.text)
     if not prompt:
-        await message.answer("Please provide a prompt: /generate <prompt>")
+        await message.answer(i18n.t("generate.prompt_required"))
         return
 
     user_id = message.from_user.id
@@ -68,23 +72,23 @@ async def generate_command(message: Message, *, db: Database, config: Config, jo
 
     active_jobs = await db.count_active_jobs(user_id)
     if active_jobs >= config.max_jobs_per_user:
-        await message.answer("You have too many pending jobs. Please wait for them to finish.")
-        return
-
-    if not await db.deduct_credit(user_id, config.credits_per_generation):
         await message.answer(
-            "You do not have enough credits. Purchase more using Telegram Stars or /buy_card."
+            i18n.t("generate.too_many_jobs", limit=config.max_jobs_per_user)
         )
         return
 
-    await message.answer("Your prompt has been queued. I'll let you know when it's done!")
+    if not await db.deduct_credit(user_id, config.credits_per_generation):
+        await message.answer(i18n.t("generate.not_enough_credits"))
+        return
+
+    await message.answer(i18n.t("generate.queued", prompt=format_prompt(prompt)))
 
     try:
         await job_queue.submit(user_id=user_id, prompt=prompt)
     except Exception as exc:  # pragma: no cover - API interaction
         log.exception("Failed to submit job")
         await db.add_credits(user_id, config.credits_per_generation)
-        await message.answer(f"Failed to submit job: {exc}")
+        await message.answer(i18n.t("generate.submission_failed", error=str(exc)))
         return
 
 
@@ -97,34 +101,37 @@ async def successful_payment_handler(
     if not result:
         return
     await message.answer(
-        "✨ Payment received! "
-        f"You have been credited with {result.credits_added} credits."
+        i18n.t("payment.stars.received", credits=result.credits_added)
     )
+    if result.bonus_status == "granted":
+        await message.answer(i18n.t("bonus.granted"))
+    elif result.bonus_status == "already":
+        await message.answer(i18n.t("bonus.already"))
 
 
 def _build_buy_card_keyboard(config: Config) -> InlineKeyboardMarkup:
     buttons = [
         [
             InlineKeyboardButton(
-                text=f"1 кредит — {config.price_one_rub}₽",
+                text=i18n.t("buy_card.button", items=1, price=config.price_one_rub),
                 callback_data="buy_card:1",
             )
         ],
         [
             InlineKeyboardButton(
-                text=f"5 кредитов — {config.price_five_rub}₽",
+                text=i18n.t("buy_card.button", items=5, price=config.price_five_rub),
                 callback_data="buy_card:5",
             )
         ],
         [
             InlineKeyboardButton(
-                text=f"10 кредитов — {config.price_ten_rub}₽",
+                text=i18n.t("buy_card.button", items=10, price=config.price_ten_rub),
                 callback_data="buy_card:10",
             )
         ],
         [
             InlineKeyboardButton(
-                text=f"30 кредитов — {config.price_thirty_rub}₽",
+                text=i18n.t("buy_card.button", items=30, price=config.price_thirty_rub),
                 callback_data="buy_card:30",
             )
         ],
@@ -134,11 +141,11 @@ def _build_buy_card_keyboard(config: Config) -> InlineKeyboardMarkup:
 
 async def buy_card_command(message: Message, db: Database, config: Config) -> None:
     if not config.yookassa_enabled or not config.public_base_url:
-        await message.answer("Оплата картой временно недоступна. Попробуйте позже.")
+        await message.answer(i18n.t("buy_card.unavailable"))
         return
     await db.ensure_user(message.from_user.id, message.from_user.username)
     await message.answer(
-        "Выберите пакет кредитов для оплаты картой:",
+        i18n.t("buy_card.choose_package"),
         reply_markup=_build_buy_card_keyboard(config),
     )
 
@@ -161,7 +168,7 @@ async def buy_card_callback(
 ) -> None:
     await callback.answer()
     if not config.yookassa_enabled or not config.public_base_url:
-        await callback.message.answer("Оплата картой временно недоступна. Попробуйте позже.")
+        await callback.message.answer(i18n.t("buy_card.unavailable"))
         return
     data = callback.data or ""
     try:
@@ -171,13 +178,13 @@ async def buy_card_callback(
         return
     amount_rub = _price_for_items(config, items)
     if amount_rub is None:
-        await callback.message.answer("Неизвестный пакет оплаты.")
+        await callback.message.answer(i18n.t("buy_card.unknown_package"))
         return
 
     user = callback.from_user
     await db.ensure_user(user.id, user.username)
 
-    description = f"Покупка {items} кредитов Sora2"
+    description = i18n.t("buy_card.invoice_description", items=items)
     try:
         payment = await asyncio.to_thread(
             yookassa_client.create_payment,
@@ -188,7 +195,7 @@ async def buy_card_callback(
         )
     except Exception:  # pragma: no cover - external API
         log.exception("Failed to create YooKassa payment")
-        await callback.message.answer("Не удалось создать платёж. Попробуйте позже.")
+        await callback.message.answer(i18n.t("buy_card.payment_creation_failed"))
         return
 
     confirmation_url = payment.get("confirmation_url")
@@ -201,7 +208,7 @@ async def buy_card_callback(
     metadata.update({"amount_rub": amount_rub, "order_id": payment.get("order_id")})
 
     if not payment_id or not confirmation_url:
-        await callback.message.answer("Не удалось получить ссылку оплаты. Попробуйте позже.")
+        await callback.message.answer(i18n.t("buy_card.payment_link_failed"))
         return
 
     await db.create_payment_record(
@@ -215,11 +222,11 @@ async def buy_card_callback(
     )
 
     pay_keyboard = InlineKeyboardMarkup(
-        inline_keyboard=[[InlineKeyboardButton(text="Оплатить картой", url=confirmation_url)]]
+        inline_keyboard=[[InlineKeyboardButton(text=i18n.t("buy_card.pay_button"), url=confirmation_url)]]
     )
 
     await callback.message.answer(
-        "Откроется страница ЮKassa. После оплаты вернись в чат, баланс пополнится автоматически.",
+        i18n.t("buy_card.payment_link"),
         reply_markup=pay_keyboard,
     )
 

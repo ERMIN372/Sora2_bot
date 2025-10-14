@@ -16,6 +16,7 @@ class PaymentResult:
     user_id: int
     amount: int
     credits_added: int
+    bonus_status: Optional[str] = None
 
 
 class TelegramStarPaymentProcessor:
@@ -43,6 +44,7 @@ class TelegramStarPaymentProcessor:
         await self._db.ensure_user(user.id, user.username)
         credits_added = self._config.credits_per_payment
         await self._db.add_credits(user.id, credits_added)
+        bonus_status: Optional[str] = None
 
         await self._db.record_payment(
             user_id=user.id,
@@ -52,15 +54,18 @@ class TelegramStarPaymentProcessor:
             credits_added=credits_added,
         )
 
-        if not await self._db.is_bonus_granted(user.id):
-            if await check_subscription(message.bot, user.id, self._config):
-                await self._db.add_credits(user.id, 2)
-                await self._db.mark_bonus_granted(user.id)
+        if await self._db.is_bonus_granted(user.id):
+            bonus_status = "already"
+        elif await check_subscription(message.bot, user.id, self._config):
+            await self._db.add_credits(user.id, 2)
+            await self._db.mark_bonus_granted(user.id)
+            bonus_status = "granted"
 
         return PaymentResult(
             user_id=user.id,
             amount=successful_payment.total_amount,
             credits_added=credits_added,
+            bonus_status=bonus_status,
         )
 
 
