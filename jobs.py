@@ -5,7 +5,7 @@ import asyncio
 import logging
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Awaitable, Callable, Dict
+from typing import Awaitable, Callable, Dict, Optional
 
 from config import Config
 from db import Database, GenerationJobRecord
@@ -64,8 +64,19 @@ class JobQueue:
             await asyncio.gather(*self._workers, return_exceptions=True)
         self._workers.clear()
 
-    async def submit(self, *, user_id: int, prompt: str) -> GenerationJobRecord:
-        job_id = await self._sora_client.submit_job(prompt=prompt)
+    async def submit(
+        self,
+        *,
+        user_id: int,
+        prompt: str,
+        size: str,
+        model: str,
+        image_file_id: Optional[str] = None,
+    ) -> GenerationJobRecord:
+        settings = {"size": size, "model": model}
+        if image_file_id:
+            settings["image_file_id"] = image_file_id
+        job_id = await self._sora_client.submit_job(prompt=prompt, settings=settings)
         now = datetime.utcnow()
         record = GenerationJobRecord(
             id=job_id,
@@ -76,6 +87,9 @@ class JobQueue:
             error=None,
             created_at=now,
             updated_at=now,
+            image_file_id=image_file_id,
+            size=size,
+            model=model,
         )
         await self._db.create_job(record)
         await self.enqueue(job_id=job_id, user_id=user_id, prompt=prompt)

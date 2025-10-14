@@ -16,19 +16,13 @@ from config import CFG, Config, load_config
 from db import Database
 from handlers import register_handlers
 from jobs import JobQueue
-from payments_stars import TelegramStarPaymentProcessor
 from sora_client import SoraClient
 import yookassa_client
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger(__name__)
 
-ALLOWED_UPDATES: List[str] = [
-    "message",
-    "callback_query",
-    "pre_checkout_query",
-    "shipping_query",
-]
+ALLOWED_UPDATES: List[str] = ["message", "callback_query"]
 
 
 @dataclass
@@ -39,7 +33,6 @@ class ApplicationState:
     db: Database
     job_queue: JobQueue
     sora_client: SoraClient
-    payments: TelegramStarPaymentProcessor
     app: FastAPI
     yookassa_processor: Optional[YooKassaProcessor]
     background_tasks: List[asyncio.Task[Any]] = field(default_factory=list)
@@ -63,9 +56,7 @@ def _init_application(config: Config) -> ApplicationState:
     db = Database()
     sora_client = SoraClient(config=config)
     job_queue = JobQueue(db=db, sora_client=sora_client, config=config)
-    payments = TelegramStarPaymentProcessor(db=db, config=config)
-
-    register_handlers(dp, db=db, config=config, job_queue=job_queue, payments=payments)
+    register_handlers(dp, db=db, config=config, job_queue=job_queue)
 
     app, yookassa_processor = create_app(config=config, dp=dp, bot=bot, db=db)
 
@@ -76,7 +67,6 @@ def _init_application(config: Config) -> ApplicationState:
         db=db,
         job_queue=job_queue,
         sora_client=sora_client,
-        payments=payments,
         app=app,
         yookassa_processor=yookassa_processor,
     )

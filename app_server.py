@@ -16,8 +16,8 @@ from starlette.types import ASGIApp
 
 from config import CFG, Config
 from db import Database
-from utils import check_subscription
-from i18n import i18n
+from handlers import resend_pending_order
+from i18n import format_credits, i18n
 import yookassa_client
 
 log = logging.getLogger(__name__)
@@ -114,8 +114,7 @@ class YooKassaProcessor:
                 credits_added=items_int,
                 metadata=metadata_str,
             )
-            bonus_status = await self._grant_bonus_if_applicable(user_id_int)
-            await self._notify_success(user_id_int, items_int, bonus_status)
+            await self._notify_success(user_id_int, items_int)
         elif status in {"pending", "waiting_for_capture", "canceled"}:
             await self._db.update_payment_status_by_ext(
                 "yookassa",
@@ -149,30 +148,16 @@ class YooKassaProcessor:
                 continue
             await self.process_payment(payment, source="poller")
 
-    async def _notify_success(
-        self, user_id: int, items: int, bonus_status: Optional[str]
-    ) -> None:
+    async def _notify_success(self, user_id: int, items: int) -> None:
         try:
             if items > 0:
                 await self._bot.send_message(
                     user_id,
-                    i18n.t("payment.yookassa.received", credits=items),
+                    i18n.t("payment.received", items=format_credits(items)),
                 )
-            if bonus_status == "granted":
-                await self._bot.send_message(user_id, i18n.t("bonus.granted"))
-            elif bonus_status == "already":
-                await self._bot.send_message(user_id, i18n.t("bonus.already"))
+            await resend_pending_order(bot=self._bot, db=self._db, config=self._config, user_id=user_id)
         except Exception:  # pragma: no cover - Telegram API interaction
             log.exception("Failed to notify user %s about YooKassa success", user_id)
-
-    async def _grant_bonus_if_applicable(self, user_id: int) -> Optional[str]:
-        if await self._db.is_bonus_granted(user_id):
-            return "already"
-        if await check_subscription(self._bot, user_id, self._config):
-            await self._db.add_credits(user_id, 2)
-            await self._db.mark_bonus_granted(user_id)
-            return "granted"
-        return None
 
     def _extract_metadata(self, payment) -> dict:
         metadata = getattr(payment, "metadata", None) or {}
