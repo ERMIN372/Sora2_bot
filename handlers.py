@@ -1,17 +1,20 @@
 """Aiogram handlers for the Sora Telegram bot."""
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
 from typing import Optional
 
 from aiogram import Dispatcher
 from aiogram.dispatcher.filters import Command
-from aiogram.types import Message
+from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from config import Config
 from db import Database, GenerationJobRecord
 from jobs import JobQueue
 from payments_stars import TelegramStarPaymentProcessor
+import yookassa_client
 
 log = logging.getLogger(__name__)
 
@@ -69,7 +72,9 @@ async def generate_command(message: Message, *, db: Database, config: Config, jo
         return
 
     if not await db.deduct_credit(user_id, config.credits_per_generation):
-        await message.answer("You do not have enough credits. Purchase more using Telegram Stars.")
+        await message.answer(
+            "You do not have enough credits. Purchase more using Telegram Stars or /buy_card."
+        )
         return
 
     await message.answer("Your prompt has been queued. I'll let you know when it's done!")
@@ -94,6 +99,128 @@ async def successful_payment_handler(
     await message.answer(
         "✨ Payment received! "
         f"You have been credited with {result.credits_added} credits."
+    )
+
+
+def _build_buy_card_keyboard(config: Config) -> InlineKeyboardMarkup:
+    buttons = [
+        [
+            InlineKeyboardButton(
+                text=f"1 кредит — {config.price_one_rub}₽",
+                callback_data="buy_card:1",
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                text=f"5 кредитов — {config.price_five_rub}₽",
+                callback_data="buy_card:5",
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                text=f"10 кредитов — {config.price_ten_rub}₽",
+                callback_data="buy_card:10",
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                text=f"30 кредитов — {config.price_thirty_rub}₽",
+                callback_data="buy_card:30",
+            )
+        ],
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+async def buy_card_command(message: Message, db: Database, config: Config) -> None:
+    if not config.yookassa_enabled or not config.public_base_url:
+        await message.answer("Оплата картой временно недоступна. Попробуйте позже.")
+        return
+    await db.ensure_user(message.from_user.id, message.from_user.username)
+    await message.answer(
+        "Выберите пакет кредитов для оплаты картой:",
+        reply_markup=_build_buy_card_keyboard(config),
+    )
+
+
+def _price_for_items(config: Config, items: int) -> Optional[int]:
+    mapping = {
+        1: config.price_one_rub,
+        5: config.price_five_rub,
+        10: config.price_ten_rub,
+        30: config.price_thirty_rub,
+    }
+    return mapping.get(items)
+
+
+async def buy_card_callback(
+    callback: CallbackQuery,
+    *,
+    db: Database,
+    config: Config,
+) -> None:
+    await callback.answer()
+    if not config.yookassa_enabled or not config.public_base_url:
+        await callback.message.answer("Оплата картой временно недоступна. Попробуйте позже.")
+        return
+    data = callback.data or ""
+    try:
+        _, raw_items = data.split(":", maxsplit=1)
+        items = int(raw_items)
+    except (ValueError, AttributeError):
+        return
+    amount_rub = _price_for_items(config, items)
+    if amount_rub is None:
+        await callback.message.answer("Неизвестный пакет оплаты.")
+        return
+
+    user = callback.from_user
+    await db.ensure_user(user.id, user.username)
+
+    description = f"Покупка {items} кредитов Sora2"
+    try:
+        payment = await asyncio.to_thread(
+            yookassa_client.create_payment,
+            amount_rub,
+            user.id,
+            items,
+            description,
+        )
+    except Exception:  # pragma: no cover - external API
+        log.exception("Failed to create YooKassa payment")
+        await callback.message.answer("Не удалось создать платёж. Попробуйте позже.")
+        return
+
+    confirmation_url = payment.get("confirmation_url")
+    payment_id = payment.get("payment_id")
+    metadata_raw = payment.get("metadata", "{}")
+    try:
+        metadata = json.loads(metadata_raw)
+    except json.JSONDecodeError:
+        metadata = {}
+    metadata.update({"amount_rub": amount_rub, "order_id": payment.get("order_id")})
+
+    if not payment_id or not confirmation_url:
+        await callback.message.answer("Не удалось получить ссылку оплаты. Попробуйте позже.")
+        return
+
+    await db.create_payment_record(
+        "yookassa",
+        payment_id,
+        user.id,
+        amount_rub * 100,
+        items,
+        payment.get("status", "pending") or "pending",
+        json.dumps(metadata),
+    )
+
+    pay_keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text="Оплатить картой", url=confirmation_url)]]
+    )
+
+    await callback.message.answer(
+        "Откроется страница ЮKassa. После оплаты вернись в чат, баланс пополнится автоматически.",
+        reply_markup=pay_keyboard,
     )
 
 
@@ -126,8 +253,16 @@ def register_handlers(
         Command("generate"),
     )
     dp.register_message_handler(
+        lambda message: buy_card_command(message, db, config),
+        Command("buy_card"),
+    )
+    dp.register_message_handler(
         lambda message: successful_payment_handler(message, payments=payments),
         content_types=["successful_payment"],
+    )
+    dp.register_callback_query_handler(
+        lambda call: buy_card_callback(call, db=db, config=config),
+        lambda call: call.data and call.data.startswith("buy_card:"),
     )
 
 
@@ -136,4 +271,5 @@ __all__ = [
     "start_command",
     "balance_command",
     "generate_command",
+    "buy_card_command",
 ]
