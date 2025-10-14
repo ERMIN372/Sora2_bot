@@ -92,46 +92,78 @@ class _Translator:
 
 TRANSLATIONS: Dict[str, Dict[str, str]] = {
     "ru": {
-        "start.welcome": (
-            "👋 Привет! Это бот Sora.\n"
-            "Используйте команду <code>/generate</code>, чтобы создать видео.\n"
-            "Пример: <code>/generate &lt;prompt size=&quot;720p&quot; seconds=&quot;10&quot;&gt;котята играют&lt;/prompt&gt;</code>\n"
-            "Баланс и бонус: /balance. Пополнение: Telegram Stars или /buy_card."
+        "main.welcome": (
+            "👋 Привет! Я генерирую видео через Sora 2.\n"
+            "Выберите действие ниже или пришлите запрос текстом.\n\n"
+            "Пример: <code>кот идёт по неону, киберпанк</code>\n"
+            "Параметры: <code>size=1280x720</code>"
         ),
-        "generate.prompt_required": (
-            "Пожалуйста, укажите описание: <code>/generate &lt;prompt&gt;текст&lt;/prompt&gt;</code>."
+        "help.main": (
+            "Используйте кнопки меню, чтобы выбрать режим генерации, модель или пополнить баланс.\n"
+            "Можете также просто описать желаемый ролик текстом."
         ),
-        "generate.too_many_jobs": (
-            "Слишком много активных задач (максимум {limit}). Дождитесь завершения текущих генераций."
+        "buttons.generate_text": "🎬 Сгенерировать по тексту",
+        "buttons.generate_photo": "🖼️ Сгенерировать по фото",
+        "buttons.choose_model": "🧠 Выбрать модель",
+        "buttons.top_up": "💳 Пополнить баланс",
+        "buttons.help": "ℹ️ Помощь",
+        "buttons.launch": "🚀 Запустить",
+        "buttons.edit": "✏️ Изменить",
+        "buttons.back": "↩️ Назад",
+        "buttons.top_up_short": "➕ Пополнить",
+        "buttons.payment_open": "💳 Перейти к оплате",
+        "chips.vertical": "Вертикаль",
+        "chips.horizontal": "Горизонталь",
+        "chips.model_basic": "Sora-2",
+        "chips.model_pro": "Sora-2 Pro",
+        "flow.text.prompt": (
+            "Опишите, что нужно создать. Текущий кадр: {size}. Модель: {model}.\n"
+            "Используйте подсказки ниже или пришлите описание."
         ),
-        "generate.not_enough_credits": (
-            "Недостаточно кредитов. Пополните баланс через Telegram Stars или команду /buy_card."
+        "flow.photo.prompt": (
+            "Пришлите фото и, при желании, подпись-промпт.\n"
+            "Текущий кадр: {size}. Модель: {model}."
         ),
-        "generate.queued": "Задача поставлена в очередь.\nЗапрос: {prompt}",
-        "generate.submission_failed": "Не удалось отправить задачу: {error}. Кредит возвращён.",
-        "balance.info": "Ваш баланс: {credits} кредит(ов). Бонус за подписку: {bonus_status}.",
-        "bonus.status.received": "получен",
-        "bonus.status.not_received": "не получен",
-        "bonus.granted": "Начислен бонус +2",
-        "bonus.already": "Бонус уже начислялся",
-        "payment.stars.received": "✨ Платёж получен! Зачислено {credits} кредит(ов).",
-        "buy_card.unavailable": "Оплата картой временно недоступна. Попробуйте позже.",
-        "buy_card.choose_package": "Выберите пакет кредитов для оплаты картой:",
-        "buy_card.button": "{items} кредит(ов) — {price}₽",
-        "buy_card.unknown_package": "Неизвестный пакет оплаты.",
-        "buy_card.invoice_description": "Покупка {items} кредит(ов) Sora2",
-        "buy_card.pay_button": "Оплатить картой",
-        "buy_card.payment_creation_failed": "Не удалось создать платёж. Попробуйте позже.",
-        "buy_card.payment_link_failed": "Не удалось получить ссылку оплаты. Попробуйте позже.",
-        "buy_card.payment_link": "Оплатите по ссылке, после оплаты вернитесь — баланс обновится автоматически.",
-        "job.completed_with_url": "🎉 Готово: {url}\nЗапрос: {prompt}",
-        "job.completed_no_url": "🎉 Готово, отправляю ролик.\nЗапрос: {prompt}",
-        "job.failed": "⚠️ Не удалось создать видео: {error}. Кредит возвращён.",
-        "job.status.queued": "⏳ Задача поставлена в очередь.",
-        "job.status.running": "⏳ Генерирую…",
-        "job.status.generic": "⏳ Задача {job_id}: {status}.",
+        "flow.confirm.text": (
+            "✍️ Запрос: {prompt}\n"
+            "🎛 Кадр: {size} · Модель: {model}\n"
+            "Стоимость: {price}"
+        ),
+        "flow.confirm.photo": (
+            "📎 Референс принят.\n"
+            "✍️ Запрос: {prompt}\n"
+            "🎛 Кадр: {size} · Модель: {model}\n"
+            "Стоимость: {price}"
+        ),
+        "flow.no_prompt": "Добавьте описание. Пример: <code>кот идёт по неону, киберпанк</code>",
+        "flow.order_submitted": "🧾 Заказ принят. Место в очереди: {queue_pos}. Пришлём видео сюда.",
+        "flow.duplicate": "Задача уже в очереди.",
+        "flow.not_enough": "Недостаточно кредитов. Выберите пакет ниже.",
+        "model.prompt": (
+            "Sora-2 — базовая модель. Sora-2 Pro — расширенные возможности и качество.\n"
+            "Выберите модель ниже."
+        ),
+        "model.current": "Текущая модель: {model}.",
+        "status.running": "⚙️ Генерирую…",
+        "status.completed_file": "✅ Готово. Отправляю ролик.",
+        "status.completed_url": "Готово: {url}",
+        "status.failed": "Не удалось создать видео: {error}. Кредит возвращён.",
+        "status.generic": "Статус задачи: {status}.",
         "errors.unknown": "неизвестная ошибка",
-        "payment.yookassa.received": "Зачислено {credits} кредит(ов). Спасибо!",
+        "balance.info": "Ваш баланс: {credits}.",
+        "balance.actions": "Выберите действие ниже.",
+        "payment.unavailable": "Оплата картой временно недоступна. Попробуйте позже.",
+        "payment.package.label.1": "1 генерация — {price} ₽",
+        "payment.package.label.5": "5 генераций — {price} ₽",
+        "payment.package.label.10": "10 генераций — {price} ₽",
+        "payment.package.label.30": "30 генераций — {price} ₽",
+        "payment.package.subtitle": "мгновенное зачисление",
+        "payment.packages.title": "Доступные пакеты:",
+        "payment.store.instructions": "Перейдите по ссылке для оплаты. После оплаты кредиты начислятся автоматически.",
+        "payment.unknown_package": "Неизвестный пакет оплаты.",
+        "payment.creation_failed": "Не удалось создать платёж. Попробуйте позже.",
+        "payment.link_failed": "Не удалось получить ссылку оплаты. Попробуйте позже.",
+        "payment.received": "Оплата получена. Зачислено: {items}. Спасибо!",
         "web.return.unavailable": "<h1>Сервис временно недоступен</h1>",
         "web.return.not_found": "<h1>Платёж не найден</h1>",
         "web.return.success": "<h1>Оплата принята</h1><p>Спасибо за покупку!</p>",
