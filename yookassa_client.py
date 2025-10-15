@@ -1,6 +1,7 @@
 """Helpers to interact with the YooKassa payments API."""
 from __future__ import annotations
 
+import inspect
 import uuid
 from decimal import Decimal
 from typing import Any, Dict
@@ -73,7 +74,7 @@ def create_payment(amount_cp: int, user_id: int, items: int, description: str) -
                 }
             ],
         }
-    payment = Payment.create(body, idempotence_key=idemp)
+    payment = _create_payment(body, idemp)
     return {
         "payment_id": payment.id,
         "confirmation_url": payment.confirmation.confirmation_url,
@@ -88,6 +89,17 @@ def get_payment(payment_id: str):
     """Fetch a payment from YooKassa by its *payment_id*."""
 
     return Payment.find_one(payment_id)
+
+
+def _create_payment(body: Dict[str, Any], idemp: str):
+    """Compatibility wrapper around :func:`Payment.create`."""
+
+    parameters = inspect.signature(Payment.create).parameters
+    if "idempotence_key" in parameters:
+        return Payment.create(body, idempotence_key=idemp)
+    if "idempotency_key" in parameters:
+        return Payment.create(body, idempotency_key=idemp)
+    return Payment.create(body, idemp)
 
 
 __all__ = ["init", "create_payment", "get_payment", "build_return_url"]
