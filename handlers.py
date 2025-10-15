@@ -23,7 +23,7 @@ from aiogram.types import (
 
 from config import Config
 from db import Database, GenerationJobRecord
-from i18n import SafeText, format_credits, format_prompt, i18n
+from i18n import SafeText, escape_html, format_credits, format_prompt, i18n
 from jobs import JobQueue
 import yookassa_client
 
@@ -159,17 +159,26 @@ async def _send_balance_info(message: Message, db: Database) -> None:
     await message.answer(balance_text, reply_markup=_build_balance_keyboard())
 
 
-def _build_help_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
+def _build_help_keyboard(config: Config) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = [
+        [
+            InlineKeyboardButton(
+                text="👤 Написать оператору",
+                url="https://t.me/hr_assistt",
+            )
+        ]
+    ]
+    terms_url = (config.terms_url or "").strip()
+    if terms_url:
+        rows.append(
             [
                 InlineKeyboardButton(
-                    text="👤 Написать оператору",
-                    url="https://t.me/hr_assistt",
+                    text=i18n.t("buttons.offer"),
+                    url=terms_url,
                 )
             ]
-        ]
-    )
+        )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 async def _send_main_menu(message: Message) -> None:
@@ -283,6 +292,12 @@ def _format_packages_list(config: Config) -> str:
         lines.append(i18n.t("payment.packages.line", credits=credits_label, price=price_label))
     lines.append("")
     lines.append(i18n.t("payment.store.instructions"))
+    terms_url = (config.terms_url or "").strip()
+    if terms_url:
+        escaped_url = escape_html(terms_url)
+        link = SafeText(f'<a href="{escaped_url}">{escaped_url}</a>')
+        lines.append("")
+        lines.append(i18n.t("payment.terms_notice", terms_url=link))
     return "\n".join(line for line in lines if line).strip()
 
 
@@ -443,9 +458,14 @@ async def start_command(message: Message, db: Database, state: FSMContext) -> No
     await _send_main_menu(message)
 
 
-async def help_command(message: Message, db: Database, state: FSMContext) -> None:
+async def help_command(
+    message: Message, db: Database, state: FSMContext, config: Config
+) -> None:
     await _ensure_user(message, db)
-    await message.answer(i18n.t("help.main"), reply_markup=_build_help_keyboard())
+    await message.answer(
+        i18n.t("help.main"),
+        reply_markup=_build_help_keyboard(config),
+    )
 
 
 async def balance_command(message: Message, db: Database, state: FSMContext) -> None:
@@ -468,8 +488,10 @@ async def generate_photo_menu(message: Message, db: Database, state: FSMContext)
     await _send_options_prompt(message, session=session, context="photo")
 
 
-async def help_button(message: Message, db: Database, state: FSMContext) -> None:
-    await help_command(message, db, state)
+async def help_button(
+    message: Message, db: Database, state: FSMContext, config: Config
+) -> None:
+    await help_command(message, db, state, config)
 
 
 async def top_up_menu(message: Message, db: Database, state: FSMContext, config: Config) -> None:
@@ -778,7 +800,7 @@ def register_handlers(
         state="*",
     )
     dp.register_message_handler(
-        lambda message, state: help_command(message, db, state),
+        lambda message, state: help_command(message, db, state, config),
         Command("help"),
         state="*",
     )
@@ -818,7 +840,7 @@ def register_handlers(
         state="*",
     )
     dp.register_message_handler(
-        lambda message, state: help_button(message, db, state),
+        lambda message, state: help_button(message, db, state, config),
         lambda message: message.text == i18n.t("buttons.help"),
         state="*",
     )

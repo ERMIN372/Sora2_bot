@@ -92,6 +92,7 @@ class Config:
     products: Mapping[str, Decimal] = field(default_factory=lambda: DEFAULT_PRODUCTS.copy())
     credit_packages: Tuple[CreditPackage, ...] = DEFAULT_CREDIT_PACKAGES
     payments_read_only: bool = False
+    terms_url: str = "https://telegra.ph/Oferta-10-15-3"
 
     @property
     def yookassa_enabled(self) -> bool:
@@ -247,6 +248,7 @@ def load_config() -> Config:
         subscription_chat_id=os.getenv("SUBSCRIPTION_CHAT_ID"),
         yookassa_poll_interval=_get_env_int("YOOKASSA_POLL_INTERVAL", Config.yookassa_poll_interval),
         payments_read_only=_get_env_bool("PAYMENTS_READ_ONLY", Config.payments_read_only),
+        terms_url=os.getenv("TERMS_URL", Config.terms_url),
     )
 
 
