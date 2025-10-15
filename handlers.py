@@ -43,6 +43,7 @@ SIZE_LABEL_KEYS: Dict[str, str] = {
 MAIN_MENU_BUTTONS = {
     i18n.t("buttons.generate_text"),
     i18n.t("buttons.generate_photo"),
+    i18n.t("buttons.balance"),
     i18n.t("buttons.top_up"),
     i18n.t("buttons.help"),
 }
@@ -105,6 +106,7 @@ def _main_keyboard() -> ReplyKeyboardMarkup:
         keyboard=[
             [KeyboardButton(text=i18n.t("buttons.generate_text"))],
             [KeyboardButton(text=i18n.t("buttons.generate_photo"))],
+            [KeyboardButton(text=i18n.t("buttons.balance"))],
             [KeyboardButton(text=i18n.t("buttons.top_up"))],
             [KeyboardButton(text=i18n.t("buttons.help"))],
         ],
@@ -146,9 +148,15 @@ def _build_balance_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text=i18n.t("buttons.top_up_short"), callback_data="menu:topup")],
-            [InlineKeyboardButton(text=i18n.t("buttons.back"), callback_data="menu:back")],
         ]
     )
+
+
+async def _send_balance_info(message: Message, db: Database) -> None:
+    user_id = await _ensure_user(message, db)
+    credits = await db.get_user_credits(user_id)
+    balance_text = i18n.t("balance.info", credits=credits)
+    await message.answer(balance_text, reply_markup=_build_balance_keyboard())
 
 
 def _build_help_keyboard() -> InlineKeyboardMarkup:
@@ -441,14 +449,7 @@ async def help_command(message: Message, db: Database, state: FSMContext) -> Non
 
 
 async def balance_command(message: Message, db: Database, state: FSMContext) -> None:
-    await state.finish()
-    user_id = await _ensure_user(message, db)
-    credits = await db.get_user_credits(user_id)
-    balance_text = i18n.t("balance.info", credits=format_credits(credits))
-    await message.answer(
-        f"{balance_text}\n{i18n.t('balance.actions')}",
-        reply_markup=_build_balance_keyboard(),
-    )
+    await _send_balance_info(message, db)
 
 
 async def generate_text_menu(message: Message, db: Database, state: FSMContext) -> None:
@@ -709,9 +710,6 @@ async def menu_callback_handler(
     if data.endswith("topup"):
         await _send_payment_showcase(callback.message.bot, callback.message.chat.id, config)
         return
-    if data.endswith("back"):
-        await state.finish()
-        await callback.message.answer(i18n.t("help.main"), reply_markup=_main_keyboard())
 
 
 async def resend_pending_order(
@@ -806,6 +804,11 @@ def register_handlers(
     dp.register_message_handler(
         lambda message, state: generate_photo_menu(message, db, state),
         lambda message: message.text == i18n.t("buttons.generate_photo"),
+        state="*",
+    )
+    dp.register_message_handler(
+        lambda message, state: balance_command(message, db, state),
+        lambda message: message.text == i18n.t("buttons.balance"),
         state="*",
     )
     dp.register_message_handler(
