@@ -151,6 +151,19 @@ def _build_balance_keyboard() -> InlineKeyboardMarkup:
     )
 
 
+def _build_help_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="👤 Написать оператору",
+                    url="https://t.me/hr_assistt",
+                )
+            ]
+        ]
+    )
+
+
 async def _send_main_menu(message: Message) -> None:
     await message.answer(i18n.t("main.welcome"), reply_markup=_main_keyboard())
 
@@ -411,9 +424,8 @@ async def start_command(message: Message, db: Database, state: FSMContext) -> No
 
 
 async def help_command(message: Message, db: Database, state: FSMContext) -> None:
-    await state.finish()
     await _ensure_user(message, db)
-    await message.answer(i18n.t("help.main"), reply_markup=_main_keyboard())
+    await message.answer(i18n.t("help.main"), reply_markup=_build_help_keyboard())
 
 
 async def balance_command(message: Message, db: Database, state: FSMContext) -> None:
