@@ -24,8 +24,15 @@ SORA_VIDEO_CREDITS = Decimal("5")
 class CreditPackage:
     """A bundle of credits sold for a fixed price in kopeks."""
 
-    credits: Decimal
+    package_id: str
+    credits: int
     price_kopeks: int
+
+    def __post_init__(self) -> None:  # pragma: no cover - dataclass validation
+        if self.credits <= 0:
+            raise ValueError("credits must be positive")
+        if not self.package_id:
+            raise ValueError("package_id must be set")
 
     @property
     def credits_int(self) -> int:
@@ -45,11 +52,11 @@ DEFAULT_PRODUCTS: Dict[str, Decimal] = {
 }
 
 DEFAULT_CREDIT_PACKAGES: Tuple[CreditPackage, ...] = (
-    CreditPackage(Decimal("5"), 12900),
-    CreditPackage(Decimal("10"), 25000),
-    CreditPackage(Decimal("25"), 61300),
-    CreditPackage(Decimal("50"), 120000),
-    CreditPackage(Decimal("150"), 356000),
+    CreditPackage("c5", 5, 12900),
+    CreditPackage("c10", 10, 25000),
+    CreditPackage("c25", 25, 61300),
+    CreditPackage("c50", 50, 120000),
+    CreditPackage("c150", 150, 356000),
 )
 
 
@@ -84,6 +91,7 @@ class Config:
     credit_price_kopeks: int = CREDIT_PRICE_KOPEKS
     products: Mapping[str, Decimal] = field(default_factory=lambda: DEFAULT_PRODUCTS.copy())
     credit_packages: Tuple[CreditPackage, ...] = DEFAULT_CREDIT_PACKAGES
+    payments_read_only: bool = False
 
     @property
     def yookassa_enabled(self) -> bool:
@@ -96,6 +104,20 @@ class Config:
         """Return ``True`` if YooKassa payments can be offered to users."""
 
         return self.yookassa_enabled and bool(self.public_base_url)
+
+    @property
+    def allowed_package_ids(self) -> Tuple[str, ...]:
+        """Return the tuple of permitted package identifiers."""
+
+        return tuple(package.package_id for package in self.credit_packages)
+
+    def get_credit_package(self, package_id: str) -> Optional[CreditPackage]:
+        """Return the package matching *package_id*, if any."""
+
+        for package in self.credit_packages:
+            if package.package_id == package_id:
+                return package
+        return None
 
     @property
     def generation_cost_credits(self) -> int:
@@ -120,12 +142,6 @@ class Config:
         """Optional Redis URL for rate limiting or FSM storage."""
 
         return os.getenv("AIROGRAM_REDIS_URL")
-
-    @property
-    def yookassa_enabled(self) -> bool:
-        """Return ``True`` if YooKassa credentials are configured."""
-
-        return bool(self.yookassa_shop_id and self.yookassa_secret_key)
 
 
 def _get_env_int(key: str, default: int) -> int:
@@ -230,6 +246,7 @@ def load_config() -> Config:
         yookassa_send_receipts=_get_env_bool("YOOKASSA_SEND_RECEIPTS", Config.yookassa_send_receipts),
         subscription_chat_id=os.getenv("SUBSCRIPTION_CHAT_ID"),
         yookassa_poll_interval=_get_env_int("YOOKASSA_POLL_INTERVAL", Config.yookassa_poll_interval),
+        payments_read_only=_get_env_bool("PAYMENTS_READ_ONLY", Config.payments_read_only),
     )
 
 

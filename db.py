@@ -274,6 +274,11 @@ class Database:
         metadata: Optional[Dict[str, Any]] = None,
         idempotency_key: str = "",
         username: Optional[str] = None,
+        package_id: Optional[str] = None,
+        purchased_credits: Optional[int] = None,
+        processed_at: Optional[str] = None,
+        record_type: str = "payment",
+        ref_payment_id: Optional[str] = None,
     ) -> None:
         metadata_dict = metadata if metadata is not None else _parse_metadata(payload)
         username_value = username
@@ -297,6 +302,11 @@ class Database:
             metadata=metadata_dict,
             idempotency_key=idempotency_key,
             username=username_value,
+            package_id=package_id,
+            purchased_credits=purchased_credits,
+            processed_at=processed_at,
+            record_type=record_type,
+            ref_payment_id=ref_payment_id,
         )
 
     async def update_payment_status_by_ext(
@@ -308,6 +318,11 @@ class Database:
         credits_added: Optional[int] = None,
         metadata: Optional[Dict[str, Any]] = None,
         idempotency_key: Optional[str] = None,
+        processed_at: Optional[str] = None,
+        package_id: Optional[str] = None,
+        purchased_credits: Optional[int] = None,
+        record_type: Optional[str] = None,
+        ref_payment_id: Optional[str] = None,
     ) -> None:
         record = await gsheets_db.get_payment_by_ext(provider, ext_id)
         existing_metadata = _parse_metadata(record.get("metadata") if record else None)
@@ -323,6 +338,11 @@ class Database:
             status,
             metadata=metadata_str,
             idempotency_key=idempotency_key,
+            processed_at=processed_at,
+            package_id=package_id,
+            purchased_credits=purchased_credits,
+            record_type=record_type,
+            ref_payment_id=ref_payment_id,
         )
 
     async def get_payment_by_ext(self, provider: str, ext_id: str) -> Optional[Dict[str, Any]]:
@@ -339,6 +359,15 @@ class Database:
 
     async def get_payment_by_order_id(self, provider: str, order_id: str) -> Optional[Dict[str, Any]]:
         return await gsheets_db.get_payment_by_order_id(provider, order_id)
+
+    async def list_payments(self, provider: Optional[str] = None) -> List[Dict[str, Any]]:
+        return await gsheets_db.list_payments(provider=provider)
+
+    async def set_user_credits(self, telegram_id: int, value: int) -> int:
+        return await gsheets_db.set_user_credits(telegram_id, value)
+
+    async def list_users(self) -> List[Dict[str, Any]]:
+        return await gsheets_db.list_users()
 
     # ------------------------------------------------------------------
     # Jobs
