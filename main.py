@@ -5,7 +5,7 @@ import argparse
 import asyncio
 import logging
 from dataclasses import dataclass, field
-from typing import Any, List, Optional
+from typing import Any, Dict, List, Optional
 
 from aiogram import Bot, Dispatcher, executor
 from aiogram.contrib.fsm_storage.memory import MemoryStorage
@@ -91,6 +91,22 @@ async def _startup(state: ApplicationState, *, mode: str) -> None:
         log.info("Webhook configured at %s", CFG.WEBHOOK_URL)
 
     await state.db.init()
+
+    async def _fetch_profile(user_id: int) -> Optional[Dict[str, Optional[str]]]:
+        try:
+            chat = await state.bot.get_chat(user_id)
+        except Exception:  # pragma: no cover - Telegram API interaction
+            log.debug("Failed to fetch profile for backfill user_id=%s", user_id, exc_info=True)
+            return None
+        return {
+            "username": chat.username,
+            "first_name": chat.first_name,
+            "last_name": chat.last_name,
+        }
+
+    state.background_tasks.append(
+        asyncio.create_task(state.db.backfill_user_profiles(_fetch_profile))
+    )
     try:
         migrated = await state.db.migrate_credit_balances(state.config.generation_cost_credits)
         if migrated:

@@ -72,6 +72,7 @@ class JobQueue:
         size: str,
         model: str,
         image_file_id: Optional[str] = None,
+        username: Optional[str] = None,
     ) -> GenerationJobRecord:
         forced_model = self._config.sora_model
         if model != forced_model:
@@ -94,6 +95,7 @@ class JobQueue:
             size=size,
             model=forced_model,
             cost_credits=self._config.generation_cost_credits,
+            username=username,
         )
         await self._db.create_job(record)
         await self.enqueue(job_id=job_id, user_id=user_id, prompt=prompt)

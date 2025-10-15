@@ -5,10 +5,11 @@ import asyncio
 import base64
 import binascii
 import json
+import logging
 import os
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Awaitable, Callable, Dict, Iterable, List, Optional, Tuple
 
 import gspread
 from google.oauth2.service_account import Credentials
@@ -22,6 +23,9 @@ from tenacity import (
 from asyncio import Lock
 
 
+log = logging.getLogger(__name__)
+
+
 _USERS_HEADERS = [
     "user_id",
     "credits",
@@ -30,6 +34,11 @@ _USERS_HEADERS = [
     "created_at",
     "updated_at",
     "notes",
+    "username",
+    "first_name",
+    "last_name",
+    "display_name",
+    "tg_link",
 ]
 
 _PAYMENTS_HEADERS = [
@@ -44,6 +53,7 @@ _PAYMENTS_HEADERS = [
     "created_at",
     "updated_at",
     "idempotency_key",
+    "username",
 ]
 
 _JOBS_HEADERS = [
@@ -61,6 +71,7 @@ _JOBS_HEADERS = [
     "seconds",
     "model",
     "cost_credits",
+    "username",
 ]
 
 _API_RETRY = dict(
@@ -191,22 +202,28 @@ async def _ensure_spreadsheet() -> gspread.Spreadsheet:
     return _SPREADSHEET
 
 
-async def _ensure_sheet(title: str, headers: List[str]) -> gspread.Worksheet:
+async def _ensure_sheet(title: str, headers: List[str]) -> Tuple[gspread.Worksheet, List[str]]:
     spreadsheet = await _ensure_spreadsheet()
     try:
         worksheet = await _to_thread(_get_worksheet, spreadsheet, title)
     except gspread.exceptions.WorksheetNotFound:
         worksheet = await _to_thread(_add_worksheet, spreadsheet, title, 1000, len(headers) + 2)
-    await _ensure_headers(worksheet, headers)
-    return worksheet
+    actual_headers = await _ensure_headers(worksheet, headers)
+    return worksheet, actual_headers
 
 
-async def _ensure_headers(worksheet: gspread.Worksheet, headers: List[str]) -> None:
+async def _ensure_headers(worksheet: gspread.Worksheet, headers: List[str]) -> List[str]:
     current = await _to_thread(worksheet.row_values, 1)
-    if current[: len(headers)] == headers:
-        return
-    range_name = f"A1:{_column_letter(len(headers))}1"
-    await _to_thread(_worksheet_update, worksheet, range_name, [headers])
+    existing = [str(value).strip() if value is not None else "" for value in current]
+    existing = [value for value in existing if value]
+    if not existing:
+        existing = []
+    missing = [header for header in headers if header not in existing]
+    final_headers = existing + missing
+    if final_headers != existing:
+        range_name = f"A1:{_column_letter(len(final_headers))}1"
+        await _to_thread(_worksheet_update, worksheet, range_name, [final_headers])
+    return final_headers
 
 
 def _build_key(columns: Tuple[str, ...], row: Dict[str, Any]) -> Any:
@@ -233,6 +250,39 @@ def _parse_str(value: Any) -> str:
     return str(value)
 
 
+def _clean_username(value: Optional[str]) -> str:
+    raw = _parse_str(value).strip()
+    return raw.lstrip("@") if raw else ""
+
+
+def _clean_name(value: Optional[str]) -> str:
+    return _parse_str(value).strip()
+
+
+def _build_display_name(first_name: str, last_name: str) -> str:
+    parts = [part for part in (first_name, last_name) if part]
+    return " ".join(parts)
+
+
+def _build_tg_link(user_id: int, username: str) -> str:
+    return f"https://t.me/{username}" if username else f"tg://user?id={user_id}"
+
+
+def _prepare_profile(user_id: int, username: Optional[str], first_name: Optional[str], last_name: Optional[str]) -> Dict[str, str]:
+    clean_username = _clean_username(username)
+    clean_first = _clean_name(first_name)
+    clean_last = _clean_name(last_name)
+    display_name = _build_display_name(clean_first, clean_last)
+    tg_link = _build_tg_link(user_id, clean_username)
+    return {
+        "username": clean_username,
+        "first_name": clean_first,
+        "last_name": clean_last,
+        "display_name": display_name,
+        "tg_link": tg_link,
+    }
+
+
 def _normalise_user(row: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "user_id": _parse_int(row.get("user_id")),
@@ -242,6 +292,11 @@ def _normalise_user(row: Dict[str, Any]) -> Dict[str, Any]:
         "created_at": _parse_str(row.get("created_at")),
         "updated_at": _parse_str(row.get("updated_at")),
         "notes": _parse_str(row.get("notes")),
+        "username": _parse_str(row.get("username")),
+        "first_name": _parse_str(row.get("first_name")),
+        "last_name": _parse_str(row.get("last_name")),
+        "display_name": _parse_str(row.get("display_name")),
+        "tg_link": _parse_str(row.get("tg_link")),
     }
 
 
@@ -258,6 +313,7 @@ def _normalise_payment(row: Dict[str, Any]) -> Dict[str, Any]:
         "created_at": _parse_str(row.get("created_at")),
         "updated_at": _parse_str(row.get("updated_at")),
         "idempotency_key": _parse_str(row.get("idempotency_key")),
+        "username": _parse_str(row.get("username")),
     }
 
 
@@ -277,6 +333,7 @@ def _normalise_job(row: Dict[str, Any]) -> Dict[str, Any]:
         "seconds": _parse_int(row.get("seconds")),
         "model": _parse_str(row.get("model")),
         "cost_credits": _parse_int(row.get("cost_credits")),
+        "username": _parse_str(row.get("username")),
     }
 
 
@@ -307,13 +364,13 @@ async def _ensure_users_state() -> _SheetState:
     global _USERS_STATE
     if _USERS_STATE is None:
         title = os.getenv("GS_USERS_SHEET", "users")
-        worksheet = await _ensure_sheet(title, _USERS_HEADERS)
+        worksheet, headers = await _ensure_sheet(title, _USERS_HEADERS)
         index, rows, next_row = await _to_thread(
-            _build_state_data, worksheet, _USERS_HEADERS, ("user_id",), _normalise_user
+            _build_state_data, worksheet, headers, ("user_id",), _normalise_user
         )
         _USERS_STATE = _SheetState(
             worksheet=worksheet,
-            headers=_USERS_HEADERS,
+            headers=headers,
             key_columns=("user_id",),
             index=index,
             rows=rows,
@@ -327,17 +384,17 @@ async def _ensure_payments_state() -> _SheetState:
     global _PAYMENTS_STATE
     if _PAYMENTS_STATE is None:
         title = os.getenv("GS_PAYMENTS_SHEET", "payments")
-        worksheet = await _ensure_sheet(title, _PAYMENTS_HEADERS)
+        worksheet, headers = await _ensure_sheet(title, _PAYMENTS_HEADERS)
         index, rows, next_row = await _to_thread(
             _build_state_data,
             worksheet,
-            _PAYMENTS_HEADERS,
+            headers,
             ("provider", "ext_id"),
             _normalise_payment,
         )
         _PAYMENTS_STATE = _SheetState(
             worksheet=worksheet,
-            headers=_PAYMENTS_HEADERS,
+            headers=headers,
             key_columns=("provider", "ext_id"),
             index=index,
             rows=rows,
@@ -351,13 +408,13 @@ async def _ensure_jobs_state() -> _SheetState:
     global _JOBS_STATE
     if _JOBS_STATE is None:
         title = os.getenv("GS_JOBS_SHEET", "jobs")
-        worksheet = await _ensure_sheet(title, _JOBS_HEADERS)
+        worksheet, headers = await _ensure_sheet(title, _JOBS_HEADERS)
         index, rows, next_row = await _to_thread(
-            _build_state_data, worksheet, _JOBS_HEADERS, ("job_id",), _normalise_job
+            _build_state_data, worksheet, headers, ("job_id",), _normalise_job
         )
         _JOBS_STATE = _SheetState(
             worksheet=worksheet,
-            headers=_JOBS_HEADERS,
+            headers=headers,
             key_columns=("job_id",),
             index=index,
             rows=rows,
@@ -401,12 +458,109 @@ async def _create_user_record(state: _SheetState, user_id: int) -> Dict[str, Any
         "created_at": now,
         "updated_at": now,
         "notes": "",
+        "username": "",
+        "first_name": "",
+        "last_name": "",
+        "display_name": "",
+        "tg_link": _build_tg_link(user_id, ""),
     }
     await _write_row(state, row_index, record)
     state.index[user_id] = row_index
     state.rows[user_id] = record
     state.next_row = row_index + 1
     return record
+
+
+# ---------------------------------------------------------------------------
+# User profile helpers
+# ---------------------------------------------------------------------------
+
+
+async def upsert_user_profile(
+    user_id: int,
+    *,
+    username: Optional[str] = None,
+    first_name: Optional[str] = None,
+    last_name: Optional[str] = None,
+) -> Dict[str, Any]:
+    profile = _prepare_profile(user_id, username, first_name, last_name)
+    state = await _ensure_users_state()
+    async with state.lock:
+        record = state.rows.get(user_id)
+        if record is None:
+            record = await _create_user_record(state, user_id)
+        row = state.index[user_id]
+        updates: Dict[str, Tuple[int, Any]] = {}
+        changed = False
+        for key, value in profile.items():
+            current_value = _parse_str(record.get(key))
+            if current_value != value:
+                record[key] = value
+                updates[key] = (row, value)
+                changed = True
+        if changed:
+            record["updated_at"] = _now()
+            updates["updated_at"] = (row, record["updated_at"])
+            await _update_cells(state, updates)
+        return dict(record)
+
+
+_USER_PROFILE_BACKFILL_DONE = False
+
+
+def _needs_backfill(record: Dict[str, Any]) -> bool:
+    for field in ("username", "first_name", "last_name", "tg_link"):
+        value = _parse_str(record.get(field))
+        if not value:
+            return True
+    return False
+
+
+async def backfill_user_profiles(
+    fetcher: Callable[[int], Awaitable[Optional[Dict[str, Optional[str]]]]],
+    *,
+    delay: float = 0.2,
+) -> None:
+    global _USER_PROFILE_BACKFILL_DONE
+    if _USER_PROFILE_BACKFILL_DONE:
+        return
+    _USER_PROFILE_BACKFILL_DONE = True
+    try:
+        state = await _ensure_users_state()
+    except Exception:  # pragma: no cover - defensive initialisation
+        log.warning("Failed to initialise users sheet for backfill", exc_info=True)
+        return
+
+    async with state.lock:
+        candidates = [
+            user_id
+            for user_id, record in state.rows.items()
+            if _needs_backfill(record)
+        ]
+
+    if not candidates:
+        return
+
+    log.info("Backfilling Telegram profiles for %s users", len(candidates))
+    for user_id in candidates:
+        try:
+            profile = await fetcher(user_id)
+        except Exception:  # pragma: no cover - external dependency
+            log.warning("Backfill fetch failed for user %s", user_id, exc_info=True)
+            continue
+        if not profile:
+            continue
+        try:
+            await upsert_user_profile(
+                user_id,
+                username=profile.get("username"),
+                first_name=profile.get("first_name"),
+                last_name=profile.get("last_name"),
+            )
+        except Exception:  # pragma: no cover - keep bot running
+            log.warning("Backfill update failed for user %s", user_id, exc_info=True)
+        if delay:
+            await asyncio.sleep(delay)
 
 
 # ---------------------------------------------------------------------------
@@ -525,36 +679,34 @@ async def create_payment_record(
     payload: str,
     metadata: Dict[str, Any],
     idempotency_key: str = "",
+    username: Optional[str] = None,
 ) -> None:
     state = await _ensure_payments_state()
     key = (provider, ext_id)
+    username_clean = _clean_username(username) if username is not None else None
     async with state.lock:
         record = state.rows.get(key)
         now = _now()
         metadata_str = json.dumps(metadata) if isinstance(metadata, dict) else _parse_str(metadata)
         if record:
-            changed = False
+            updates: Dict[str, Tuple[int, Any]] = {}
+            row = state.index[key]
             if status and record.get("status") != status:
                 record["status"] = status
-                changed = True
+                updates["status"] = (row, record["status"])
             if payload and record.get("payload") != payload:
                 record["payload"] = payload
-                changed = True
+                updates["payload"] = (row, record["payload"])
             if metadata_str and record.get("metadata") != metadata_str:
                 record["metadata"] = metadata_str
-                changed = True
-            if changed:
+                updates["metadata"] = (row, record["metadata"])
+            if username_clean is not None and record.get("username") != username_clean:
+                record["username"] = username_clean
+                updates["username"] = (row, username_clean)
+            if updates:
                 record["updated_at"] = now
-                row = state.index[key]
-                await _update_cells(
-                    state,
-                    {
-                        "status": (row, record["status"]),
-                        "payload": (row, record["payload"]),
-                        "metadata": (row, record["metadata"]),
-                        "updated_at": (row, record["updated_at"]),
-                    },
-                )
+                updates["updated_at"] = (row, record["updated_at"])
+                await _update_cells(state, updates)
             return
         row_index = state.next_row
         record = {
@@ -569,6 +721,7 @@ async def create_payment_record(
             "created_at": now,
             "updated_at": now,
             "idempotency_key": idempotency_key,
+            "username": username_clean or "",
         }
         await _write_row(state, row_index, record)
         state.index[key] = row_index
@@ -673,6 +826,7 @@ async def create_job(
     seconds: int,
     model: str,
     cost_credits: int,
+    username: Optional[str] = None,
 ) -> None:
     state = await _ensure_jobs_state()
     async with state.lock:
@@ -680,6 +834,7 @@ async def create_job(
             return
         now = _now()
         row_index = state.next_row
+        username_clean = _clean_username(username) if username is not None else ""
         record = {
             "job_id": job_id,
             "user_id": user_id,
@@ -695,6 +850,7 @@ async def create_job(
             "seconds": seconds,
             "model": model,
             "cost_credits": cost_credits,
+            "username": username_clean,
         }
         await _write_row(state, row_index, record)
         state.index[job_id] = row_index
@@ -755,6 +911,7 @@ async def count_jobs_by_status(user_id: int, statuses: Iterable[str]) -> int:
 __all__ = [
     "init",
     "get_or_create_user",
+    "upsert_user_profile",
     "add_credits",
     "set_user_credits",
     "mark_bonus_granted",
@@ -765,6 +922,7 @@ __all__ = [
     "get_payment_by_ext",
     "list_payments_by_status",
     "get_payment_by_order_id",
+    "backfill_user_profiles",
     "create_job",
     "update_job_status",
     "get_job",
