@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from typing import Any, List, Optional
 
 from aiogram import Bot, Dispatcher, executor
+from aiogram.contrib.fsm_storage.memory import MemoryStorage
 from fastapi import FastAPI
 import uvicorn
 
@@ -52,7 +53,7 @@ def _parse_args() -> argparse.Namespace:
 
 def _init_application(config: Config) -> ApplicationState:
     bot = Bot(token=config.bot_token, parse_mode="HTML")
-    dp = Dispatcher(bot)
+    dp = Dispatcher(bot, storage=MemoryStorage())
     db = Database()
     sora_client = SoraClient(config=config)
     job_queue = JobQueue(db=db, sora_client=sora_client, config=config)
