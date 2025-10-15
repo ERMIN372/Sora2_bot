@@ -132,6 +132,7 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
             "🎛 Кадр: {size} · Модель: Sora-2\n"
             "Стоимость: {price}"
         ),
+        "flow.price_tag": "{credits} (~{approx})",
         "flow.no_prompt": "Добавьте описание. Пример: <code>кот идёт по неону, киберпанк</code>",
         "flow.order_submitted": "🧾 Заказ принят. Место в очереди: {queue_pos}. Пришлём видео сюда.",
         "flow.duplicate": "Задача уже в очереди.",
@@ -144,13 +145,9 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "errors.unknown": "неизвестная ошибка",
         "balance.info": "Ваш баланс: {credits}.",
         "balance.actions": "Выберите действие ниже.",
-        "payment.unavailable": "Оплата картой временно недоступна. Попробуйте позже.",
-        "payment.package.label.1": "1 генерация — {price} ₽",
-        "payment.package.label.5": "5 генераций — {price} ₽",
-        "payment.package.label.10": "10 генераций — {price} ₽",
-        "payment.package.label.30": "30 генераций — {price} ₽",
-        "payment.package.subtitle": "мгновенное зачисление",
+        "payment.unavailable": "Оплата картой временно недоступна.",
         "payment.packages.title": "Доступные пакеты:",
+        "payment.packages.line": "{credits} — {price}",
         "payment.store.instructions": "Перейдите по ссылке для оплаты. После оплаты кредиты начислятся автоматически.",
         "payment.unknown_package": "Неизвестный пакет оплаты.",
         "payment.creation_failed": "Не удалось создать платёж. Попробуйте позже.",

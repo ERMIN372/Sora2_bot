@@ -93,6 +93,7 @@ class JobQueue:
             image_file_id=image_file_id,
             size=size,
             model=forced_model,
+            cost_credits=self._config.generation_cost_credits,
         )
         await self._db.create_job(record)
         await self.enqueue(job_id=job_id, user_id=user_id, prompt=prompt)
@@ -152,7 +153,15 @@ class JobQueue:
                     "failed",
                     error=result.error or "Unknown error",
                 )
-                await self._db.add_credits(pending.user_id, self._config.credits_per_generation)
+                balance = await self._db.add_credits(
+                    pending.user_id, self._config.generation_cost_credits
+                )
+                log.info(
+                    "Refunded credits for job %s cost_credits=%s balance_after=%s",
+                    pending.job_id,
+                    self._config.generation_cost_credits,
+                    balance,
+                )
             else:
                 # Job still running - requeue for later polling
                 await self._db.update_job(pending.job_id, result.status)

@@ -2,11 +2,15 @@
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Dict, Iterable, List, Optional
 
 import gsheets_db
+
+
+log = logging.getLogger(__name__)
 
 
 @dataclass
@@ -17,6 +21,7 @@ class User:
     created_at: datetime
     updated_at: datetime
     notes: str = ""
+    economy_v2: bool = False
 
 
 @dataclass
@@ -34,6 +39,7 @@ class GenerationJobRecord:
     size: Optional[str] = None
     seconds: Optional[int] = None
     model: Optional[str] = None
+    cost_credits: Optional[int] = None
 
 
 def _parse_datetime(value: str) -> datetime:
@@ -53,6 +59,7 @@ def _user_from_dict(data: Dict[str, Any]) -> User:
         created_at=_parse_datetime(data.get("created_at", "")),
         updated_at=_parse_datetime(data.get("updated_at", "")),
         notes=str(data.get("notes", "")) if data.get("notes") is not None else "",
+        economy_v2=bool(int(data.get("economy_v2", 0) or 0)),
     )
 
 
@@ -68,6 +75,11 @@ def _job_from_dict(data: Dict[str, Any]) -> GenerationJobRecord:
     except (TypeError, ValueError):
         seconds = None
     model = data.get("model") or None
+    cost_raw = data.get("cost_credits")
+    try:
+        cost_credits = int(cost_raw) if cost_raw not in (None, "") else None
+    except (TypeError, ValueError):
+        cost_credits = None
     return GenerationJobRecord(
         id=str(data.get("job_id", "")),
         user_id=int(data.get("user_id", 0)),
@@ -82,6 +94,7 @@ def _job_from_dict(data: Dict[str, Any]) -> GenerationJobRecord:
         size=size,
         seconds=seconds,
         model=model,
+        cost_credits=cost_credits,
     )
 
 
@@ -152,6 +165,28 @@ class Database:
     async def count_active_jobs(self, user_id: int) -> int:
         return await gsheets_db.count_jobs_by_status(user_id, ("queued", "running"))
 
+    async def migrate_credit_balances(self, multiplier: int) -> int:
+        users = await gsheets_db.list_users()
+        migrated = 0
+        for record in users:
+            user_id = int(record.get("user_id", 0))
+            if not user_id:
+                continue
+            if record.get("economy_v2"):
+                continue
+            current = int(record.get("credits", 0))
+            if current > 0:
+                new_balance = current * multiplier
+                await gsheets_db.set_user_credits(user_id, new_balance)
+                migrated += 1
+                log.info(
+                    "Migrated user %s credits=%s cost_multiplier=%s", user_id, current, multiplier
+                )
+            await gsheets_db.mark_economy_v2(user_id)
+        if migrated:
+            log.info("Credit economy migration applied to %s users", migrated)
+        return migrated
+
     # ------------------------------------------------------------------
     # Payments
     # ------------------------------------------------------------------
@@ -188,9 +223,12 @@ class Database:
         amount_cp: int,
         items: int,
         status: str,
+        *,
         payload: str,
+        metadata: Optional[Dict[str, Any]] = None,
+        idempotency_key: str = "",
     ) -> None:
-        metadata = _parse_metadata(payload)
+        metadata_dict = metadata if metadata is not None else _parse_metadata(payload)
         await gsheets_db.create_payment_record(
             provider,
             ext_id,
@@ -199,7 +237,8 @@ class Database:
             items,
             status,
             payload=payload,
-            metadata=metadata,
+            metadata=metadata_dict,
+            idempotency_key=idempotency_key,
         )
 
     async def update_payment_status_by_ext(
@@ -209,12 +248,13 @@ class Database:
         status: str,
         *,
         credits_added: Optional[int] = None,
-        metadata: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+        idempotency_key: Optional[str] = None,
     ) -> None:
         record = await gsheets_db.get_payment_by_ext(provider, ext_id)
         existing_metadata = _parse_metadata(record.get("metadata") if record else None)
         if metadata is not None:
-            incoming = _parse_metadata(metadata)
+            incoming = metadata
             existing_metadata.update(incoming)
         if credits_added is not None:
             existing_metadata["credits_added"] = credits_added
@@ -224,6 +264,7 @@ class Database:
             ext_id,
             status,
             metadata=metadata_str,
+            idempotency_key=idempotency_key,
         )
 
     async def get_payment_by_ext(self, provider: str, ext_id: str) -> Optional[Dict[str, Any]]:
@@ -254,6 +295,7 @@ class Database:
             job.size or "",
             job.seconds or 0,
             job.model or "",
+            job.cost_credits or 0,
         )
 
     async def update_job(

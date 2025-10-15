@@ -1,8 +1,8 @@
 """Helpers to interact with the YooKassa payments API."""
 from __future__ import annotations
 
-import json
 import uuid
+from decimal import Decimal
 from typing import Any, Dict
 
 from yookassa import Configuration, Payment
@@ -38,17 +38,24 @@ def build_return_url(order_id: str) -> str:
 
 
 def _build_metadata(user_id: int, items: int, idemp: str) -> Dict[str, Any]:
-    return {"user_id": str(user_id), "items": int(items), "idemp": idemp}
+    return {
+        "user_id": str(user_id),
+        "items": int(items),
+        "purchased_credits": int(items),
+        "idempotency_key": idemp,
+        "idemp": idemp,
+    }
 
 
-def create_payment(amount_rub: int, user_id: int, items: int, description: str) -> Dict[str, Any]:
+def create_payment(amount_cp: int, user_id: int, items: int, description: str) -> Dict[str, Any]:
     """Create a YooKassa payment and return identifiers and confirmation URL."""
 
     config = _require_config()
     idemp = str(uuid.uuid4())
     metadata = _build_metadata(user_id, items, idemp)
+    amount_value = (Decimal(amount_cp) / Decimal(100)).quantize(Decimal("0.01"))
     body: Dict[str, Any] = {
-        "amount": {"value": f"{amount_rub:.2f}", "currency": "RUB"},
+        "amount": {"value": str(amount_value), "currency": "RUB"},
         "capture": True,
         "confirmation": {"type": "redirect", "return_url": build_return_url(idemp)},
         "description": description[:128],
@@ -61,7 +68,7 @@ def create_payment(amount_rub: int, user_id: int, items: int, description: str) 
                 {
                     "description": "Sora2 video generation",
                     "quantity": "1.0",
-                    "amount": {"value": f"{amount_rub:.2f}", "currency": "RUB"},
+                    "amount": {"value": str(amount_value), "currency": "RUB"},
                     "vat_code": 1,
                 }
             ],
@@ -72,7 +79,8 @@ def create_payment(amount_rub: int, user_id: int, items: int, description: str) 
         "confirmation_url": payment.confirmation.confirmation_url,
         "status": payment.status,
         "order_id": idemp,
-        "metadata": json.dumps(metadata),
+        "metadata": metadata,
+        "idempotency_key": idemp,
     }
 
 
