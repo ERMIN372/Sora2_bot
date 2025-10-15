@@ -26,6 +26,7 @@ _USERS_HEADERS = [
     "user_id",
     "credits",
     "bonus_granted",
+    "economy_v2",
     "created_at",
     "updated_at",
     "notes",
@@ -59,6 +60,7 @@ _JOBS_HEADERS = [
     "size",
     "seconds",
     "model",
+    "cost_credits",
 ]
 
 _API_RETRY = dict(
@@ -236,6 +238,7 @@ def _normalise_user(row: Dict[str, Any]) -> Dict[str, Any]:
         "user_id": _parse_int(row.get("user_id")),
         "credits": _parse_int(row.get("credits")),
         "bonus_granted": bool(_parse_int(row.get("bonus_granted"))),
+        "economy_v2": bool(_parse_int(row.get("economy_v2"))),
         "created_at": _parse_str(row.get("created_at")),
         "updated_at": _parse_str(row.get("updated_at")),
         "notes": _parse_str(row.get("notes")),
@@ -273,6 +276,7 @@ def _normalise_job(row: Dict[str, Any]) -> Dict[str, Any]:
         "size": _parse_str(row.get("size")),
         "seconds": _parse_int(row.get("seconds")),
         "model": _parse_str(row.get("model")),
+        "cost_credits": _parse_int(row.get("cost_credits")),
     }
 
 
@@ -393,6 +397,7 @@ async def _create_user_record(state: _SheetState, user_id: int) -> Dict[str, Any
         "user_id": user_id,
         "credits": 0,
         "bonus_granted": 0,
+        "economy_v2": 0,
         "created_at": now,
         "updated_at": now,
         "notes": "",
@@ -440,6 +445,25 @@ async def add_credits(user_id: int, delta: int) -> int:
         return new_balance
 
 
+async def set_user_credits(user_id: int, value: int) -> int:
+    state = await _ensure_users_state()
+    async with state.lock:
+        record = state.rows.get(user_id)
+        if record is None:
+            record = await _create_user_record(state, user_id)
+        record["credits"] = value
+        record["updated_at"] = _now()
+        row = state.index[user_id]
+        await _update_cells(
+            state,
+            {
+                "credits": (row, value),
+                "updated_at": (row, record["updated_at"]),
+            },
+        )
+        return value
+
+
 async def mark_bonus_granted(user_id: int) -> None:
     state = await _ensure_users_state()
     async with state.lock:
@@ -458,6 +482,32 @@ async def mark_bonus_granted(user_id: int) -> None:
                 "updated_at": (row, record["updated_at"]),
             },
         )
+
+
+async def mark_economy_v2(user_id: int) -> None:
+    state = await _ensure_users_state()
+    async with state.lock:
+        record = state.rows.get(user_id)
+        if record is None:
+            record = await _create_user_record(state, user_id)
+        if record.get("economy_v2"):
+            return
+        record["economy_v2"] = 1
+        record["updated_at"] = _now()
+        row = state.index[user_id]
+        await _update_cells(
+            state,
+            {
+                "economy_v2": (row, 1),
+                "updated_at": (row, record["updated_at"]),
+            },
+        )
+
+
+async def list_users() -> List[Dict[str, Any]]:
+    state = await _ensure_users_state()
+    async with state.lock:
+        return [dict(record) for record in state.rows.values()]
 
 
 # ---------------------------------------------------------------------------
@@ -622,6 +672,7 @@ async def create_job(
     size: str,
     seconds: int,
     model: str,
+    cost_credits: int,
 ) -> None:
     state = await _ensure_jobs_state()
     async with state.lock:
@@ -643,6 +694,7 @@ async def create_job(
             "size": size,
             "seconds": seconds,
             "model": model,
+            "cost_credits": cost_credits,
         }
         await _write_row(state, row_index, record)
         state.index[job_id] = row_index
@@ -704,7 +756,10 @@ __all__ = [
     "init",
     "get_or_create_user",
     "add_credits",
+    "set_user_credits",
     "mark_bonus_granted",
+    "mark_economy_v2",
+    "list_users",
     "create_payment_record",
     "update_payment_status_by_ext",
     "get_payment_by_ext",

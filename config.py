@@ -7,7 +7,8 @@ import json
 import logging
 import os
 from dataclasses import dataclass, field
-from typing import Dict, Optional
+from decimal import ROUND_HALF_UP, Decimal
+from typing import Dict, Mapping, Optional, Tuple
 
 from dotenv import load_dotenv
 
@@ -15,15 +16,46 @@ load_dotenv()
 
 log = logging.getLogger(__name__)
 
+CREDIT_PRICE_KOPEKS = 2580
+SORA_VIDEO_CREDITS = Decimal("5")
+
+
+@dataclass(frozen=True)
+class CreditPackage:
+    """A bundle of credits sold for a fixed price in kopeks."""
+
+    credits: Decimal
+    price_kopeks: int
+
+    @property
+    def credits_int(self) -> int:
+        """Return the credit amount as an integer for current economy version."""
+
+        return int(self.credits)
+
+    @property
+    def price_rubles(self) -> int:
+        """Return the rounded package price in rubles."""
+
+        return self.price_kopeks // 100
+
+
+DEFAULT_PRODUCTS: Dict[str, Decimal] = {
+    "sora_video": SORA_VIDEO_CREDITS,
+}
+
+DEFAULT_CREDIT_PACKAGES: Tuple[CreditPackage, ...] = (
+    CreditPackage(Decimal("5"), 12900),
+    CreditPackage(Decimal("10"), 25000),
+    CreditPackage(Decimal("25"), 61300),
+    CreditPackage(Decimal("50"), 120000),
+    CreditPackage(Decimal("150"), 356000),
+)
+
 
 @dataclass(frozen=True)
 class Config:
-    """Configuration values loaded from the environment.
-
-    The bot relies on a single Telegram bot token, an API key for the Sora
-    video generation service, and a Google Sheet that acts as the persistent
-    datastore for users, payments, and jobs.
-    """
+    """Configuration values loaded from the environment."""
 
     bot_token: str
     sora_api_key: str
@@ -32,8 +64,6 @@ class Config:
     database_path: str = "./bot.db"
     jobs_concurrency: int = 2
     max_jobs_per_user: int = 3
-    credits_per_payment: int = 10
-    credits_per_generation: int = 1
     request_timeout: float = 30.0
     request_retries: int = 3
     retry_backoff: float = 2.0
@@ -44,10 +74,6 @@ class Config:
     yookassa_return_path: str = "/pay/return"
     yookassa_webhook_path: str = "/pay/webhook"
     yookassa_send_receipts: bool = False
-    price_one_rub: int = 119
-    price_five_rub: int = 595
-    price_ten_rub: int = 1190
-    price_thirty_rub: int = 3570
     subscription_chat_id: Optional[str] = None
     yookassa_poll_interval: int = 60
     google_sheet_id: str = ""
@@ -55,6 +81,39 @@ class Config:
     gs_users_sheet: str = "users"
     gs_payments_sheet: str = "payments"
     gs_jobs_sheet: str = "jobs"
+    credit_price_kopeks: int = CREDIT_PRICE_KOPEKS
+    products: Mapping[str, Decimal] = field(default_factory=lambda: DEFAULT_PRODUCTS.copy())
+    credit_packages: Tuple[CreditPackage, ...] = DEFAULT_CREDIT_PACKAGES
+
+    @property
+    def yookassa_enabled(self) -> bool:
+        """Return ``True`` if YooKassa credentials are configured."""
+
+        return bool(self.yookassa_shop_id and self.yookassa_secret_key)
+
+    @property
+    def yookassa_ready(self) -> bool:
+        """Return ``True`` if YooKassa payments can be offered to users."""
+
+        return self.yookassa_enabled and bool(self.public_base_url)
+
+    @property
+    def generation_cost_credits(self) -> int:
+        """Return the configured credit price for a single Sora video."""
+
+        return int(self.products.get("sora_video", SORA_VIDEO_CREDITS))
+
+    def credits_to_kopeks(self, credits: Decimal | int) -> int:
+        """Convert *credits* to kopeks using the base credit price."""
+
+        value = Decimal(credits)
+        total = (value * Decimal(self.credit_price_kopeks)).quantize(Decimal("1"), rounding=ROUND_HALF_UP)
+        return int(total)
+
+    def generation_cost_approx_rubles(self) -> int:
+        """Return the approximate ruble cost of one Sora video without discounts."""
+
+        return self.credits_to_kopeks(self.products.get("sora_video", SORA_VIDEO_CREDITS)) // 100
 
     @property
     def aiogram_redis_url(self) -> Optional[str]:
@@ -159,8 +218,6 @@ def load_config() -> Config:
         sora_model=sora_model,
         jobs_concurrency=_get_env_int("JOBS_CONCURRENCY", Config.jobs_concurrency),
         max_jobs_per_user=_get_env_int("MAX_JOBS_PER_USER", Config.max_jobs_per_user),
-        credits_per_payment=_get_env_int("CREDITS_PER_PAYMENT", Config.credits_per_payment),
-        credits_per_generation=_get_env_int("CREDITS_PER_GENERATION", Config.credits_per_generation),
         request_timeout=_get_env_float("REQUEST_TIMEOUT", Config.request_timeout),
         request_retries=_get_env_int("REQUEST_RETRIES", Config.request_retries),
         retry_backoff=_get_env_float("RETRY_BACKOFF", Config.retry_backoff),
@@ -171,10 +228,6 @@ def load_config() -> Config:
         yookassa_return_path=os.getenv("YOOKASSA_RETURN_PATH", Config.yookassa_return_path),
         yookassa_webhook_path=os.getenv("YOOKASSA_WEBHOOK_PATH", Config.yookassa_webhook_path),
         yookassa_send_receipts=_get_env_bool("YOOKASSA_SEND_RECEIPTS", Config.yookassa_send_receipts),
-        price_one_rub=_get_env_int("PRICE_ONE_RUB", Config.price_one_rub),
-        price_five_rub=_get_env_int("PRICE_FIVE_RUB", Config.price_five_rub),
-        price_ten_rub=_get_env_int("PRICE_TEN_RUB", Config.price_ten_rub),
-        price_thirty_rub=_get_env_int("PRICE_THIRTY_RUB", Config.price_thirty_rub),
         subscription_chat_id=os.getenv("SUBSCRIPTION_CHAT_ID"),
         yookassa_poll_interval=_get_env_int("YOOKASSA_POLL_INTERVAL", Config.yookassa_poll_interval),
     )
@@ -234,4 +287,12 @@ def _load_runtime_config() -> RuntimeConfig:
 CFG = _load_runtime_config()
 
 
-__all__ = ["Config", "RuntimeConfig", "CFG", "load_config"]
+__all__ = [
+    "CREDIT_PRICE_KOPEKS",
+    "SORA_VIDEO_CREDITS",
+    "CreditPackage",
+    "Config",
+    "RuntimeConfig",
+    "CFG",
+    "load_config",
+]

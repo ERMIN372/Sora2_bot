@@ -67,7 +67,7 @@ class YooKassaProcessor:
         status = getattr(payment, "status", "")
         amount_cp = self._amount_to_cop(getattr(payment, "amount", None))
         user_id = metadata.get("user_id")
-        items = metadata.get("items", 0)
+        raw_purchased = metadata.get("purchased_credits", metadata.get("items", 0))
         if payment_id is None or user_id is None:
             log.warning(
                 "Incomplete YooKassa payment payload from %s: id=%s user_id=%s",
@@ -81,8 +81,21 @@ class YooKassaProcessor:
         except ValueError:
             log.warning("Invalid user_id %s in YooKassa metadata", user_id)
             return
-        items_int = int(items) if items else 0
-        metadata_str = json.dumps(metadata)
+        try:
+            items_int = int(raw_purchased) if raw_purchased not in (None, "") else 0
+        except (TypeError, ValueError):
+            fallback = metadata.get("items")
+            try:
+                items_int = int(fallback) if fallback not in (None, "") else 0
+            except (TypeError, ValueError):
+                items_int = 0
+        idempotency_key = str(
+            metadata.get("idempotency_key")
+            or metadata.get("idempotency_key".upper())
+            or metadata.get("idemp")
+            or ""
+        )
+        metadata_str = json.dumps(metadata, ensure_ascii=False)
 
         existing = await self._db.get_payment_by_ext("yookassa", payment_id)
         if not existing:
@@ -93,11 +106,17 @@ class YooKassaProcessor:
                 amount_cp,
                 items_int,
                 status or "pending",
-                metadata_str,
+                payload=metadata_str,
+                metadata=metadata,
+                idempotency_key=idempotency_key,
             )
         elif metadata_str and metadata_str != (existing.get("metadata") or "{}"):
             await self._db.update_payment_status_by_ext(
-                "yookassa", payment_id, existing["status"], metadata=metadata_str
+                "yookassa",
+                payment_id,
+                existing["status"],
+                metadata=metadata,
+                idempotency_key=idempotency_key,
             )
 
         if status == "succeeded":
@@ -112,7 +131,15 @@ class YooKassaProcessor:
                 payment_id,
                 "succeeded",
                 credits_added=items_int,
-                metadata=metadata_str,
+                metadata=metadata,
+                idempotency_key=idempotency_key,
+            )
+            log.info(
+                "YooKassa payment succeeded id=%s credits=%s amount_cp=%s net_cp=%s",
+                payment_id,
+                items_int,
+                amount_cp,
+                amount_cp,
             )
             await self._notify_success(user_id_int, items_int)
         elif status in {"pending", "waiting_for_capture", "canceled"}:
@@ -120,14 +147,16 @@ class YooKassaProcessor:
                 "yookassa",
                 payment_id,
                 status,
-                metadata=metadata_str,
+                metadata=metadata,
+                idempotency_key=idempotency_key,
             )
         else:
             await self._db.update_payment_status_by_ext(
                 "yookassa",
                 payment_id,
                 status or "pending",
-                metadata=metadata_str,
+                metadata=metadata,
+                idempotency_key=idempotency_key,
             )
 
     async def poll_pending_once(self) -> None:

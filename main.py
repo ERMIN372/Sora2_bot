@@ -91,6 +91,12 @@ async def _startup(state: ApplicationState, *, mode: str) -> None:
         log.info("Webhook configured at %s", CFG.WEBHOOK_URL)
 
     await state.db.init()
+    try:
+        migrated = await state.db.migrate_credit_balances(state.config.generation_cost_credits)
+        if migrated:
+            log.info("Migrated %s legacy user balances", migrated)
+    except Exception:  # pragma: no cover - defensive migration guard
+        log.exception("Failed to migrate legacy balances to credit economy")
     await state.job_queue.start()
 
     if state.yookassa_processor:

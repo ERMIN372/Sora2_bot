@@ -6,7 +6,7 @@ import logging
 import time
 from dataclasses import dataclass, field
 import re
-from typing import Dict, Literal, Optional, Tuple
+from typing import Dict, Literal, Optional
 
 from aiogram import Bot, Dispatcher
 from aiogram.dispatcher import FSMContext
@@ -39,13 +39,6 @@ SIZE_LABEL_KEYS: Dict[str, str] = {
     "vertical": "chips.vertical",
     "horizontal": "chips.horizontal",
 }
-
-PAYMENT_PACKAGES: Tuple[Tuple[int, str], ...] = (
-    (1, "price_one_rub"),
-    (5, "price_five_rub"),
-    (10, "price_ten_rub"),
-    (30, "price_thirty_rub"),
-)
 
 MAIN_MENU_BUTTONS = {
     i18n.t("buttons.generate_text"),
@@ -231,7 +224,12 @@ async def _send_order_confirmation(
     can_launch: bool,
     include_back: bool = True,
 ) -> Message:
-    price_text = format_credits(config.credits_per_generation)
+    approx_rub = config.generation_cost_approx_rubles()
+    price_text = i18n.t(
+        "flow.price_tag",
+        credits=format_credits(config.generation_cost_credits),
+        approx=f"{approx_rub} ₽",
+    )
     prompt_text: SafeText = format_prompt(order.prompt)
     if order.flow == "photo":
         body = i18n.t(
@@ -253,34 +251,43 @@ async def _send_order_confirmation(
 
 def _format_packages_list(config: Config) -> str:
     lines: list[str] = [i18n.t("payment.packages.title")]
-    for items, attr in PAYMENT_PACKAGES:
-        price = getattr(config, attr)
-        lines.append(i18n.t(f"payment.package.label.{items}", price=price))
-        lines.append(i18n.t("payment.package.subtitle"))
-        lines.append("")
+    for package in config.credit_packages:
+        credits_label = format_credits(package.credits_int)
+        price_label = f"{package.price_rubles} ₽"
+        lines.append(i18n.t("payment.packages.line", credits=credits_label, price=price_label))
+    lines.append("")
     lines.append(i18n.t("payment.store.instructions"))
     return "\n".join(line for line in lines if line).strip()
 
 
-def _build_packages_keyboard(config: Config) -> InlineKeyboardMarkup:
+def _build_packages_keyboard(config: Config) -> Optional[InlineKeyboardMarkup]:
+    if not config.yookassa_ready:
+        return None
     rows: list[list[InlineKeyboardButton]] = []
-    for items, attr in PAYMENT_PACKAGES:
-        price = getattr(config, attr)
-        text = i18n.t(f"payment.package.label.{items}", price=price)
-        rows.append([InlineKeyboardButton(text=text, callback_data=f"pay:{items}")])
+    for package in config.credit_packages:
+        text = i18n.t(
+            "payment.packages.line",
+            credits=format_credits(package.credits_int),
+            price=f"{package.price_rubles} ₽",
+        )
+        rows.append([InlineKeyboardButton(text=text, callback_data=f"pay:{package.credits_int}")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 async def _send_payment_showcase(bot: Bot, chat_id: int, config: Config) -> None:
     text = _format_packages_list(config)
     keyboard = _build_packages_keyboard(config)
-    await bot.send_message(chat_id, text, reply_markup=keyboard)
+    if keyboard is not None:
+        await bot.send_message(chat_id, text, reply_markup=keyboard)
+    else:
+        body = f"{text}\n\n{i18n.t('payment.unavailable')}"
+        await bot.send_message(chat_id, body.strip())
 
 
 def _price_for_items(config: Config, items: int) -> Optional[int]:
-    for count, attr in PAYMENT_PACKAGES:
-        if count == items:
-            return getattr(config, attr)
+    for package in config.credit_packages:
+        if package.credits_int == items:
+            return package.price_kopeks
     return None
 
 
@@ -300,7 +307,7 @@ async def _show_confirmation_and_balance(
 ) -> None:
     user_id = message.from_user.id
     credits = await db.get_user_credits(user_id)
-    can_launch = credits >= config.credits_per_generation
+    can_launch = credits >= config.generation_cost_credits
     session.pending_order = order
     session.awaiting_payment = not can_launch
     await _send_order_confirmation(
@@ -333,11 +340,19 @@ async def _launch_order(
         await callback.message.answer(i18n.t("flow.duplicate"))
         return
 
-    if not await db.deduct_credit(user_id, config.credits_per_generation):
+    if not await db.deduct_credit(user_id, config.generation_cost_credits):
         await callback.message.answer(i18n.t("flow.not_enough"))
         session.awaiting_payment = True
         await _send_payment_showcase(callback.message.bot, callback.message.chat.id, config)
         return
+
+    balance_after = await db.get_user_credits(user_id)
+    log.info(
+        "Launching job user=%s cost_credits=%s balance_after=%s",
+        user_id,
+        config.generation_cost_credits,
+        balance_after,
+    )
 
     try:
         await job_queue.submit(
@@ -349,7 +364,13 @@ async def _launch_order(
         )
     except Exception as exc:  # pragma: no cover - API interaction
         log.exception("Failed to submit job")
-        await db.add_credits(user_id, config.credits_per_generation)
+        refund_balance = await db.add_credits(user_id, config.generation_cost_credits)
+        log.info(
+            "Order launch failed, refund issued user=%s cost_credits=%s balance_after=%s",
+            user_id,
+            config.generation_cost_credits,
+            refund_balance,
+        )
         await callback.message.answer(
             i18n.t("status.failed", error=str(exc) or i18n.t("errors.unknown"))
         )
@@ -571,7 +592,7 @@ async def payment_callback_handler(
     config: Config,
 ) -> None:
     await callback.answer()
-    if not config.yookassa_enabled or not config.public_base_url:
+    if not config.yookassa_ready:
         await callback.message.answer(i18n.t("payment.unavailable"))
         return
     data = callback.data or ""
@@ -580,8 +601,8 @@ async def payment_callback_handler(
         items = int(items_raw)
     except (ValueError, AttributeError):
         return
-    amount = _price_for_items(config, items)
-    if amount is None:
+    package_price_cp = _price_for_items(config, items)
+    if package_price_cp is None:
         await callback.message.answer(i18n.t("payment.unknown_package"))
         return
 
@@ -594,7 +615,7 @@ async def payment_callback_handler(
     try:
         payment = await asyncio.to_thread(
             yookassa_client.create_payment,
-            amount,
+            package_price_cp,
             user.id,
             items,
             description,
@@ -612,14 +633,26 @@ async def payment_callback_handler(
         await callback.message.answer(i18n.t("payment.link_failed"))
         return
 
+    status = payment.get("status", "pending") or "pending"
+    idempotency_key = payment.get("idempotency_key", "")
+    metadata = payment.get("metadata", {})
     await db.create_payment_record(
         "yookassa",
         payment_id,
         user.id,
-        amount * 100,
+        package_price_cp,
         items,
-        payment.get("status", "pending") or "pending",
-        metadata,
+        status,
+        payload=str(description),
+        metadata=metadata,
+        idempotency_key=idempotency_key,
+    )
+    log.info(
+        "Created YooKassa payment %s credits=%s amount_cp=%s net_cp=%s",
+        payment_id,
+        items,
+        package_price_cp,
+        package_price_cp,
     )
 
     keyboard = InlineKeyboardMarkup(
@@ -663,7 +696,7 @@ async def resend_pending_order(
     if not order:
         return False
     credits = await db.get_user_credits(user_id)
-    can_launch = credits >= config.credits_per_generation
+    can_launch = credits >= config.generation_cost_credits
     session.awaiting_payment = not can_launch
     await _send_order_confirmation(
         bot=bot,
