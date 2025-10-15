@@ -296,7 +296,14 @@ def _build_packages_keyboard(config: Config) -> Optional[InlineKeyboardMarkup]:
             credits=format_credits(package.credits_int),
             price=f"{package.price_rubles} ₽",
         )
-        rows.append([InlineKeyboardButton(text=text, callback_data=f"pay:{package.credits_int}")])
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=text,
+                    callback_data=f"pay:{package.package_id}",
+                )
+            ]
+        )
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -308,13 +315,6 @@ async def _send_payment_showcase(bot: Bot, chat_id: int, config: Config) -> None
     else:
         body = f"{text}\n\n{i18n.t('payment.unavailable')}"
         await bot.send_message(chat_id, body.strip())
-
-
-def _price_for_items(config: Config, items: int) -> Optional[int]:
-    for package in config.credit_packages:
-        if package.credits_int == items:
-            return package.price_kopeks
-    return None
 
 
 async def _handle_not_enough_credits(message: Message, config: Config, session: UserSession) -> None:
@@ -622,12 +622,11 @@ async def payment_callback_handler(
         return
     data = callback.data or ""
     try:
-        _, items_raw = data.split(":", maxsplit=1)
-        items = int(items_raw)
+        _, package_id = data.split(":", maxsplit=1)
     except (ValueError, AttributeError):
         return
-    package_price_cp = _price_for_items(config, items)
-    if package_price_cp is None:
+    package = config.get_credit_package(package_id)
+    if package is None:
         await callback.message.answer(i18n.t("payment.unknown_package"))
         return
 
@@ -641,13 +640,12 @@ async def payment_callback_handler(
         last_name=user.last_name,
     )
 
-    description = f"Sora2 {items} credits"
+    description = f"Sora2 {package.credits_int} credits"
     try:
         payment = await asyncio.to_thread(
             yookassa_client.create_payment,
-            package_price_cp,
+            package,
             user.id,
-            items,
             description,
         )
     except Exception:  # pragma: no cover - external API
@@ -666,24 +664,27 @@ async def payment_callback_handler(
     status = payment.get("status", "pending") or "pending"
     idempotency_key = payment.get("idempotency_key", "")
     metadata = payment.get("metadata", {})
+    amount_cp = int(payment.get("amount_cp", package.price_kopeks))
     await db.create_payment_record(
         "yookassa",
         payment_id,
         user.id,
-        package_price_cp,
-        items,
+        amount_cp,
+        package.credits_int,
         status,
         payload=str(description),
         metadata=metadata,
         idempotency_key=idempotency_key,
         username=user.username,
+        package_id=package.package_id,
+        purchased_credits=package.credits_int,
     )
     log.info(
         "Created YooKassa payment %s credits=%s amount_cp=%s net_cp=%s",
         payment_id,
-        items,
-        package_price_cp,
-        package_price_cp,
+        package.credits_int,
+        amount_cp,
+        amount_cp,
     )
 
     keyboard = InlineKeyboardMarkup(

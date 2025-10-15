@@ -54,6 +54,11 @@ _PAYMENTS_HEADERS = [
     "updated_at",
     "idempotency_key",
     "username",
+    "package_id",
+    "purchased_credits",
+    "processed_at",
+    "type",
+    "ref_payment_id",
 ]
 
 _JOBS_HEADERS = [
@@ -680,6 +685,12 @@ async def create_payment_record(
     metadata: Dict[str, Any],
     idempotency_key: str = "",
     username: Optional[str] = None,
+    *,
+    package_id: Optional[str] = None,
+    purchased_credits: Optional[int] = None,
+    processed_at: Optional[str] = None,
+    record_type: str = "payment",
+    ref_payment_id: Optional[str] = None,
 ) -> None:
     state = await _ensure_payments_state()
     key = (provider, ext_id)
@@ -703,6 +714,21 @@ async def create_payment_record(
             if username_clean is not None and record.get("username") != username_clean:
                 record["username"] = username_clean
                 updates["username"] = (row, username_clean)
+            if package_id is not None and record.get("package_id") != package_id:
+                record["package_id"] = package_id
+                updates["package_id"] = (row, package_id)
+            if purchased_credits is not None and record.get("purchased_credits") != purchased_credits:
+                record["purchased_credits"] = purchased_credits
+                updates["purchased_credits"] = (row, purchased_credits)
+            if processed_at is not None and record.get("processed_at") != processed_at:
+                record["processed_at"] = processed_at
+                updates["processed_at"] = (row, processed_at)
+            if record_type and record.get("type") != record_type:
+                record["type"] = record_type
+                updates["type"] = (row, record_type)
+            if ref_payment_id is not None and record.get("ref_payment_id") != ref_payment_id:
+                record["ref_payment_id"] = ref_payment_id
+                updates["ref_payment_id"] = (row, ref_payment_id)
             if updates:
                 record["updated_at"] = now
                 updates["updated_at"] = (row, record["updated_at"])
@@ -722,6 +748,11 @@ async def create_payment_record(
             "updated_at": now,
             "idempotency_key": idempotency_key,
             "username": username_clean or "",
+            "package_id": package_id or "",
+            "purchased_credits": purchased_credits if purchased_credits is not None else items,
+            "processed_at": processed_at or "",
+            "type": record_type or "payment",
+            "ref_payment_id": ref_payment_id or "",
         }
         await _write_row(state, row_index, record)
         state.index[key] = row_index
@@ -737,6 +768,11 @@ async def update_payment_status_by_ext(
     metadata: Optional[str] = None,
     payload: Optional[str] = None,
     idempotency_key: Optional[str] = None,
+    processed_at: Optional[str] = None,
+    package_id: Optional[str] = None,
+    purchased_credits: Optional[int] = None,
+    record_type: Optional[str] = None,
+    ref_payment_id: Optional[str] = None,
 ) -> None:
     state = await _ensure_payments_state()
     key = (provider, ext_id)
@@ -758,6 +794,21 @@ async def update_payment_status_by_ext(
         if idempotency_key is not None and idempotency_key != record.get("idempotency_key"):
             record["idempotency_key"] = idempotency_key
             updates["idempotency_key"] = (row, idempotency_key)
+        if processed_at is not None and processed_at != record.get("processed_at"):
+            record["processed_at"] = processed_at
+            updates["processed_at"] = (row, processed_at)
+        if package_id is not None and package_id != record.get("package_id"):
+            record["package_id"] = package_id
+            updates["package_id"] = (row, package_id)
+        if purchased_credits is not None and purchased_credits != record.get("purchased_credits"):
+            record["purchased_credits"] = purchased_credits
+            updates["purchased_credits"] = (row, purchased_credits)
+        if record_type is not None and record_type != record.get("type"):
+            record["type"] = record_type
+            updates["type"] = (row, record_type)
+        if ref_payment_id is not None and ref_payment_id != record.get("ref_payment_id"):
+            record["ref_payment_id"] = ref_payment_id
+            updates["ref_payment_id"] = (row, ref_payment_id)
         if updates:
             record["updated_at"] = _now()
             updates["updated_at"] = (row, record["updated_at"])
@@ -810,6 +861,18 @@ async def get_payment_by_order_id(provider: str, order_id: str) -> Optional[Dict
             if parsed.get("idemp") == order_id or parsed.get("order_id") == order_id:
                 return dict(record)
     return None
+
+
+async def list_payments(provider: Optional[str] = None) -> List[Dict[str, Any]]:
+    state = await _ensure_payments_state()
+    async with state.lock:
+        records = [
+            dict(record)
+            for record in state.rows.values()
+            if provider is None or record.get("provider") == provider
+        ]
+    records.sort(key=lambda item: item.get("created_at", ""))
+    return records
 
 
 # ---------------------------------------------------------------------------
@@ -920,6 +983,7 @@ __all__ = [
     "create_payment_record",
     "update_payment_status_by_ext",
     "get_payment_by_ext",
+    "list_payments",
     "list_payments_by_status",
     "get_payment_by_order_id",
     "backfill_user_profiles",

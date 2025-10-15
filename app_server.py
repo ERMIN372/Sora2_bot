@@ -4,9 +4,10 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from ipaddress import ip_address, ip_network
-from typing import Dict, Optional
+from typing import Any, Dict, Optional
 
 from aiogram import Bot, Dispatcher, types
 from fastapi import APIRouter, FastAPI, Header, Request, Response
@@ -60,104 +61,183 @@ class YooKassaProcessor:
         self._db = db
         self._config = config
         self._bot = bot
+        self.credits_credited_total = 0
+        self.credits_refused_total = 0
+        self.duplicate_webhooks_total = 0
 
     async def process_payment(self, payment, *, source: str) -> None:
         metadata = self._extract_metadata(payment)
         payment_id = getattr(payment, "id", None)
-        status = getattr(payment, "status", "")
+        if payment_id is None:
+            log.warning("Incomplete YooKassa payment payload from %s without id", source)
+            return
+        status = getattr(payment, "status", "") or ""
+        paid = bool(getattr(payment, "paid", False))
         amount_cp = self._amount_to_cop(getattr(payment, "amount", None))
-        user_id = metadata.get("user_id")
-        raw_purchased = metadata.get("purchased_credits", metadata.get("items", 0))
-        if payment_id is None or user_id is None:
-            log.warning(
-                "Incomplete YooKassa payment payload from %s: id=%s user_id=%s",
-                source,
-                payment_id,
-                user_id,
-            )
-            return
-        try:
-            user_id_int = int(user_id)
-        except ValueError:
-            log.warning("Invalid user_id %s in YooKassa metadata", user_id)
-            return
-        try:
-            items_int = int(raw_purchased) if raw_purchased not in (None, "") else 0
-        except (TypeError, ValueError):
-            fallback = metadata.get("items")
-            try:
-                items_int = int(fallback) if fallback not in (None, "") else 0
-            except (TypeError, ValueError):
-                items_int = 0
         idempotency_key = str(
             metadata.get("idempotency_key")
             or metadata.get("idempotency_key".upper())
             or metadata.get("idemp")
             or ""
         )
-        metadata_str = json.dumps(metadata, ensure_ascii=False)
-
         existing = await self._db.get_payment_by_ext("yookassa", payment_id)
+        user_id_int = self._resolve_user_id(metadata, existing)
+        if not user_id_int:
+            log.warning(
+                "YooKassa payment %s missing valid user_id (source=%s)",
+                payment_id,
+                source,
+            )
+            return
+
+        package_id = str(
+            metadata.get("package_id")
+            or (existing.get("package_id") if existing else "")
+            or ""
+        )
+        purchased_credits = self._coerce_optional_int(metadata.get("purchased_credits"))
+        if purchased_credits is None and existing is not None:
+            purchased_credits = self._coerce_optional_int(existing.get("purchased_credits"))
+        if purchased_credits is None:
+            purchased_credits = self._coerce_optional_int(metadata.get("items"))
+        expected_amount_cp = self._coerce_optional_int(metadata.get("expected_amount_cp"))
+        if expected_amount_cp is None and existing is not None:
+            expected_amount_cp = self._coerce_optional_int(existing.get("amount_cp"))
+
+        package = self._config.get_credit_package(package_id) if package_id else None
+        purchased_for_record = purchased_credits if purchased_credits is not None else 0
+        metadata_payload = json.dumps(metadata, ensure_ascii=False)
+        initial_status = existing.get("status") if existing else "pending"
+
         if not existing:
             await self._db.create_payment_record(
                 "yookassa",
                 payment_id,
                 user_id_int,
-                amount_cp,
-                items_int,
-                status or "pending",
-                payload=metadata_str,
+                amount_cp or (expected_amount_cp or 0),
+                purchased_for_record,
+                initial_status,
+                payload=metadata_payload,
                 metadata=metadata,
                 idempotency_key=idempotency_key,
-            )
-        elif metadata_str and metadata_str != (existing.get("metadata") or "{}"):
-            await self._db.update_payment_status_by_ext(
-                "yookassa",
-                payment_id,
-                existing["status"],
-                metadata=metadata,
-                idempotency_key=idempotency_key,
-            )
-
-        if status == "succeeded":
-            if existing and existing.get("status") == "succeeded":
-                log.info("Duplicate success webhook for payment %s", payment_id)
-                return
-            await self._db.ensure_user(user_id_int, None)
-            if items_int:
-                await self._db.add_credits(user_id_int, items_int)
-            await self._db.update_payment_status_by_ext(
-                "yookassa",
-                payment_id,
-                "succeeded",
-                credits_added=items_int,
-                metadata=metadata,
-                idempotency_key=idempotency_key,
-            )
-            log.info(
-                "YooKassa payment succeeded id=%s credits=%s amount_cp=%s net_cp=%s",
-                payment_id,
-                items_int,
-                amount_cp,
-                amount_cp,
-            )
-            await self._notify_success(user_id_int, items_int)
-        elif status in {"pending", "waiting_for_capture", "canceled"}:
-            await self._db.update_payment_status_by_ext(
-                "yookassa",
-                payment_id,
-                status,
-                metadata=metadata,
-                idempotency_key=idempotency_key,
+                package_id=package.package_id if package else package_id or "",
+                purchased_credits=purchased_credits,
             )
         else:
             await self._db.update_payment_status_by_ext(
                 "yookassa",
                 payment_id,
-                status or "pending",
+                initial_status,
                 metadata=metadata,
                 idempotency_key=idempotency_key,
+                package_id=package.package_id if package else package_id or None,
+                purchased_credits=purchased_credits,
             )
+
+        if status != "succeeded":
+            target_status = status or initial_status
+            await self._db.update_payment_status_by_ext(
+                "yookassa",
+                payment_id,
+                target_status,
+                metadata=metadata,
+                idempotency_key=idempotency_key,
+                package_id=package.package_id if package else package_id or None,
+                purchased_credits=purchased_credits,
+            )
+            return
+
+        if existing and existing.get("status") == "succeeded":
+            self.duplicate_webhooks_total += 1
+            log.info("Duplicate success webhook for payment %s", payment_id)
+            await self._db.update_payment_status_by_ext(
+                "yookassa",
+                payment_id,
+                "succeeded",
+                metadata=metadata,
+                idempotency_key=idempotency_key,
+                package_id=package.package_id if package else package_id or None,
+                purchased_credits=purchased_credits,
+            )
+            return
+
+        validation_error = self._validate_payment(
+            payment_id=payment_id,
+            paid=paid,
+            package=package,
+            purchased_credits=purchased_credits,
+            expected_amount_cp=expected_amount_cp,
+            amount_cp=amount_cp,
+            metadata=metadata,
+        )
+        if validation_error is not None:
+            reason, refused_credits = validation_error
+            self.credits_refused_total += refused_credits
+            log.warning("Refused YooKassa payment %s: %s", payment_id, reason)
+            await self._db.update_payment_status_by_ext(
+                "yookassa",
+                payment_id,
+                "refused",
+                metadata={"refused_reason": reason, **metadata},
+                idempotency_key=idempotency_key,
+                package_id=package.package_id if package else package_id or None,
+                purchased_credits=purchased_credits,
+            )
+            return
+
+        assert package is not None  # for type checkers
+        assert purchased_credits is not None
+
+        await self._db.ensure_user(user_id_int, None)
+        balance_before = await self._db.get_user_credits(user_id_int)
+        processed_at = self._now_iso()
+        metadata_update: Dict[str, Any] = {
+            "validated_amount_cp": amount_cp,
+            "validated_at": processed_at,
+            "validation_source": source,
+        }
+
+        if self._config.payments_read_only:
+            log.warning(
+                "PAYMENTS_READ_ONLY enabled – recorded YooKassa payment %s without crediting",
+                payment_id,
+            )
+            await self._db.update_payment_status_by_ext(
+                "yookassa",
+                payment_id,
+                "succeeded",
+                credits_added=0,
+                metadata={**metadata, **metadata_update, "read_only": True},
+                idempotency_key=idempotency_key,
+                processed_at=processed_at,
+                package_id=package.package_id,
+                purchased_credits=purchased_credits,
+            )
+            return
+
+        balance_after = await self._db.add_credits(user_id_int, purchased_credits)
+        self.credits_credited_total += purchased_credits
+        await self._db.update_payment_status_by_ext(
+            "yookassa",
+            payment_id,
+            "succeeded",
+            credits_added=purchased_credits,
+            metadata={**metadata, **metadata_update},
+            idempotency_key=idempotency_key,
+            processed_at=processed_at,
+            package_id=package.package_id,
+            purchased_credits=purchased_credits,
+        )
+        log.info(
+            "YooKassa payment succeeded id=%s user=%s credits=%s balance=%s→%s amount_cp=%s",
+            payment_id,
+            user_id_int,
+            purchased_credits,
+            balance_before,
+            balance_after,
+            amount_cp,
+        )
+        await self._notify_success(user_id_int, purchased_credits)
 
     async def poll_pending_once(self) -> None:
         pending = await self._db.list_payments_by_status(
@@ -206,6 +286,63 @@ class YooKassaProcessor:
         except (InvalidOperation, TypeError):
             return 0
         return int(quantised)
+
+    @staticmethod
+    def _coerce_optional_int(value: Any) -> Optional[int]:
+        if value in (None, "", " "):
+            return None
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _now_iso() -> str:
+        return datetime.utcnow().replace(microsecond=0).isoformat()
+
+    def _resolve_user_id(self, metadata: Dict[str, Any], existing: Optional[Dict[str, Any]]) -> Optional[int]:
+        candidate = metadata.get("user_id")
+        value = self._coerce_optional_int(candidate)
+        if value:
+            return value
+        if existing:
+            return self._coerce_optional_int(existing.get("user_id"))
+        return None
+
+    def _validate_payment(
+        self,
+        *,
+        payment_id: str,
+        paid: bool,
+        package,
+        purchased_credits: Optional[int],
+        expected_amount_cp: Optional[int],
+        amount_cp: int,
+        metadata: Dict[str, Any],
+    ) -> Optional[tuple[str, int]]:
+        if not paid:
+            return ("payment not marked as paid", purchased_credits or 0)
+        if metadata.get("kind") != "credits":
+            return ("unexpected payment kind", purchased_credits or 0)
+        if package is None:
+            return ("unknown package_id", purchased_credits or 0)
+        if purchased_credits is None:
+            return ("missing purchased_credits", 0)
+        if not (1 <= purchased_credits <= 1000):
+            return (f"invalid purchased_credits {purchased_credits}", purchased_credits)
+        if purchased_credits != package.credits_int:
+            return (
+                f"credits mismatch metadata={purchased_credits} expected_package={package.credits_int}",
+                purchased_credits,
+            )
+        if expected_amount_cp is None:
+            return ("missing expected_amount_cp", purchased_credits)
+        if abs(amount_cp - expected_amount_cp) > 100:
+            return (
+                f"amount mismatch actual={amount_cp} expected={expected_amount_cp}",
+                purchased_credits,
+            )
+        return None
 
     async def get_payment_by_order_id(self, order_id: str) -> Optional[Dict[str, object]]:
         return await self._db.get_payment_by_order_id("yookassa", order_id)
