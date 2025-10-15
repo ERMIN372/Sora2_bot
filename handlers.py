@@ -172,7 +172,12 @@ async def _ensure_user(message: Message, db: Database) -> int:
     user = message.from_user
     if user is None:  # pragma: no cover - defensive
         raise RuntimeError("Message without user")
-    await db.ensure_user(user.id, user.username)
+    await db.ensure_user(
+        user.id,
+        user.username,
+        first_name=user.first_name,
+        last_name=user.last_name,
+    )
     return user.id
 
 
@@ -349,6 +354,12 @@ async def _launch_order(
     user_id = user.id
     now = time.time()
     key = order.key()
+    await db.sync_user_profile(
+        user_id,
+        username=user.username,
+        first_name=user.first_name,
+        last_name=user.last_name,
+    )
     if session.last_launch_key == key and now - session.last_launch_ts < 5:
         await callback.message.answer(i18n.t("flow.duplicate"))
         return
@@ -374,6 +385,7 @@ async def _launch_order(
             size=order.size,
             model=order.model,
             image_file_id=order.image_file_id,
+            username=user.username,
         )
     except Exception as exc:  # pragma: no cover - API interaction
         log.exception("Failed to submit job")
@@ -621,7 +633,12 @@ async def payment_callback_handler(
     user = callback.from_user
     if user is None:  # pragma: no cover - defensive
         return
-    await db.ensure_user(user.id, user.username)
+    await db.ensure_user(
+        user.id,
+        user.username,
+        first_name=user.first_name,
+        last_name=user.last_name,
+    )
 
     description = f"Sora2 {items} credits"
     try:
@@ -658,6 +675,7 @@ async def payment_callback_handler(
         payload=str(description),
         metadata=metadata,
         idempotency_key=idempotency_key,
+        username=user.username,
     )
     log.info(
         "Created YooKassa payment %s credits=%s amount_cp=%s net_cp=%s",

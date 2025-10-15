@@ -5,7 +5,7 @@ import json
 import logging
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Awaitable, Callable, Dict, Iterable, List, Optional
 
 import gsheets_db
 
@@ -40,6 +40,7 @@ class GenerationJobRecord:
     seconds: Optional[int] = None
     model: Optional[str] = None
     cost_credits: Optional[int] = None
+    username: Optional[str] = None
 
 
 def _parse_datetime(value: str) -> datetime:
@@ -95,6 +96,7 @@ def _job_from_dict(data: Dict[str, Any]) -> GenerationJobRecord:
         seconds=seconds,
         model=model,
         cost_credits=cost_credits,
+        username=str(data.get("username", "")) or None,
     )
 
 
@@ -137,9 +139,44 @@ class Database:
     # Users
     # ------------------------------------------------------------------
 
-    async def ensure_user(self, telegram_id: int, username: Optional[str]) -> User:
-        data = await gsheets_db.get_or_create_user(telegram_id)
+    async def ensure_user(
+        self,
+        telegram_id: int,
+        username: Optional[str],
+        *,
+        first_name: Optional[str] = None,
+        last_name: Optional[str] = None,
+    ) -> User:
+        if username is None and first_name is None and last_name is None:
+            data = await gsheets_db.get_or_create_user(telegram_id)
+        else:
+            data = await gsheets_db.upsert_user_profile(
+                telegram_id,
+                username=username,
+                first_name=first_name,
+                last_name=last_name,
+            )
         return _user_from_dict(data)
+
+    async def sync_user_profile(
+        self,
+        telegram_id: int,
+        *,
+        username: Optional[str] = None,
+        first_name: Optional[str] = None,
+        last_name: Optional[str] = None,
+    ) -> None:
+        if username is None and first_name is None and last_name is None:
+            return
+        try:
+            await gsheets_db.upsert_user_profile(
+                telegram_id,
+                username=username,
+                first_name=first_name,
+                last_name=last_name,
+            )
+        except Exception:  # pragma: no cover - external dependency
+            log.warning("Failed to sync user profile for %s", telegram_id, exc_info=True)
 
     async def get_user_credits(self, telegram_id: int) -> int:
         data = await gsheets_db.get_or_create_user(telegram_id)
@@ -187,6 +224,15 @@ class Database:
             log.info("Credit economy migration applied to %s users", migrated)
         return migrated
 
+    async def backfill_user_profiles(
+        self,
+        fetcher: Callable[[int], Awaitable[Optional[Dict[str, Optional[str]]]]],
+    ) -> None:
+        try:
+            await gsheets_db.backfill_user_profiles(fetcher)
+        except Exception:  # pragma: no cover - background guard
+            log.warning("Failed to backfill user profiles", exc_info=True)
+
     # ------------------------------------------------------------------
     # Payments
     # ------------------------------------------------------------------
@@ -227,8 +273,19 @@ class Database:
         payload: str,
         metadata: Optional[Dict[str, Any]] = None,
         idempotency_key: str = "",
+        username: Optional[str] = None,
     ) -> None:
         metadata_dict = metadata if metadata is not None else _parse_metadata(payload)
+        username_value = username
+        if username_value is None:
+            try:
+                record = await gsheets_db.get_or_create_user(user_id)
+            except Exception:  # pragma: no cover - external dependency
+                log.warning(
+                    "Failed to resolve username for payment record user=%s", user_id, exc_info=True
+                )
+            else:
+                username_value = record.get("username") or None
         await gsheets_db.create_payment_record(
             provider,
             ext_id,
@@ -239,6 +296,7 @@ class Database:
             payload=payload,
             metadata=metadata_dict,
             idempotency_key=idempotency_key,
+            username=username_value,
         )
 
     async def update_payment_status_by_ext(
@@ -296,6 +354,7 @@ class Database:
             job.seconds or 0,
             job.model or "",
             job.cost_credits or 0,
+            username=job.username,
         )
 
     async def update_job(
