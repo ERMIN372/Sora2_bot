@@ -41,6 +41,22 @@ class GenerationJobRecord:
     model: Optional[str] = None
     cost_credits: Optional[int] = None
     username: Optional[str] = None
+    corr_id: Optional[str] = None
+
+
+@dataclass
+class ErrorLogRecord:
+    ts: datetime
+    user_id: int
+    username: Optional[str]
+    corr_id: Optional[str]
+    job_id: Optional[str]
+    model: Optional[str]
+    size: Optional[str]
+    status_code: Optional[int]
+    error_type: Optional[str]
+    error_msg_short: str
+    refunded: bool
 
 
 def _parse_datetime(value: str) -> datetime:
@@ -97,6 +113,7 @@ def _job_from_dict(data: Dict[str, Any]) -> GenerationJobRecord:
         model=model,
         cost_credits=cost_credits,
         username=str(data.get("username", "")) or None,
+        corr_id=str(data.get("corr_id", "")) or None,
     )
 
 
@@ -383,6 +400,7 @@ class Database:
             job.seconds or 0,
             job.model or "",
             job.cost_credits or 0,
+            job.corr_id,
             username=job.username,
         )
 
@@ -413,9 +431,30 @@ class Database:
             return None
         return _job_from_dict(data)
 
+    async def log_error_record(self, record: ErrorLogRecord) -> bool:
+        try:
+            await gsheets_db.append_error_record(
+                ts=record.ts.replace(microsecond=0).isoformat(),
+                user_id=record.user_id,
+                username=record.username or "",
+                corr_id=record.corr_id or "",
+                job_id=record.job_id or "",
+                model=record.model or "",
+                size=record.size or "",
+                status_code=record.status_code or "",
+                error_type=record.error_type or "",
+                error_msg_short=record.error_msg_short,
+                refunded=record.refunded,
+            )
+        except Exception:  # pragma: no cover - external dependency
+            log.warning("Failed to append error record", exc_info=True)
+            return False
+        return True
+
 
 __all__ = [
     "Database",
     "User",
     "GenerationJobRecord",
+    "ErrorLogRecord",
 ]

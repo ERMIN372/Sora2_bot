@@ -6,6 +6,8 @@ import logging
 import time
 from dataclasses import dataclass, field
 import re
+import uuid
+from datetime import datetime
 from typing import Dict, Literal, Optional
 
 from aiogram import Bot, Dispatcher
@@ -22,9 +24,17 @@ from aiogram.types import (
 )
 
 from config import Config
-from db import Database, GenerationJobRecord
+from db import Database, ErrorLogRecord, GenerationJobRecord
 from i18n import SafeText, escape_html, format_credits, format_prompt, i18n
 from jobs import JobQueue
+from observability import (
+    get_job_history,
+    get_last_error,
+    get_last_healthcheck,
+    log_event,
+    should_notify_support,
+)
+from sora_client import SoraAPIError
 import yookassa_client
 
 log = logging.getLogger(__name__)
@@ -71,10 +81,93 @@ class OrderContext:
     model: str
     image_file_id: Optional[str] = None
     created_at: float = field(default_factory=time.time)
+    corr_id: Optional[str] = None
 
     def key(self) -> str:
         parts = [self.flow, self.prompt, self.image_file_id or "", self.size, self.model]
         return "|".join(parts)
+
+
+def _shorten(text: str, limit: int = 240) -> str:
+    snippet = (text or "").strip()
+    if len(snippet) <= limit:
+        return snippet
+    return snippet[: limit - 3] + "..."
+
+
+def _map_sora_error(error: SoraAPIError) -> tuple[str, str, bool, str]:
+    status = error.status_code or 0
+    provider_message = (error.provider_message or str(error) or "").strip()
+    error_type = (error.error_type or "").lower()
+    error_code = (error.error_code or "").lower()
+    short = _shorten(provider_message or (error.args[0] if error.args else "Ошибка"))
+    notify_support = False
+    hint = error_type or error_code or "unknown"
+
+    if status in {401, 403}:
+        notify_support = True
+        hint = "auth"
+        message = (
+            "API-ключ недействителен или нет доступа к Sora. "
+            "Проверьте ключ/организацию. Сообщили оператору, скоро поправим."
+        )
+        short = "Недействительный API-ключ"
+    elif status == 429:
+        notify_support = True
+        hint = "rate_limit"
+        message = "Превышен лимит. Подождите и повторите."
+        short = "Лимит запросов"
+    elif status == 400 or "validation" in error_type:
+        detail = escape_html(provider_message or (error.args[0] if error.args else ""))
+        message = f"Неверные параметры запроса: {detail or 'проверьте входные данные.'}"
+        short = _shorten(provider_message or "Ошибка параметров")
+        hint = "validation"
+    elif status >= 500 or error_type in {"timeout", "network"} or status == 0:
+        notify_support = True
+        hint = "provider_unavailable"
+        message = "Провайдер недоступен. Попробуем ещё раз позже."
+        short = _shorten(provider_message or "Провайдер недоступен")
+    elif "policy" in error_type or "policy" in error_code:
+        hint = "policy"
+        message = "Запрос нарушает правила контента."
+        short = _shorten(provider_message or "Нарушение политики")
+    else:
+        detail = escape_html(provider_message or (error.args[0] if error.args else ""))
+        message = f"Не удалось выполнить запрос: {detail or 'попробуйте позже.'}"
+        short = _shorten(provider_message or "Ошибка Sora")
+    return message, short, notify_support, hint
+
+
+async def _notify_support(
+    bot: Bot,
+    config: Config,
+    *,
+    event: str,
+    corr_id: str,
+    user_id: int,
+    status_code: Optional[int],
+    error_type: Optional[str],
+    hint: str,
+) -> None:
+    chat_id = config.support_chat_id
+    if not chat_id:
+        return
+    key = f"{event}:{status_code}:{hint}"
+    if not should_notify_support(key, config.support_notify_interval):
+        return
+    lines = [
+        "⚠️ Критическая ошибка Sora",
+        f"event: {event}",
+        f"corr_id: {corr_id}",
+        f"user_id: {user_id}",
+        f"status: {status_code or 'n/a'}",
+        f"type: {error_type or '-'}",
+        f"hint: {hint}",
+    ]
+    try:
+        await bot.send_message(chat_id, "\n".join(lines))
+    except Exception:  # pragma: no cover - external dependency
+        log.warning("Failed to notify support chat", exc_info=True)
 
 
 @dataclass
@@ -387,11 +480,48 @@ async def _launch_order(
         await callback.message.answer(i18n.t("flow.duplicate"))
         return
 
+    corr_id = order.corr_id or str(uuid.uuid4())
+    order.corr_id = corr_id
+    log_event(
+        level="INFO",
+        event="enqueue",
+        corr_id=corr_id,
+        user_id=user_id,
+        username=user.username,
+        model=config.sora_model,
+        size=order.size,
+        credits_cost=config.generation_cost_credits,
+        prompt=order.prompt,
+    )
+
     if not await db.deduct_credit(user_id, config.generation_cost_credits):
+        log_event(
+            level="ERROR",
+            event="error",
+            corr_id=corr_id,
+            user_id=user_id,
+            username=user.username,
+            model=config.sora_model,
+            size=order.size,
+            error_type="insufficient_credits",
+            error_msg_short="Недостаточно кредитов",
+            prompt=order.prompt,
+        )
         await callback.message.answer(i18n.t("flow.not_enough"))
         session.awaiting_payment = True
         await _send_payment_showcase(callback.message.bot, callback.message.chat.id, config)
         return
+
+    log_event(
+        level="INFO",
+        event="charge",
+        corr_id=corr_id,
+        user_id=user_id,
+        username=user.username,
+        model=config.sora_model,
+        size=order.size,
+        credits_cost=config.generation_cost_credits,
+    )
 
     balance_after = await db.get_user_credits(user_id)
     log.info(
@@ -407,20 +537,126 @@ async def _launch_order(
             prompt=order.prompt,
             size=order.size,
             model=order.model,
+            corr_id=corr_id,
             image_file_id=order.image_file_id,
             username=user.username,
         )
+    except SoraAPIError as exc:
+        message, short, notify_support, hint = _map_sora_error(exc)
+        refunded = False
+        try:
+            await db.add_credits(user_id, config.generation_cost_credits)
+            refunded = True
+        except Exception:  # pragma: no cover - external dependency
+            log.exception("Failed to refund credits after submit error")
+        sheet_ok = await db.log_error_record(
+            ErrorLogRecord(
+                ts=datetime.utcnow(),
+                user_id=user_id,
+                username=user.username,
+                corr_id=corr_id,
+                job_id="",
+                model=config.sora_model,
+                size=order.size,
+                status_code=exc.status_code,
+                error_type=exc.error_type or "submit_failed",
+                error_msg_short=short,
+                refunded=refunded,
+            )
+        )
+        log_event(
+            level="ERROR",
+            event="error",
+            corr_id=corr_id,
+            user_id=user_id,
+            username=user.username,
+            model=config.sora_model,
+            size=order.size,
+            status_code=exc.status_code,
+            duration_ms=exc.duration_ms,
+            error_type=exc.error_type,
+            error_code=exc.error_code,
+            error_msg_short=short,
+            prompt=order.prompt,
+            gsheets_ok=sheet_ok,
+            refund_done=refunded,
+            extra={"provider_message": exc.provider_message},
+        )
+        log_event(
+            level="INFO",
+            event="refund",
+            corr_id=corr_id,
+            user_id=user_id,
+            username=user.username,
+            model=config.sora_model,
+            size=order.size,
+            credits_cost=config.generation_cost_credits,
+            refund_done=refunded,
+        )
+        if notify_support:
+            await _notify_support(
+                callback.message.bot,
+                config,
+                event="request",
+                corr_id=corr_id,
+                user_id=user_id,
+                status_code=exc.status_code,
+                error_type=exc.error_type,
+                hint=hint,
+            )
+        await callback.message.answer(message)
+        return
     except Exception as exc:  # pragma: no cover - API interaction
         log.exception("Failed to submit job")
-        refund_balance = await db.add_credits(user_id, config.generation_cost_credits)
-        log.info(
-            "Order launch failed, refund issued user=%s cost_credits=%s balance_after=%s",
-            user_id,
-            config.generation_cost_credits,
-            refund_balance,
+        refunded = False
+        try:
+            await db.add_credits(user_id, config.generation_cost_credits)
+            refunded = True
+        except Exception:
+            log.exception("Failed to refund credits after unexpected error")
+        short = _shorten(str(exc) or "Неизвестная ошибка")
+        sheet_ok = await db.log_error_record(
+            ErrorLogRecord(
+                ts=datetime.utcnow(),
+                user_id=user_id,
+                username=user.username,
+                corr_id=corr_id,
+                job_id="",
+                model=config.sora_model,
+                size=order.size,
+                status_code=None,
+                error_type="internal",
+                error_msg_short=short,
+                refunded=refunded,
+            )
+        )
+        log_event(
+            level="ERROR",
+            event="error",
+            corr_id=corr_id,
+            user_id=user_id,
+            username=user.username,
+            model=config.sora_model,
+            size=order.size,
+            error_type="internal",
+            error_msg_short=short,
+            prompt=order.prompt,
+            gsheets_ok=sheet_ok,
+            refund_done=refunded,
+        )
+        log_event(
+            level="INFO",
+            event="refund",
+            corr_id=corr_id,
+            user_id=user_id,
+            username=user.username,
+            model=config.sora_model,
+            size=order.size,
+            credits_cost=config.generation_cost_credits,
+            refund_done=refunded,
         )
         await callback.message.answer(
-            i18n.t("status.failed", error=str(exc) or i18n.t("errors.unknown"))
+            i18n.t("status.failed", error=escape_html(short) or i18n.t("errors.unknown"))
         )
         return
 
@@ -762,6 +998,98 @@ async def resend_pending_order(
     return True
 
 
+def _is_admin(user_id: int, config: Config) -> bool:
+    return user_id in config.admin_ids
+
+
+def _format_health_text(result) -> str:
+    mode = escape_html(result.details.get("mode", "-")) if isinstance(result.details, dict) else "-"
+    lines = [
+        f"Версия: {escape_html(result.version)}",
+        f"Режим: {mode}",
+        "",
+    ]
+    checks = result.details.get("checks", []) if isinstance(result.details, dict) else []
+    for item in checks:
+        if not isinstance(item, dict):
+            continue
+        label = escape_html(str(item.get("label", "")))
+        ok = bool(item.get("ok"))
+        detail_raw = item.get("detail")
+        detail = escape_html(str(detail_raw)) if detail_raw not in (None, "") else ""
+        icon = "✅" if ok else "❌"
+        if detail:
+            lines.append(f"{icon} {label}: {detail}")
+        else:
+            lines.append(f"{icon} {label}")
+    if result.errors:
+        lines.append("")
+        lines.append("Ошибки:")
+        for entry in result.errors:
+            lines.append(f"• {escape_html(str(entry))}")
+    lines.append("")
+    lines.append(f"startup_ok={'true' if result.ok else 'false'}")
+    return "\n".join(line for line in lines if line).strip()
+
+
+async def status_admin_command(message: Message, config: Config) -> None:
+    if not _is_admin(message.from_user.id if message.from_user else 0, config):
+        return
+    result = get_last_healthcheck()
+    if not result:
+        await message.answer("Данные проверки недоступны.")
+        return
+    await message.answer(_format_health_text(result))
+
+
+async def diag_admin_command(message: Message, config: Config) -> None:
+    if not _is_admin(message.from_user.id if message.from_user else 0, config):
+        return
+    snapshot = get_last_error()
+    if not snapshot:
+        await message.answer("Ошибок не зафиксировано.")
+        return
+    ts = datetime.fromtimestamp(snapshot.ts).isoformat(timespec="seconds")
+    lines = [
+        "Последняя ошибка:",
+        f"время: {escape_html(ts)}",
+        f"corr_id: {escape_html(snapshot.corr_id or '-')}",
+        f"job_id: {escape_html(snapshot.job_id or '-')}",
+        f"status: {escape_html(str(snapshot.status_code) if snapshot.status_code is not None else '-')}",
+        f"type: {escape_html(snapshot.error_type or '-')} / {escape_html(snapshot.error_code or '-')}",
+        f"msg: {escape_html(snapshot.error_msg_short or '-')}",
+    ]
+    if snapshot.provider_message:
+        lines.append("")
+        lines.append(f"provider: {escape_html(_shorten(snapshot.provider_message, 400))}")
+    await message.answer("\n".join(lines))
+
+
+async def job_admin_command(message: Message, config: Config) -> None:
+    if not _is_admin(message.from_user.id if message.from_user else 0, config):
+        return
+    args = (message.get_args() or "").strip()
+    if not args:
+        await message.answer("Укажите corr_id: /job <corr_id>")
+        return
+    history = get_job_history(args)
+    if not history:
+        await message.answer("События не найдены.")
+        return
+    lines = [f"История для {escape_html(args)}:"]
+    for event in history:
+        ts = escape_html(str(event.get("ts", "-")))
+        name = escape_html(str(event.get("event", "-")))
+        status_code = event.get("status_code")
+        status_label = f" status={status_code}" if status_code not in (None, "") else ""
+        error_type = event.get("error_type") or ""
+        error_label = f" error={escape_html(str(error_type))}" if error_type else ""
+        msg = event.get("error_msg_short") or ""
+        msg_label = f" msg={escape_html(_shorten(str(msg), 80))}" if msg else ""
+        lines.append(f"• {ts} · {name}{status_label}{error_label}{msg_label}")
+    await message.answer("\n".join(lines))
+
+
 async def successful_text_handler(
     message: Message,
     state: FSMContext,
@@ -802,6 +1130,21 @@ def register_handlers(
     dp.register_message_handler(
         lambda message, state: help_command(message, db, state, config),
         Command("help"),
+        state="*",
+    )
+    dp.register_message_handler(
+        lambda message: status_admin_command(message, config),
+        Command("status"),
+        state="*",
+    )
+    dp.register_message_handler(
+        lambda message: diag_admin_command(message, config),
+        Command("diag"),
+        state="*",
+    )
+    dp.register_message_handler(
+        lambda message: job_admin_command(message, config),
+        Command("job"),
         state="*",
     )
     dp.register_message_handler(
