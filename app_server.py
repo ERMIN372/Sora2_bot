@@ -81,6 +81,18 @@ class YooKassaProcessor:
             or ""
         )
         existing = await self._db.get_payment_by_ext("yookassa", payment_id)
+        existing_metadata: Dict[str, Any] = {}
+        if existing:
+            stored_metadata = existing.get("metadata")
+            if isinstance(stored_metadata, dict):
+                existing_metadata = stored_metadata
+            else:
+                try:
+                    parsed = json.loads(stored_metadata) if stored_metadata else {}
+                except (TypeError, json.JSONDecodeError):
+                    parsed = {}
+                if isinstance(parsed, dict):
+                    existing_metadata = parsed
         user_id_int = self._resolve_user_id(metadata, existing)
         if not user_id_int:
             log.warning(
@@ -90,21 +102,41 @@ class YooKassaProcessor:
             )
             return
 
-        package_id = str(
+        metadata_kind = str(metadata.get("kind") or existing_metadata.get("kind") or "credits")
+        metadata.setdefault("kind", metadata_kind)
+
+        raw_package_id = (
             metadata.get("package_id")
-            or (existing.get("package_id") if existing else "")
-            or ""
+            or (existing.get("package_id") if existing else None)
+            or existing_metadata.get("package_id")
         )
+        package_id = str(raw_package_id or "")
+        if package_id and "package_id" not in metadata:
+            metadata["package_id"] = package_id
         purchased_credits = self._coerce_optional_int(metadata.get("purchased_credits"))
         if purchased_credits is None and existing is not None:
             purchased_credits = self._coerce_optional_int(existing.get("purchased_credits"))
+        if purchased_credits is None and existing_metadata:
+            purchased_credits = self._coerce_optional_int(existing_metadata.get("purchased_credits"))
         if purchased_credits is None:
             purchased_credits = self._coerce_optional_int(metadata.get("items"))
         expected_amount_cp = self._coerce_optional_int(metadata.get("expected_amount_cp"))
         if expected_amount_cp is None and existing is not None:
             expected_amount_cp = self._coerce_optional_int(existing.get("amount_cp"))
+        if expected_amount_cp is None and existing_metadata:
+            expected_amount_cp = self._coerce_optional_int(existing_metadata.get("expected_amount_cp"))
 
         package = self._config.get_credit_package(package_id) if package_id else None
+        if package is None and purchased_credits is not None:
+            inferred_package = self._config.find_credit_package_by_credits(purchased_credits)
+            if inferred_package is not None:
+                package = inferred_package
+                package_id = inferred_package.package_id
+                metadata.setdefault("package_id", package_id)
+        if expected_amount_cp is None and package is not None:
+            expected_amount_cp = package.price_kopeks
+            metadata.setdefault("expected_amount_cp", expected_amount_cp)
+
         purchased_for_record = purchased_credits if purchased_credits is not None else 0
         metadata_payload = json.dumps(metadata, ensure_ascii=False)
         initial_status = existing.get("status") if existing else "pending"
@@ -322,7 +354,8 @@ class YooKassaProcessor:
     ) -> Optional[tuple[str, int]]:
         if not paid:
             return ("payment not marked as paid", purchased_credits or 0)
-        if metadata.get("kind") != "credits":
+        kind = str(metadata.get("kind") or "").lower()
+        if kind != "credits":
             return ("unexpected payment kind", purchased_credits or 0)
         if package is None:
             return ("unknown package_id", purchased_credits or 0)
