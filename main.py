@@ -17,6 +17,7 @@ from config import CFG, Config, load_config
 from db import Database
 from handlers import register_handlers
 from jobs import JobQueue
+from healthcheck import run_startup_healthcheck
 from sora_client import SoraClient
 import yookassa_client
 
@@ -91,6 +92,7 @@ async def _startup(state: ApplicationState, *, mode: str) -> None:
         log.info("Webhook configured at %s", CFG.WEBHOOK_URL)
 
     await state.db.init()
+    await run_startup_healthcheck(config=state.config, mode=mode, sora_client=state.sora_client)
 
     async def _fetch_profile(user_id: int) -> Optional[Dict[str, Optional[str]]]:
         try:

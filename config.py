@@ -72,6 +72,8 @@ class Config:
     jobs_concurrency: int = 2
     max_jobs_per_user: int = 3
     request_timeout: float = 30.0
+    request_connect_timeout: float = 10.0
+    request_read_timeout: float = 120.0
     request_retries: int = 3
     retry_backoff: float = 2.0
     yookassa_shop_id: Optional[str] = None
@@ -82,17 +84,22 @@ class Config:
     yookassa_webhook_path: str = "/pay/webhook"
     yookassa_send_receipts: bool = False
     subscription_chat_id: Optional[str] = None
+    support_chat_id: Optional[int] = None
     yookassa_poll_interval: int = 60
     google_sheet_id: str = ""
     google_service_account: Dict[str, object] = field(default_factory=dict)
     gs_users_sheet: str = "users"
     gs_payments_sheet: str = "payments"
     gs_jobs_sheet: str = "jobs"
+    gs_errors_sheet: str = "errors"
     credit_price_kopeks: int = CREDIT_PRICE_KOPEKS
     products: Mapping[str, Decimal] = field(default_factory=lambda: DEFAULT_PRODUCTS.copy())
     credit_packages: Tuple[CreditPackage, ...] = DEFAULT_CREDIT_PACKAGES
     payments_read_only: bool = False
     terms_url: str = "https://telegra.ph/Oferta-10-15-3"
+    admin_ids: Tuple[int, ...] = ()
+    bot_version: str = "dev"
+    support_notify_interval: int = 600
 
     @property
     def yookassa_enabled(self) -> bool:
@@ -172,6 +179,32 @@ def _get_env_bool(key: str, default: bool) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _get_optional_int(value: Optional[str]) -> Optional[int]:
+    if value is None:
+        return None
+    value = value.strip()
+    if not value:
+        return None
+    try:
+        return int(value)
+    except ValueError as exc:  # pragma: no cover - configuration guard
+        raise RuntimeError("Expected integer value") from exc
+
+
+def _get_env_int_list(key: str) -> Tuple[int, ...]:
+    raw = os.getenv(key, "")
+    if not raw:
+        return ()
+    parts = [item.strip() for item in raw.split(",") if item.strip()]
+    result: list[int] = []
+    for item in parts:
+        try:
+            result.append(int(item))
+        except ValueError as exc:  # pragma: no cover - configuration guard
+            raise RuntimeError(f"Environment variable {key!r} must contain integers") from exc
+    return tuple(result)
+
+
 def _load_service_account_info() -> Dict[str, object]:
     raw = os.getenv("GOOGLE_SA_JSON_BASE64")
     if not raw:
@@ -221,6 +254,7 @@ def load_config() -> Config:
     users_sheet = os.getenv("GS_USERS_SHEET", Config.gs_users_sheet)
     payments_sheet = os.getenv("GS_PAYMENTS_SHEET", Config.gs_payments_sheet)
     jobs_sheet = os.getenv("GS_JOBS_SHEET", Config.gs_jobs_sheet)
+    errors_sheet = os.getenv("GS_ERRORS_SHEET", Config.gs_errors_sheet)
 
     return Config(
         bot_token=bot_token,
@@ -232,10 +266,17 @@ def load_config() -> Config:
         gs_users_sheet=users_sheet,
         gs_payments_sheet=payments_sheet,
         gs_jobs_sheet=jobs_sheet,
+        gs_errors_sheet=errors_sheet,
         sora_model=sora_model,
         jobs_concurrency=_get_env_int("JOBS_CONCURRENCY", Config.jobs_concurrency),
         max_jobs_per_user=_get_env_int("MAX_JOBS_PER_USER", Config.max_jobs_per_user),
         request_timeout=_get_env_float("REQUEST_TIMEOUT", Config.request_timeout),
+        request_connect_timeout=_get_env_float(
+            "REQUEST_CONNECT_TIMEOUT", Config.request_connect_timeout
+        ),
+        request_read_timeout=_get_env_float(
+            "REQUEST_READ_TIMEOUT", Config.request_read_timeout
+        ),
         request_retries=_get_env_int("REQUEST_RETRIES", Config.request_retries),
         retry_backoff=_get_env_float("RETRY_BACKOFF", Config.retry_backoff),
         yookassa_shop_id=os.getenv("YOOKASSA_SHOP_ID"),
@@ -246,9 +287,15 @@ def load_config() -> Config:
         yookassa_webhook_path=os.getenv("YOOKASSA_WEBHOOK_PATH", Config.yookassa_webhook_path),
         yookassa_send_receipts=_get_env_bool("YOOKASSA_SEND_RECEIPTS", Config.yookassa_send_receipts),
         subscription_chat_id=os.getenv("SUBSCRIPTION_CHAT_ID"),
+        support_chat_id=_get_optional_int(os.getenv("SUPPORT_CHAT_ID")),
         yookassa_poll_interval=_get_env_int("YOOKASSA_POLL_INTERVAL", Config.yookassa_poll_interval),
         payments_read_only=_get_env_bool("PAYMENTS_READ_ONLY", Config.payments_read_only),
         terms_url=os.getenv("TERMS_URL", Config.terms_url),
+        admin_ids=_get_env_int_list("ADMIN_IDS"),
+        bot_version=os.getenv("BOT_VERSION", Config.bot_version),
+        support_notify_interval=_get_env_int(
+            "SUPPORT_NOTIFY_INTERVAL", Config.support_notify_interval
+        ),
     )
 
 

@@ -77,6 +77,21 @@ _JOBS_HEADERS = [
     "model",
     "cost_credits",
     "username",
+    "corr_id",
+]
+
+_ERRORS_HEADERS = [
+    "ts",
+    "user_id",
+    "username",
+    "corr_id",
+    "job_id",
+    "model",
+    "size",
+    "status_code",
+    "error_type",
+    "error_msg_short",
+    "refunded",
 ]
 
 _API_RETRY = dict(
@@ -104,6 +119,7 @@ _SPREADSHEET: Optional[gspread.Spreadsheet] = None
 _USERS_STATE: Optional[_SheetState] = None
 _PAYMENTS_STATE: Optional[_SheetState] = None
 _JOBS_STATE: Optional[_SheetState] = None
+_ERRORS_STATE: Optional[_SheetState] = None
 
 
 async def init() -> None:
@@ -113,6 +129,7 @@ async def init() -> None:
     await _ensure_users_state()
     await _ensure_payments_state()
     await _ensure_jobs_state()
+    await _ensure_errors_state()
 
 
 # ---------------------------------------------------------------------------
@@ -339,6 +356,23 @@ def _normalise_job(row: Dict[str, Any]) -> Dict[str, Any]:
         "model": _parse_str(row.get("model")),
         "cost_credits": _parse_int(row.get("cost_credits")),
         "username": _parse_str(row.get("username")),
+        "corr_id": _parse_str(row.get("corr_id")),
+    }
+
+
+def _normalise_error(row: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "ts": _parse_str(row.get("ts")),
+        "user_id": _parse_int(row.get("user_id")),
+        "username": _parse_str(row.get("username")),
+        "corr_id": _parse_str(row.get("corr_id")),
+        "job_id": _parse_str(row.get("job_id")),
+        "model": _parse_str(row.get("model")),
+        "size": _parse_str(row.get("size")),
+        "status_code": _parse_int(row.get("status_code")),
+        "error_type": _parse_str(row.get("error_type")),
+        "error_msg_short": _parse_str(row.get("error_msg_short")),
+        "refunded": _parse_str(row.get("refunded")),
     }
 
 
@@ -427,6 +461,36 @@ async def _ensure_jobs_state() -> _SheetState:
             lock=Lock(),
         )
     return _JOBS_STATE
+
+
+async def _ensure_errors_state() -> _SheetState:
+    global _ERRORS_STATE
+    if _ERRORS_STATE is None:
+        title = os.getenv("GS_ERRORS_SHEET", "errors")
+        worksheet, headers = await _ensure_sheet(title, _ERRORS_HEADERS)
+        index, rows, next_row = await _to_thread(
+            _build_state_data,
+            worksheet,
+            headers,
+            ("ts", "corr_id", "job_id"),
+            _normalise_error,
+        )
+        _ERRORS_STATE = _SheetState(
+            worksheet=worksheet,
+            headers=headers,
+            key_columns=("ts", "corr_id", "job_id"),
+            index=index,
+            rows=rows,
+            next_row=next_row,
+            lock=Lock(),
+        )
+    return _ERRORS_STATE
+
+
+async def list_worksheet_titles() -> List[str]:
+    spreadsheet = await _ensure_spreadsheet()
+    worksheets = await _to_thread(spreadsheet.worksheets)
+    return [sheet.title for sheet in worksheets]
 
 
 def _row_range(state: _SheetState, row: int) -> str:
@@ -889,6 +953,7 @@ async def create_job(
     seconds: int,
     model: str,
     cost_credits: int,
+    corr_id: Optional[str],
     username: Optional[str] = None,
 ) -> None:
     state = await _ensure_jobs_state()
@@ -914,6 +979,7 @@ async def create_job(
             "model": model,
             "cost_credits": cost_credits,
             "username": username_clean,
+            "corr_id": corr_id or "",
         }
         await _write_row(state, row_index, record)
         state.index[job_id] = row_index
@@ -971,6 +1037,26 @@ async def count_jobs_by_status(user_id: int, statuses: Iterable[str]) -> int:
         return count
 
 
+async def append_error_record(**record: Any) -> None:
+    state = await _ensure_errors_state()
+    async with state.lock:
+        row_index = state.next_row
+        payload: Dict[str, Any] = {header: "" for header in state.headers}
+        payload.update({k: v for k, v in record.items() if k in payload})
+        payload["ts"] = payload.get("ts") or _now()
+        refunded_value = payload.get("refunded")
+        if isinstance(refunded_value, bool):
+            payload["refunded"] = "TRUE" if refunded_value else "FALSE"
+        username_raw = payload.get("username")
+        if username_raw is not None:
+            payload["username"] = _clean_username(username_raw)
+        await _write_row(state, row_index, payload)
+        key = _build_key(state.key_columns, payload)
+        state.index[key] = row_index
+        state.rows[key] = payload
+        state.next_row = row_index + 1
+
+
 __all__ = [
     "init",
     "get_or_create_user",
@@ -992,4 +1078,6 @@ __all__ = [
     "get_job",
     "list_jobs_by_status",
     "count_jobs_by_status",
+    "append_error_record",
+    "list_worksheet_titles",
 ]
