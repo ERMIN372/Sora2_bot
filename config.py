@@ -119,6 +119,14 @@ class Config:
                 return package
         return None
 
+    def find_credit_package_by_credits(self, credits: int) -> Optional[CreditPackage]:
+        """Return the package matching *credits*, if any."""
+
+        for package in self.credit_packages:
+            if package.credits_int == credits:
+                return package
+        return None
+
     @property
     def generation_cost_credits(self) -> int:
         """Return the configured credit price for a single Sora video."""
