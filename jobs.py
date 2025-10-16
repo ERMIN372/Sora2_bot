@@ -291,6 +291,8 @@ class JobQueue:
                 )
             elif result.status in {"failed", "errored"}:
                 error_message = result.error or "Unknown error"
+                if not isinstance(error_message, str):
+                    error_message = str(error_message)
                 gsheets_ok = True
                 try:
                     await self._db.update_job(
