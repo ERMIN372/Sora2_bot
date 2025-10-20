@@ -399,11 +399,7 @@ def _build_packages_keyboard(config: Config) -> Optional[InlineKeyboardMarkup]:
         return None
     rows: list[list[InlineKeyboardButton]] = []
     for package in config.credit_packages:
-        text = i18n.t(
-            "payment.packages.line",
-            credits=format_credits(package.credits_int),
-            price=f"{package.price_rubles} ₽",
-        )
+        text = format_credits(package.credits_int)
         rows.append(
             [
                 InlineKeyboardButton(
