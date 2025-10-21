@@ -2,7 +2,11 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
+import io
 import logging
+import mimetypes
 import time
 from dataclasses import dataclass, field
 import re
@@ -18,6 +22,7 @@ from aiogram.types import (
     CallbackQuery,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
+    InputFile,
     KeyboardButton,
     Message,
     ReplyKeyboardMarkup,
@@ -971,6 +976,8 @@ async def _launch_order(
 def _format_job_message(job: GenerationJobRecord) -> str:
     if job.status == "completed":
         if job.video_url:
+            if _parse_inline_image(job.video_url):
+                return i18n.t("status.completed_file")
             return i18n.t("status.completed_url", url=job.video_url)
         return i18n.t("status.completed_file")
     if job.status == "failed":
@@ -982,9 +989,50 @@ def _format_job_message(job: GenerationJobRecord) -> str:
 
 async def _send_job_update(dp: Dispatcher, job: GenerationJobRecord) -> None:
     try:
+        if job.status == "completed" and job.video_url:
+            inline_image = _parse_inline_image(job.video_url)
+            if inline_image:
+                await _send_inline_image(dp, job, inline_image)
+                return
         await dp.bot.send_message(job.user_id, _format_job_message(job))
     except Exception:  # pragma: no cover - external dependency
         log.exception("Failed to send job update to %s", job.user_id)
+
+
+def _parse_inline_image(data_uri: Optional[str]) -> Optional[tuple[str, bytes]]:
+    if not data_uri:
+        return None
+    uri = data_uri.strip()
+    if not uri.lower().startswith("data:image/"):
+        return None
+    try:
+        header, encoded = uri.split(",", 1)
+    except ValueError:
+        return None
+    if ";base64" not in header.lower():
+        return None
+    mime = header[5:].split(";", 1)[0] or "image/jpeg"
+    normalized = "".join(encoded.split())
+    try:
+        payload = base64.b64decode(normalized)
+    except (binascii.Error, ValueError):
+        return None
+    return mime, payload
+
+
+async def _send_inline_image(
+    dp: Dispatcher, job: GenerationJobRecord, inline_image: tuple[str, bytes]
+) -> None:
+    mime, payload = inline_image
+    buffer = io.BytesIO(payload)
+    suffix = mimetypes.guess_extension(mime) or ".jpg"
+    filename = f"result{suffix}"
+    input_file = InputFile(buffer, filename=filename)
+    await dp.bot.send_photo(
+        job.user_id,
+        input_file,
+        caption=i18n.t("status.completed_file"),
+    )
 
 
 async def start_command(
