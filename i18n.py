@@ -113,8 +113,8 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
             "/start — меню  \n"
             "/balance — баланс и пополнение"
         ),
-        "buttons.generate_text": "🎬 Сгенерировать по тексту",
-        "buttons.generate_photo": "🖼️ Сгенерировать по фото",
+        "buttons.generate_text": "🎬 Сгенерировать видео",
+        "buttons.generate_photo": "🖼️ Сгенерировать фото",
         "buttons.balance": "💼 Баланс",
         "buttons.top_up": "💳 Пополнить баланс",
         "buttons.help": "ℹ️ Помощь",
@@ -126,23 +126,52 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "buttons.payment_open": "💳 Перейти к оплате",
         "chips.vertical": "Вертикаль",
         "chips.horizontal": "Горизонталь",
-        "flow.text.prompt": (
-            "Опишите, что нужно создать. Текущий кадр: {size}. Модель: Sora-2.\n"
+        "video.models.prompt": "Выберите модель видеогенерации:",
+        "video.models.sora": "Sora 2",
+        "video.models.veo3": "Veo 3",
+        "video.models.veo31": "Veo 3.1",
+        "video.mode.prompt": "Как будем генерировать видео?",
+        "video.mode.text": "По тексту",
+        "video.mode.photo": "По фото",
+        "image.mode.prompt": "Как будем генерировать изображение?",
+        "image.mode.text": "По тексту",
+        "image.mode.photo": "По фото",
+        "image.model.nanobanana": "NanoBanana",
+        "video.prompt.text": (
+            "Опишите, что нужно создать. Текущий кадр: {size}. Модель: {model}.\n"
             "Используйте подсказки ниже или пришлите описание."
         ),
-        "flow.photo.prompt": (
+        "video.prompt.photo": (
             "Пришлите фото и, при желании, подпись-промпт.\n"
-            "Текущий кадр: {size}. Модель: Sora-2."
+            "Текущий кадр: {size}. Модель: {model}."
         ),
-        "flow.confirm.text": (
+        "image.prompt.text": (
+            "Опишите, что нужно создать. Модель: {model}.\n"
+            "Пришлите описание сообщением."
+        ),
+        "image.prompt.photo": (
+            "Пришлите фото и, при желании, подпись-промпт для модели {model}."
+        ),
+        "video.confirm.text": (
             "✍️ Запрос: {prompt}\n"
-            "🎛 Кадр: {size} · Модель: Sora-2\n"
+            "🎛 Кадр: {size} · Модель: {model}\n"
             "Стоимость: {price}"
         ),
-        "flow.confirm.photo": (
+        "video.confirm.photo": (
             "📎 Референс принят.\n"
             "✍️ Запрос: {prompt}\n"
-            "🎛 Кадр: {size} · Модель: Sora-2\n"
+            "🎛 Кадр: {size} · Модель: {model}\n"
+            "Стоимость: {price}"
+        ),
+        "image.confirm.text": (
+            "✍️ Запрос: {prompt}\n"
+            "🖼 Модель: {model}\n"
+            "Стоимость: {price}"
+        ),
+        "image.confirm.photo": (
+            "📎 Референс принят.\n"
+            "✍️ Запрос: {prompt}\n"
+            "🖼 Модель: {model}\n"
             "Стоимость: {price}"
         ),
         "flow.price_tag": "{credits} (~{approx})",

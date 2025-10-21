@@ -34,7 +34,7 @@ from observability import (
     log_event,
     should_notify_support,
 )
-from sora_client import SoraAPIError
+from providers import ProviderAPIError
 import yookassa_client
 
 log = logging.getLogger(__name__)
@@ -67,6 +67,9 @@ _PRO_REQUEST_PATTERN = re.compile(
 class GenerationStates(StatesGroup):
     """Conversation states for collecting generation inputs."""
 
+    video_model = State()
+    video_mode = State()
+    image_mode = State()
     text_prompt = State()
     photo_prompt = State()
 
@@ -75,16 +78,28 @@ class GenerationStates(StatesGroup):
 class OrderContext:
     """Details of a generation order pending confirmation."""
 
+    category: Literal["video", "image"]
     flow: Literal["text", "photo"]
     prompt: str
     size: str
     model: str
+    provider: Optional[str] = None
+    product: str = "sora_video"
+    credits_cost: int = 0
+    model_label: str = ""
     image_file_id: Optional[str] = None
     created_at: float = field(default_factory=time.time)
     corr_id: Optional[str] = None
 
     def key(self) -> str:
-        parts = [self.flow, self.prompt, self.image_file_id or "", self.size, self.model]
+        parts = [
+            self.category,
+            self.flow,
+            self.prompt,
+            self.image_file_id or "",
+            self.size,
+            self.model,
+        ]
         return "|".join(parts)
 
 
@@ -95,7 +110,58 @@ def _shorten(text: str, limit: int = 240) -> str:
     return snippet[: limit - 3] + "..."
 
 
-def _map_sora_error(error: SoraAPIError) -> tuple[str, str, bool, str]:
+@dataclass(frozen=True)
+class VideoModelOption:
+    key: str
+    model: str
+    provider: str
+    label: str
+
+
+def _video_model_options(config: Config) -> list[VideoModelOption]:
+    options: list[VideoModelOption] = [
+        VideoModelOption(
+            key="sora",
+            model=config.sora_model,
+            provider=config.sora_model,
+            label=i18n.t("video.models.sora"),
+        ),
+        VideoModelOption(
+            key="veo3",
+            model="veo3",
+            provider="veo3",
+            label=i18n.t("video.models.veo3"),
+        ),
+        VideoModelOption(
+            key="veo31",
+            model="veo3.1",
+            provider="veo3.1",
+            label=i18n.t("video.models.veo31"),
+        ),
+    ]
+    return options
+
+
+def _find_video_model_option(config: Config, key: str) -> Optional[VideoModelOption]:
+    for option in _video_model_options(config):
+        if option.key == key:
+            return option
+    return None
+
+
+def _resolve_model_label(model: str, config: Config) -> str:
+    if model == config.sora_model or model == "sora":
+        return i18n.t("video.models.sora")
+    if model == "veo3":
+        return i18n.t("video.models.veo3")
+    if model in {"veo3.1", "veo31"}:
+        return i18n.t("video.models.veo31")
+    if model == "nanobanana":
+        return i18n.t("image.model.nanobanana")
+    return model
+
+
+def _map_provider_error(error: ProviderAPIError) -> tuple[str, str, bool, str]:
     status = error.status_code or 0
     provider_message = (error.provider_message or str(error) or "").strip()
     error_type = (error.error_type or "").lower()
@@ -108,7 +174,7 @@ def _map_sora_error(error: SoraAPIError) -> tuple[str, str, bool, str]:
         notify_support = True
         hint = "auth"
         message = (
-            "API-ключ недействителен или нет доступа к Sora. "
+            "API-ключ недействителен или нет доступа к провайдеру. "
             "Проверьте ключ/организацию. Сообщили оператору, скоро поправим."
         )
         short = "Недействительный API-ключ"
@@ -245,6 +311,37 @@ def _build_balance_keyboard() -> InlineKeyboardMarkup:
     )
 
 
+def _build_video_models_keyboard(options: list[VideoModelOption]) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    for option in options:
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=option.label,
+                    callback_data=f"video:model:{option.key}",
+                )
+            ]
+        )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _build_mode_keyboard(category: Literal["video", "image"]) -> InlineKeyboardMarkup:
+    if category == "video":
+        text_label = i18n.t("video.mode.text")
+        photo_label = i18n.t("video.mode.photo")
+        prefix = "video:mode"
+    else:
+        text_label = i18n.t("image.mode.text")
+        photo_label = i18n.t("image.mode.photo")
+        prefix = "image:mode"
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text=text_label, callback_data=f"{prefix}:text")],
+            [InlineKeyboardButton(text=photo_label, callback_data=f"{prefix}:photo")],
+        ]
+    )
+
+
 async def _send_balance_info(message: Message, db: Database) -> None:
     user_id = await _ensure_user(message, db)
     credits = await db.get_user_credits(user_id)
@@ -293,17 +390,32 @@ async def _ensure_user(message: Message, db: Database) -> int:
 
 def _create_order(
     *,
+    category: Literal["video", "image"],
     flow: Literal["text", "photo"],
     prompt: str,
     config: Config,
     session: UserSession,
+    model: str,
+    provider: Optional[str],
+    product: str,
+    model_label: str,
+    include_size: bool,
     image_file_id: Optional[str] = None,
 ) -> OrderContext:
+    size = session.last_size if include_size else ""
+    credits_cost = config.get_product_credits(product)
+    if credits_cost <= 0:
+        credits_cost = config.generation_cost_credits
     return OrderContext(
+        category=category,
         flow=flow,
         prompt=prompt,
-        size=session.last_size,
-        model=config.sora_model,
+        size=size,
+        model=model,
+        provider=provider,
+        product=product,
+        credits_cost=credits_cost,
+        model_label=model_label or _resolve_model_label(model, config),
         image_file_id=image_file_id,
     )
 
@@ -335,12 +447,29 @@ async def _notify_pro_unavailable(message: Message) -> None:
     await message.answer(i18n.t("errors.pro_unavailable"))
 
 
-async def _send_options_prompt(message: Message, *, session: UserSession, context: str) -> None:
-    if context == "photo":
-        body = i18n.t("flow.photo.prompt", size=session.last_size)
+async def _send_generation_prompt(
+    message: Message,
+    *,
+    session: UserSession,
+    category: Literal["video", "image"],
+    mode: Literal["text", "photo"],
+    model_label: str,
+    include_size: bool,
+) -> None:
+    if category == "video":
+        size = session.last_size if include_size else ""
+        if mode == "photo":
+            body = i18n.t("video.prompt.photo", size=size, model=model_label)
+        else:
+            body = i18n.t("video.prompt.text", size=size, model=model_label)
+        markup = _build_options_keyboard(session, mode) if include_size else None
     else:
-        body = i18n.t("flow.text.prompt", size=session.last_size)
-    await message.answer(body, reply_markup=_build_options_keyboard(session, context))
+        if mode == "photo":
+            body = i18n.t("image.prompt.photo", model=model_label)
+        else:
+            body = i18n.t("image.prompt.text", model=model_label)
+        markup = None
+    await message.answer(body, reply_markup=markup)
 
 
 async def _send_order_confirmation(
@@ -352,22 +481,41 @@ async def _send_order_confirmation(
     can_launch: bool,
     include_back: bool = True,
 ) -> Message:
-    price_text = config.format_price_tag(config.generation_cost_credits)
+    price_text = config.format_price_tag(order.credits_cost or config.generation_cost_credits)
     prompt_text: SafeText = format_prompt(order.prompt)
-    if order.flow == "photo":
-        body = i18n.t(
-            "flow.confirm.photo",
-            prompt=prompt_text,
-            size=order.size,
-            price=price_text,
-        )
+    if order.category == "image":
+        if order.flow == "photo":
+            body = i18n.t(
+                "image.confirm.photo",
+                prompt=prompt_text,
+                model=order.model_label,
+                price=price_text,
+            )
+        else:
+            body = i18n.t(
+                "image.confirm.text",
+                prompt=prompt_text,
+                model=order.model_label,
+                price=price_text,
+            )
     else:
-        body = i18n.t(
-            "flow.confirm.text",
-            prompt=prompt_text,
-            size=order.size,
-            price=price_text,
-        )
+        size_value = order.size or "—"
+        if order.flow == "photo":
+            body = i18n.t(
+                "video.confirm.photo",
+                prompt=prompt_text,
+                size=size_value,
+                model=order.model_label,
+                price=price_text,
+            )
+        else:
+            body = i18n.t(
+                "video.confirm.text",
+                prompt=prompt_text,
+                size=size_value,
+                model=order.model_label,
+                price=price_text,
+            )
     keyboard = _build_confirmation_keyboard(can_launch=can_launch, include_back=include_back)
     return await bot.send_message(chat_id, body, reply_markup=keyboard)
 
@@ -432,7 +580,8 @@ async def _show_confirmation_and_balance(
 ) -> None:
     user_id = message.from_user.id
     credits = await db.get_user_credits(user_id)
-    can_launch = credits >= config.generation_cost_credits
+    required = order.credits_cost or config.generation_cost_credits
+    can_launch = credits >= required
     session.pending_order = order
     session.awaiting_payment = not can_launch
     await _send_order_confirmation(
@@ -473,26 +622,31 @@ async def _launch_order(
 
     corr_id = order.corr_id or str(uuid.uuid4())
     order.corr_id = corr_id
+    provider_key = order.provider or order.model
+    credits_cost = order.credits_cost or config.generation_cost_credits
+
     log_event(
         level="INFO",
         event="enqueue",
         corr_id=corr_id,
         user_id=user_id,
         username=user.username,
-        model=config.sora_model,
+        model=order.model,
+        provider=provider_key,
         size=order.size,
-        credits_cost=config.generation_cost_credits,
+        credits_cost=credits_cost,
         prompt=order.prompt,
     )
 
-    if not await db.deduct_credit(user_id, config.generation_cost_credits):
+    if not await db.deduct_credit(user_id, credits_cost):
         log_event(
             level="ERROR",
             event="error",
             corr_id=corr_id,
             user_id=user_id,
             username=user.username,
-            model=config.sora_model,
+            model=order.model,
+            provider=provider_key,
             size=order.size,
             error_type="insufficient_credits",
             error_msg_short="Недостаточно кредитов",
@@ -509,16 +663,17 @@ async def _launch_order(
         corr_id=corr_id,
         user_id=user_id,
         username=user.username,
-        model=config.sora_model,
+        model=order.model,
+        provider=provider_key,
         size=order.size,
-        credits_cost=config.generation_cost_credits,
+        credits_cost=credits_cost,
     )
 
     balance_after = await db.get_user_credits(user_id)
     log.info(
         "Launching job user=%s cost_credits=%s balance_after=%s",
         user_id,
-        config.generation_cost_credits,
+        credits_cost,
         balance_after,
     )
 
@@ -531,12 +686,13 @@ async def _launch_order(
             corr_id=corr_id,
             image_file_id=order.image_file_id,
             username=user.username,
+            provider=provider_key,
         )
-    except SoraAPIError as exc:
-        message, short, notify_support, hint = _map_sora_error(exc)
+    except ProviderAPIError as exc:
+        message, short, notify_support, hint = _map_provider_error(exc)
         refunded = False
         try:
-            await db.add_credits(user_id, config.generation_cost_credits)
+            await db.add_credits(user_id, credits_cost)
             refunded = True
         except Exception:  # pragma: no cover - external dependency
             log.exception("Failed to refund credits after submit error")
@@ -547,7 +703,7 @@ async def _launch_order(
                 username=user.username,
                 corr_id=corr_id,
                 job_id="",
-                model=config.sora_model,
+                model=order.model,
                 size=order.size,
                 status_code=exc.status_code,
                 error_type=exc.error_type or "submit_failed",
@@ -561,7 +717,8 @@ async def _launch_order(
             corr_id=corr_id,
             user_id=user_id,
             username=user.username,
-            model=config.sora_model,
+            model=order.model,
+            provider=provider_key,
             size=order.size,
             status_code=exc.status_code,
             duration_ms=exc.duration_ms,
@@ -579,9 +736,10 @@ async def _launch_order(
             corr_id=corr_id,
             user_id=user_id,
             username=user.username,
-            model=config.sora_model,
+            model=order.model,
+            provider=provider_key,
             size=order.size,
-            credits_cost=config.generation_cost_credits,
+            credits_cost=credits_cost,
             refund_done=refunded,
         )
         if notify_support:
@@ -601,7 +759,7 @@ async def _launch_order(
         log.exception("Failed to submit job")
         refunded = False
         try:
-            await db.add_credits(user_id, config.generation_cost_credits)
+            await db.add_credits(user_id, credits_cost)
             refunded = True
         except Exception:
             log.exception("Failed to refund credits after unexpected error")
@@ -613,7 +771,7 @@ async def _launch_order(
                 username=user.username,
                 corr_id=corr_id,
                 job_id="",
-                model=config.sora_model,
+                model=order.model,
                 size=order.size,
                 status_code=None,
                 error_type="internal",
@@ -627,7 +785,8 @@ async def _launch_order(
             corr_id=corr_id,
             user_id=user_id,
             username=user.username,
-            model=config.sora_model,
+            model=order.model,
+            provider=provider_key,
             size=order.size,
             error_type="internal",
             error_msg_short=short,
@@ -641,9 +800,10 @@ async def _launch_order(
             corr_id=corr_id,
             user_id=user_id,
             username=user.username,
-            model=config.sora_model,
+            model=order.model,
+            provider=provider_key,
             size=order.size,
-            credits_cost=config.generation_cost_credits,
+            credits_cost=credits_cost,
             refund_done=refunded,
         )
         await callback.message.answer(
@@ -699,20 +859,46 @@ async def balance_command(message: Message, db: Database, state: FSMContext) -> 
     await _send_balance_info(message, db)
 
 
-async def generate_text_menu(message: Message, db: Database, state: FSMContext) -> None:
+async def generate_video_menu(
+    message: Message, db: Database, state: FSMContext, config: Config
+) -> None:
     await state.finish()
     user_id = await _ensure_user(message, db)
-    session = SESSION_MANAGER.get(user_id)
-    await GenerationStates.text_prompt.set()
-    await _send_options_prompt(message, session=session, context="text")
+    SESSION_MANAGER.get(user_id)
+    options = _video_model_options(config)
+    keyboard = _build_video_models_keyboard(options)
+    await state.update_data(
+        flow_type="video",
+        model=None,
+        provider=None,
+        model_label=None,
+        include_size=True,
+        product="sora_video",
+    )
+    await GenerationStates.video_model.set()
+    await message.answer(i18n.t("video.models.prompt"), reply_markup=keyboard)
 
 
-async def generate_photo_menu(message: Message, db: Database, state: FSMContext) -> None:
+async def generate_image_menu(
+    message: Message, db: Database, state: FSMContext, config: Config
+) -> None:
     await state.finish()
     user_id = await _ensure_user(message, db)
-    session = SESSION_MANAGER.get(user_id)
-    await GenerationStates.photo_prompt.set()
-    await _send_options_prompt(message, session=session, context="photo")
+    SESSION_MANAGER.get(user_id)
+    model_label = i18n.t("image.model.nanobanana")
+    await state.update_data(
+        flow_type="image",
+        model="nanobanana",
+        provider="nanobanana",
+        model_label=model_label,
+        include_size=False,
+        product="sora_video",
+    )
+    await GenerationStates.image_mode.set()
+    await message.answer(
+        i18n.t("image.mode.prompt"),
+        reply_markup=_build_mode_keyboard("image"),
+    )
 
 
 async def help_button(
@@ -735,6 +921,13 @@ async def handle_text_input(
 ) -> None:
     user_id = await _ensure_user(message, db)
     session = SESSION_MANAGER.get(user_id)
+    state_data = await state.get_data()
+    category = state_data.get("flow_type", "video")
+    model = state_data.get("model") or config.sora_model
+    provider = state_data.get("provider") or model
+    model_label = state_data.get("model_label") or _resolve_model_label(model, config)
+    include_size = bool(state_data.get("include_size", category == "video"))
+    product = state_data.get("product", "sora_video")
     raw_prompt = (message.text or "").strip()
     prompt = raw_prompt
     if _detect_pro_request(raw_prompt):
@@ -744,7 +937,18 @@ async def handle_text_input(
         await message.answer(i18n.t("flow.no_prompt"))
         return
     await state.finish()
-    order = _create_order(flow="text", prompt=prompt, config=config, session=session)
+    order = _create_order(
+        category=category,
+        flow="text",
+        prompt=prompt,
+        config=config,
+        session=session,
+        model=model,
+        provider=provider,
+        product=product,
+        model_label=model_label,
+        include_size=include_size,
+    )
     await _show_confirmation_and_balance(
         message=message,
         order=order,
@@ -762,8 +966,22 @@ async def handle_photo_input(
 ) -> None:
     user_id = await _ensure_user(message, db)
     session = SESSION_MANAGER.get(user_id)
+    state_data = await state.get_data()
+    category = state_data.get("flow_type", "video")
+    model = state_data.get("model") or config.sora_model
+    provider = state_data.get("provider") or model
+    model_label = state_data.get("model_label") or _resolve_model_label(model, config)
+    include_size = bool(state_data.get("include_size", category == "video"))
+    product = state_data.get("product", "sora_video")
     if not message.photo:
-        await _send_options_prompt(message, session=session, context="photo")
+        await _send_generation_prompt(
+            message,
+            session=session,
+            category=category,
+            mode="photo",
+            model_label=model_label,
+            include_size=include_size,
+        )
         return
     largest = max(message.photo, key=lambda item: item.file_size or 0)
     raw_caption = (message.caption or "").strip()
@@ -772,10 +990,16 @@ async def handle_photo_input(
         await _notify_pro_unavailable(message)
         caption = _strip_pro_directives(raw_caption)
     order = _create_order(
+        category=category,
         flow="photo",
         prompt=caption,
         config=config,
         session=session,
+        model=model,
+        provider=provider,
+        product=product,
+        model_label=model_label,
+        include_size=include_size,
         image_file_id=largest.file_id,
     )
     await state.finish()
@@ -788,7 +1012,130 @@ async def handle_photo_input(
     )
 
 
-async def option_callback_handler(callback: CallbackQuery, state: FSMContext) -> None:
+async def video_model_callback_handler(
+    callback: CallbackQuery, state: FSMContext, config: Config
+) -> None:
+    await callback.answer()
+    parts = (callback.data or "").split(":")
+    if len(parts) != 3:
+        return
+    _, _, key = parts
+    option = _find_video_model_option(config, key)
+    if option is None:
+        await callback.answer("Модель недоступна", show_alert=True)
+        return
+    await state.update_data(
+        flow_type="video",
+        model=option.model,
+        provider=option.provider,
+        model_label=option.label,
+        include_size=True,
+        product="sora_video",
+    )
+    await GenerationStates.video_mode.set()
+    try:
+        await callback.message.edit_text(
+            i18n.t("video.mode.prompt"),
+            reply_markup=_build_mode_keyboard("video"),
+        )
+    except Exception:  # pragma: no cover - Telegram edits may fail
+        await callback.message.answer(
+            i18n.t("video.mode.prompt"), reply_markup=_build_mode_keyboard("video")
+        )
+
+
+async def video_mode_callback_handler(
+    callback: CallbackQuery, state: FSMContext, config: Config
+) -> None:
+    await callback.answer()
+    parts = (callback.data or "").split(":")
+    if len(parts) != 3:
+        return
+    _, _, mode = parts
+    if mode not in {"text", "photo"}:
+        return
+    user = callback.from_user
+    if user is None:  # pragma: no cover - defensive
+        return
+    session = SESSION_MANAGER.get(user.id)
+    data = await state.get_data()
+    model = data.get("model") or config.sora_model
+    provider = data.get("provider") or model
+    model_label = data.get("model_label") or _resolve_model_label(model, config)
+    include_size = True
+    product = data.get("product", "sora_video")
+    await state.update_data(
+        flow_type="video",
+        mode=mode,
+        model=model,
+        provider=provider,
+        model_label=model_label,
+        include_size=include_size,
+        product=product,
+    )
+    target_state = GenerationStates.text_prompt if mode == "text" else GenerationStates.photo_prompt
+    await target_state.set()
+    try:
+        await callback.message.edit_reply_markup()
+    except Exception:  # pragma: no cover - Telegram edits may fail
+        log.debug("Failed to clear mode keyboard", exc_info=True)
+    await _send_generation_prompt(
+        callback.message,
+        session=session,
+        category="video",
+        mode=mode,
+        model_label=model_label,
+        include_size=include_size,
+    )
+
+
+async def image_mode_callback_handler(
+    callback: CallbackQuery, state: FSMContext, config: Config
+) -> None:
+    await callback.answer()
+    parts = (callback.data or "").split(":")
+    if len(parts) != 3:
+        return
+    _, _, mode = parts
+    if mode not in {"text", "photo"}:
+        return
+    user = callback.from_user
+    if user is None:  # pragma: no cover - defensive
+        return
+    session = SESSION_MANAGER.get(user.id)
+    data = await state.get_data()
+    model = data.get("model") or "nanobanana"
+    provider = data.get("provider") or "nanobanana"
+    model_label = data.get("model_label") or _resolve_model_label(model, config)
+    product = data.get("product", "sora_video")
+    await state.update_data(
+        flow_type="image",
+        mode=mode,
+        model=model,
+        provider=provider,
+        model_label=model_label,
+        include_size=False,
+        product=product,
+    )
+    target_state = GenerationStates.text_prompt if mode == "text" else GenerationStates.photo_prompt
+    await target_state.set()
+    try:
+        await callback.message.edit_reply_markup()
+    except Exception:  # pragma: no cover - Telegram edits may fail
+        log.debug("Failed to clear mode keyboard", exc_info=True)
+    await _send_generation_prompt(
+        callback.message,
+        session=session,
+        category="image",
+        mode=mode,
+        model_label=model_label,
+        include_size=False,
+    )
+
+
+async def option_callback_handler(
+    callback: CallbackQuery, state: FSMContext, config: Config
+) -> None:
     data = (callback.data or "").split(":")
     if len(data) != 4:
         await callback.answer()
@@ -804,11 +1151,16 @@ async def option_callback_handler(callback: CallbackQuery, state: FSMContext) ->
         if value:
             session.last_size = value
     await callback.answer()
+    state_data = await state.get_data()
+    if state_data.get("flow_type", "video") != "video":
+        return
+    model = state_data.get("model") or config.sora_model
+    model_label = state_data.get("model_label") or _resolve_model_label(model, config)
     try:
         if context == "photo":
-            body = i18n.t("flow.photo.prompt", size=session.last_size)
+            body = i18n.t("video.prompt.photo", size=session.last_size, model=model_label)
         else:
-            body = i18n.t("flow.text.prompt", size=session.last_size)
+            body = i18n.t("video.prompt.text", size=session.last_size, model=model_label)
         await callback.message.edit_text(
             body,
             reply_markup=_build_options_keyboard(session, context),
@@ -842,12 +1194,29 @@ async def order_callback_handler(
         return
     if action == "edit":
         await state.finish()
-        context = "photo" if order.flow == "photo" else "text"
         if order.flow == "photo":
             await GenerationStates.photo_prompt.set()
         else:
             await GenerationStates.text_prompt.set()
-        await _send_options_prompt(callback.message, session=session, context=context)
+        model_label = order.model_label or _resolve_model_label(order.model, config)
+        include_size = order.category == "video"
+        await state.update_data(
+            flow_type=order.category,
+            mode=order.flow,
+            model=order.model,
+            provider=order.provider,
+            model_label=model_label,
+            include_size=include_size,
+            product=order.product or "sora_video",
+        )
+        await _send_generation_prompt(
+            callback.message,
+            session=session,
+            category=order.category,
+            mode=order.flow,
+            model_label=model_label,
+            include_size=include_size,
+        )
         return
     if action == "launch":
         await _launch_order(
@@ -974,7 +1343,8 @@ async def resend_pending_order(
     if not order:
         return False
     credits = await db.get_user_credits(user_id)
-    can_launch = credits >= config.generation_cost_credits
+    required = order.credits_cost or config.generation_cost_credits
+    can_launch = credits >= required
     session.awaiting_payment = not can_launch
     await _send_order_confirmation(
         bot=bot,
@@ -1154,12 +1524,12 @@ def register_handlers(
         state="*",
     )
     dp.register_message_handler(
-        lambda message, state: generate_text_menu(message, db, state),
+        lambda message, state: generate_video_menu(message, db, state, config),
         lambda message: message.text == i18n.t("buttons.generate_text"),
         state="*",
     )
     dp.register_message_handler(
-        lambda message, state: generate_photo_menu(message, db, state),
+        lambda message, state: generate_image_menu(message, db, state, config),
         lambda message: message.text == i18n.t("buttons.generate_photo"),
         state="*",
     )
@@ -1199,7 +1569,22 @@ def register_handlers(
     )
 
     dp.register_callback_query_handler(
-        option_callback_handler,
+        lambda call, state: video_model_callback_handler(call, state, config),
+        lambda call: call.data and call.data.startswith("video:model:"),
+        state="*",
+    )
+    dp.register_callback_query_handler(
+        lambda call, state: video_mode_callback_handler(call, state, config),
+        lambda call: call.data and call.data.startswith("video:mode:"),
+        state="*",
+    )
+    dp.register_callback_query_handler(
+        lambda call, state: image_mode_callback_handler(call, state, config),
+        lambda call: call.data and call.data.startswith("image:mode:"),
+        state="*",
+    )
+    dp.register_callback_query_handler(
+        lambda call, state: option_callback_handler(call, state, config),
         lambda call: call.data and call.data.startswith("opt:"),
         state="*",
     )
