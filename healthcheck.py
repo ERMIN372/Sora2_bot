@@ -10,7 +10,7 @@ import aiohttp
 import gsheets_db
 
 from config import Config
-from providers.google_auth import ServiceAccountTokenProvider
+from providers.vertex import list_models
 from observability import HealthCheckResult, record_healthcheck
 
 log = logging.getLogger(__name__)
@@ -21,46 +21,11 @@ async def _probe_vertex_models(config: Config) -> Tuple[bool, str]:
         return True, "disabled"
     if not config.google_service_account or not config.gcp_project_id:
         return False, "missing credentials"
-    base = (
-        f"https://{config.vertex_location}-aiplatform.googleapis.com/v1/projects/{config.gcp_project_id}"
-        f"/locations/{config.vertex_location}/publishers/google/models"
-    )
-    token_provider = ServiceAccountTokenProvider(
-        config.google_service_account,
-        scopes=["https://www.googleapis.com/auth/cloud-platform"],
-    )
-    try:
-        token = await token_provider.get_token()
-    except Exception as exc:  # pragma: no cover - auth failure
-        return False, f"auth: {exc}"
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "Content-Type": "application/json",
-    }
-    timeout = aiohttp.ClientTimeout(
-        total=None,
-        sock_connect=config.request_connect_timeout,
-        sock_read=config.request_read_timeout,
-    )
-    payload: Dict[str, Any] = {}
-    try:
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.get(base, headers=headers) as response:
-                text = await response.text()
-                if response.status >= 400:
-                    short = text[:200].replace("\n", " ")
-                    return False, f"{response.status}: {short}"
-                try:
-                    payload = json.loads(text) if text else {}
-                except json.JSONDecodeError:
-                    return False, "invalid JSON"
-    except Exception as exc:  # pragma: no cover - network guard
-        log.warning("Vertex models probe failed", exc_info=True)
-        return False, str(exc)
-    models = payload.get("models") if isinstance(payload, dict) else None
-    if isinstance(models, list):
-        return True, f"{len(models)} models"
-    return True, "ok"
+    ok, detail = list_models(config)
+    if not ok:
+        detail = detail[:160]
+    log.info("Vertex models: %s, %s", "ok" if ok else "error", detail)
+    return ok, detail
 
 
 async def _probe_sora_models(config: Config) -> Tuple[bool, str]:

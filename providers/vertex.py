@@ -5,6 +5,9 @@ import logging
 from typing import Any, Dict, Optional, Tuple
 from uuid import uuid4
 
+from google.auth.transport.requests import AuthorizedSession
+from google.oauth2.service_account import Credentials
+
 from config import Config
 
 from .base import (
@@ -16,6 +19,49 @@ from .base import (
 from .google_auth import ServiceAccountTokenProvider
 
 log = logging.getLogger(__name__)
+
+
+def list_models(config: Config) -> Tuple[bool, str]:
+    """Fetch the available Vertex AI models for the configured project."""
+
+    if not config.google_service_account:
+        return False, "missing credentials"
+
+    url = (
+        "https://"
+        f"{config.vertex_location}-aiplatform.googleapis.com/v1/projects/"
+        f"{config.gcp_project_id}/locations/{config.vertex_location}/publishers/google/models"
+    )
+
+    try:
+        credentials = Credentials.from_service_account_info(
+            config.google_service_account,
+            scopes=["https://www.googleapis.com/auth/cloud-platform"],
+        )
+    except Exception as exc:  # pragma: no cover - auth failure
+        return False, f"auth: {exc}"
+
+    try:
+        with AuthorizedSession(credentials) as session:
+            response = session.get(url, timeout=config.request_timeout or None)
+    except Exception as exc:  # pragma: no cover - network guard
+        log.warning("Vertex models request failed", exc_info=True)
+        return False, str(exc)
+
+    if response.status_code >= 400:
+        text = (response.text or "").replace("\n", " ")
+        detail = f"{response.status_code}: {text}" if text else str(response.status_code)
+        return False, detail
+
+    try:
+        payload = response.json() if response.content else {}
+    except ValueError:
+        return False, "invalid JSON"
+
+    models = payload.get("models") if isinstance(payload, dict) else None
+    if isinstance(models, list):
+        return True, f"count={len(models)}"
+    return True, "empty"
 
 
 class VertexGenerativeClient(BaseProviderClient):
