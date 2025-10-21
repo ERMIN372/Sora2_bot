@@ -4,18 +4,94 @@ from __future__ import annotations
 import json
 import logging
 import time
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Tuple
 
+import aiohttp
 import gsheets_db
 
 from config import Config
 from observability import HealthCheckResult, record_healthcheck
-from sora_client import SoraAPIError, SoraClient
 
 log = logging.getLogger(__name__)
 
 
-async def run_startup_healthcheck(*, config: Config, mode: str, sora_client: SoraClient) -> HealthCheckResult:
+async def _probe_vertex_models(config: Config) -> Tuple[bool, str]:
+    if not config.vertex_enabled:
+        return True, "disabled"
+    if not config.vertex_api_key or not config.gcp_project_id:
+        return False, "missing credentials"
+    base = (
+        f"https://{config.vertex_location}-aiplatform.googleapis.com/v1/projects/{config.gcp_project_id}"
+        f"/locations/{config.vertex_location}/publishers/google/models"
+    )
+    headers = {
+        "Authorization": f"Bearer {config.vertex_api_key}",
+        "Content-Type": "application/json",
+    }
+    timeout = aiohttp.ClientTimeout(
+        total=None,
+        sock_connect=config.request_connect_timeout,
+        sock_read=config.request_read_timeout,
+    )
+    payload: Dict[str, Any] = {}
+    try:
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(base, headers=headers) as response:
+                text = await response.text()
+                if response.status >= 400:
+                    short = text[:200].replace("\n", " ")
+                    return False, f"{response.status}: {short}"
+                try:
+                    payload = json.loads(text) if text else {}
+                except json.JSONDecodeError:
+                    return False, "invalid JSON"
+    except Exception as exc:  # pragma: no cover - network guard
+        log.warning("Vertex models probe failed", exc_info=True)
+        return False, str(exc)
+    models = payload.get("models") if isinstance(payload, dict) else None
+    if isinstance(models, list):
+        return True, f"{len(models)} models"
+    return True, "ok"
+
+
+async def _probe_sora_models(config: Config) -> Tuple[bool, str]:
+    if not config.sora_enabled:
+        return True, "disabled"
+    if not config.sora_api_key:
+        return False, "missing credentials"
+    url = f"{config.sora_api_base.rstrip('/')}/models"
+    headers = {
+        "Authorization": f"Bearer {config.sora_api_key}",
+        "Content-Type": "application/json",
+    }
+    timeout = aiohttp.ClientTimeout(
+        total=None,
+        sock_connect=config.request_connect_timeout,
+        sock_read=config.request_read_timeout,
+    )
+    payload: Dict[str, Any] = {}
+    try:
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(url, headers=headers) as response:
+                text = await response.text()
+                if response.status >= 400:
+                    short = text[:200].replace("\n", " ")
+                    return False, f"{response.status}: {short}"
+                try:
+                    payload = json.loads(text) if text else {}
+                except json.JSONDecodeError:
+                    return False, "invalid JSON"
+    except Exception as exc:  # pragma: no cover - network guard
+        log.warning("Sora models probe failed", exc_info=True)
+        return False, str(exc)
+    if isinstance(payload, dict):
+        models = payload.get("data") or payload.get("models")
+        if isinstance(models, list):
+            return True, f"{len(models)} models"
+    return True, "ok"
+
+
+async def run_startup_healthcheck(*, config: Config, mode: str) -> HealthCheckResult:
     checks: List[Dict[str, Any]] = []
     errors: List[str] = []
 
@@ -27,8 +103,22 @@ async def run_startup_healthcheck(*, config: Config, mode: str, sora_client: Sor
             errors.append(f"{label}: {detail if detail else 'failed'}")
         checks.append(entry)
 
-    add_check("OPENAI_API_KEY", bool(config.sora_api_key))
-    add_check("SORA_MODEL", config.sora_model == "sora-2", config.sora_model)
+    add_check("VERTEX_ENABLED", config.vertex_enabled, str(config.vertex_enabled).lower())
+    if config.vertex_enabled:
+        add_check("VERTEX_API_KEY", bool(config.vertex_api_key))
+        add_check("GCP_PROJECT_ID", bool(config.gcp_project_id))
+        add_check("VERTEX_LOCATION", bool(config.vertex_location), config.vertex_location)
+    else:
+        add_check("VERTEX_API_KEY", True, "disabled")
+        add_check("GCP_PROJECT_ID", True, "disabled")
+        add_check("VERTEX_LOCATION", True, "disabled")
+    add_check("SORA_ENABLED", config.sora_enabled, str(config.sora_enabled).lower())
+    if config.sora_enabled:
+        add_check("SORA_API_KEY", bool(config.sora_api_key))
+        add_check("SORA_API_BASE", bool(config.sora_api_base), config.sora_api_base)
+    else:
+        add_check("SORA_API_KEY", True, "disabled")
+        add_check("SORA_API_BASE", True, "disabled")
     add_check("CREDIT_PRICE_KOPEKS", config.credit_price_kopeks > 0, config.credit_price_kopeks)
     add_check("SORA_VIDEO_CREDITS", config.generation_cost_credits > 0, config.generation_cost_credits)
 
@@ -47,22 +137,11 @@ async def run_startup_healthcheck(*, config: Config, mode: str, sora_client: Sor
     else:
         add_check("YooKassa", True, "отключено")
 
-    sora_ok = True
-    latency_ms: float | None = None
-    try:
-        start = time.monotonic()
-        await sora_client.list_models()
-        latency_ms = (time.monotonic() - start) * 1000
-    except SoraAPIError as exc:
-        sora_ok = False
-        latency_ms = exc.duration_ms
-        errors.append(f"sora_api: {exc.status_code} {exc.error_type or exc.error_code or exc}")
-        log.warning("Sora healthcheck failed", exc_info=True)
-    except Exception as exc:  # pragma: no cover - defensive
-        sora_ok = False
-        errors.append(f"sora_api: {exc}")
-        log.warning("Sora healthcheck failed", exc_info=True)
-    add_check("Sora ping", sora_ok, f"{latency_ms:.0f}ms" if latency_ms is not None else "n/a")
+    vertex_ok, vertex_detail = await _probe_vertex_models(config)
+    add_check("Vertex models", vertex_ok, vertex_detail)
+
+    sora_ok, sora_detail = await _probe_sora_models(config)
+    add_check("Sora models", sora_ok, sora_detail)
 
     details: Dict[str, Any] = {"mode": mode, "checks": checks}
     ok = all(item.get("ok") for item in checks)
