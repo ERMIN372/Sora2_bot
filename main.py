@@ -18,7 +18,7 @@ from db import Database
 from handlers import register_handlers
 from jobs import JobQueue
 from healthcheck import run_startup_healthcheck
-from providers import VertexImageClient, VertexVideoClient
+from providers import BaseProviderClient, SoraClient, VertexImageClient, VertexVideoClient
 import yookassa_client
 
 logging.basicConfig(level=logging.INFO)
@@ -55,37 +55,60 @@ def _init_application(config: Config) -> ApplicationState:
     bot = Bot(token=config.bot_token, parse_mode="HTML")
     dp = Dispatcher(bot, storage=MemoryStorage())
     db = Database()
-    veo3_client = VertexVideoClient(
-        config=config,
-        model="veo-3.0-generate-001",
-        method="generateContent",
-        provider_name="veo3",
-    )
-    veo31_client = VertexVideoClient(
-        config=config,
-        model="veo-3.1-generate-preview",
-        method="generateContent",
-        provider_name="veo3.1",
-    )
-    gemini_client = VertexImageClient(
-        config=config,
-        model="gemini-2.5-flash-image",
-        method="generateContent",
-        provider_name="gemini-image",
-    )
-    providers = {
-        "veo3": veo3_client,
-        "sora2": veo3_client,
-        "veo3.1": veo31_client,
-        "veo31": veo31_client,
-        "gemini-image": gemini_client,
-    }
-    if config.sora_model not in providers:
-        providers[config.sora_model] = veo3_client
+    providers: Dict[str, BaseProviderClient] = {}
+
+    if config.vertex_enabled:
+        veo3_client = VertexVideoClient(
+            config=config,
+            model="veo-3.0-generate-001",
+            method="generateContent",
+            provider_name="veo3",
+        )
+        veo31_client = VertexVideoClient(
+            config=config,
+            model="veo-3.1-generate-preview",
+            method="generateContent",
+            provider_name="veo3.1",
+        )
+        gemini_client = VertexImageClient(
+            config=config,
+            model="gemini-2.5-flash-image",
+            method="generateContent",
+            provider_name="gemini-image",
+        )
+        providers.update(
+            {
+                "veo3": veo3_client,
+                "veo-3.0-generate-001": veo3_client,
+                "veo3.1": veo31_client,
+                "veo31": veo31_client,
+                "veo-3.1-generate-preview": veo31_client,
+                "gemini-image": gemini_client,
+            }
+        )
+
+    if config.sora_enabled:
+        sora_client = SoraClient(config=config)
+        providers.update(
+            {
+                "sora": sora_client,
+                "sora2": sora_client,
+                config.sora_model: sora_client,
+            }
+        )
+
+    default_provider = config.default_video_model
+    if default_provider not in providers:
+        if config.vertex_enabled and "veo3" in providers:
+            default_provider = "veo3"
+        elif config.sora_enabled and config.sora_model in providers:
+            default_provider = config.sora_model
+        else:
+            default_provider = next(iter(providers))
     job_queue = JobQueue(
         db=db,
         providers=providers,
-        default_provider=config.sora_model,
+        default_provider=default_provider,
         config=config,
     )
     register_handlers(dp, db=db, config=config, job_queue=job_queue)

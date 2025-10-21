@@ -139,10 +139,15 @@ class Config:
     """Configuration values loaded from the environment."""
 
     bot_token: str
-    vertex_api_key: str
-    gcp_project_id: str
+    vertex_enabled: bool = True
+    vertex_api_key: str = ""
+    gcp_project_id: str = ""
     vertex_location: str = "us-central1"
-    sora_model: str = "veo3"
+    sora_enabled: bool = False
+    sora_api_key: str = ""
+    sora_api_base: str = "https://api.sora.ai/v1"
+    sora_model: str = "sora-2"
+    default_video_model: str = "veo3"
     database_path: str = "./bot.db"
     jobs_concurrency: int = 2
     max_jobs_per_user: int = 3
@@ -376,29 +381,59 @@ def load_config() -> Config:
             "TELEGRAM_BOT_TOKEN environment variable is required (BOT_TOKEN is accepted for backwards compatibility)"
         )
 
-    vertex_api_key = os.getenv("VERTEX_API_KEY")
-    if not vertex_api_key:
-        raise RuntimeError("VERTEX_API_KEY environment variable is required")
+    vertex_enabled = _get_env_bool("VERTEX_ENABLED", Config.vertex_enabled)
+    sora_enabled = _get_env_bool("SORA_ENABLED", Config.sora_enabled)
 
-    gcp_project_id = os.getenv("GCP_PROJECT_ID")
-    if not gcp_project_id:
-        raise RuntimeError("GCP_PROJECT_ID environment variable is required")
+    if not vertex_enabled and not sora_enabled:
+        raise RuntimeError("At least one provider must be enabled (Vertex or Sora)")
 
-    vertex_location = os.getenv("VERTEX_LOCATION", Config.vertex_location)
-
-    raw_model = (
-        os.getenv("DEFAULT_VIDEO_MODEL")
-        or os.getenv("SORA_MODEL")
-        or Config.sora_model
+    vertex_api_key = (os.getenv("VERTEX_API_KEY") or "").strip()
+    gcp_project_id = (os.getenv("GCP_PROJECT_ID") or "").strip()
+    vertex_location = (
+        os.getenv("VERTEX_LOCATION", Config.vertex_location).strip() or Config.vertex_location
     )
-    sora_model = (raw_model or Config.sora_model).strip() or Config.sora_model
-    normalized = sora_model.replace("_", "-").lower()
-    if normalized in {"sora-2", "sora2"}:
-        sora_model = "sora2"
-    elif normalized in {"veo3", "veo-3"}:
-        sora_model = "veo3"
-    elif normalized in {"veo31", "veo-3.1"}:
-        sora_model = "veo3.1"
+
+    if vertex_enabled:
+        if not vertex_api_key:
+            raise RuntimeError("VERTEX_API_KEY environment variable is required when VERTEX_ENABLED=true")
+        if not gcp_project_id:
+            raise RuntimeError("GCP_PROJECT_ID environment variable is required when VERTEX_ENABLED=true")
+
+    sora_api_key = (os.getenv("SORA_API_KEY") or "").strip()
+    sora_api_base = os.getenv("SORA_API_BASE", Config.sora_api_base).strip() or Config.sora_api_base
+    raw_sora_model = os.getenv("SORA_MODEL", Config.sora_model)
+    sora_model = (raw_sora_model or Config.sora_model).strip() or Config.sora_model
+    normalized_sora = sora_model.replace("_", "-").lower()
+    if normalized_sora in {"sora", "sora-2", "sora2"}:
+        sora_model = "sora-2"
+
+    if sora_enabled and not sora_api_key:
+        raise RuntimeError("SORA_API_KEY environment variable is required when SORA_ENABLED=true")
+
+    def _normalize_default_model(value: Optional[str]) -> Optional[str]:
+        if not value:
+            return None
+        normalized = value.replace("_", "-").strip().lower()
+        if normalized in {"veo3", "veo-3", "veo-3.0", "veo-3.0-generate-001"}:
+            return "veo3"
+        if normalized in {"veo31", "veo3.1", "veo-3.1", "veo-3.1-generate-preview"}:
+            return "veo3.1"
+        if normalized in {"sora", "sora2", "sora-2"}:
+            return sora_model
+        return normalized or None
+
+    default_video_model = _normalize_default_model(os.getenv("DEFAULT_VIDEO_MODEL"))
+    if not default_video_model:
+        default_video_model = "veo3" if vertex_enabled else sora_model
+
+    available_defaults = []
+    if vertex_enabled:
+        available_defaults.extend(["veo3", "veo3.1"])
+    if sora_enabled:
+        available_defaults.append(sora_model)
+
+    if default_video_model not in available_defaults and available_defaults:
+        default_video_model = available_defaults[0]
     database_path = os.getenv("DATABASE_PATH", Config.database_path)
     google_sheet_id = os.getenv("GOOGLE_SHEET_ID")
     if not google_sheet_id:
@@ -414,6 +449,8 @@ def load_config() -> Config:
         "VEO31_COST_RUB_",
         "GEMINI_COST_RUB_",
         "VERTEX_COST_RUB_",
+        "SORA2_COST_RUB_",
+        "SORA_COST_RUB_",
     ]
     pricing = PricingConfig(
         credit_price_rub=_get_env_decimal("CREDIT_PRICE_RUB", DEFAULT_CREDIT_PRICE_RUB),
@@ -425,9 +462,15 @@ def load_config() -> Config:
 
     return Config(
         bot_token=bot_token,
+        vertex_enabled=vertex_enabled,
         vertex_api_key=vertex_api_key,
         gcp_project_id=gcp_project_id,
         vertex_location=vertex_location,
+        sora_enabled=sora_enabled,
+        sora_api_key=sora_api_key,
+        sora_api_base=sora_api_base,
+        sora_model=sora_model,
+        default_video_model=default_video_model,
         database_path=database_path,
         google_sheet_id=google_sheet_id,
         google_service_account=service_account,
@@ -435,7 +478,6 @@ def load_config() -> Config:
         gs_payments_sheet=payments_sheet,
         gs_jobs_sheet=jobs_sheet,
         gs_errors_sheet=errors_sheet,
-        sora_model=sora_model,
         pricing=pricing,
         credit_packages=_build_packages(pricing.credit_price_rub, package_discounts),
         package_discounts=package_discounts,

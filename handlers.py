@@ -120,26 +120,33 @@ class VideoModelOption:
 
 
 def _video_model_options(config: Config) -> list[VideoModelOption]:
-    options: list[VideoModelOption] = [
-        VideoModelOption(
-            key="veo3",
-            model="veo3",
-            provider="veo3",
-            label=i18n.t("video.models.veo3"),
-        ),
-        VideoModelOption(
-            key="veo31",
-            model="veo3.1",
-            provider="veo3.1",
-            label=i18n.t("video.models.veo31"),
-        ),
-        VideoModelOption(
-            key="sora2",
-            model="sora2",
-            provider="veo3",
-            label=i18n.t("video.models.sora"),
-        ),
-    ]
+    options: list[VideoModelOption] = []
+    if config.vertex_enabled:
+        options.append(
+            VideoModelOption(
+                key="veo3",
+                model="veo3",
+                provider="veo3",
+                label=i18n.t("video.models.veo3"),
+            )
+        )
+        options.append(
+            VideoModelOption(
+                key="veo31",
+                model="veo3.1",
+                provider="veo3.1",
+                label=i18n.t("video.models.veo31"),
+            )
+        )
+    if config.sora_enabled:
+        options.append(
+            VideoModelOption(
+                key="sora",
+                model=config.sora_model,
+                provider="sora",
+                label=i18n.t("video.models.sora"),
+            )
+        )
     return options
 
 
@@ -151,7 +158,7 @@ def _find_video_model_option(config: Config, key: str) -> Optional[VideoModelOpt
 
 
 def _resolve_model_label(model: str, config: Config) -> str:
-    if model in {config.sora_model, "sora", "sora2"}:
+    if model in {config.sora_model, "sora", "sora2", "sora-2"}:
         return i18n.t("video.models.sora")
     if model in {"veo3", "veo-3.0-generate-001"}:
         return i18n.t("video.models.veo3")
@@ -160,6 +167,19 @@ def _resolve_model_label(model: str, config: Config) -> str:
     if model in {"gemini-image", "gemini"}:
         return i18n.t("image.model.gemini")
     return model
+
+
+def _video_models_description(config: Config) -> str:
+    labels = [option.label for option in _video_model_options(config)]
+    if not labels:
+        return i18n.t("video.models.unavailable")
+    return ", ".join(dict.fromkeys(labels))
+
+
+def _image_model_description(config: Config) -> str:
+    if config.vertex_enabled:
+        return i18n.t("image.model.gemini")
+    return i18n.t("image.model.unavailable")
 
 
 def _map_provider_error(error: ProviderAPIError) -> tuple[str, str, bool, str]:
@@ -391,8 +411,15 @@ def _build_help_keyboard(config: Config) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-async def _send_main_menu(message: Message) -> None:
-    await message.answer(i18n.t("main.welcome"), reply_markup=_main_keyboard())
+async def _send_main_menu(message: Message, config: Config) -> None:
+    await message.answer(
+        i18n.t(
+            "main.welcome",
+            video_models=_video_models_description(config),
+            image_model=_image_model_description(config),
+        ),
+        reply_markup=_main_keyboard(),
+    )
 
 
 async def _ensure_user(message: Message, db: Database) -> int:
@@ -553,7 +580,7 @@ async def flow_back_callback_handler(
     _, _, target = parts
     if target == "main":
         await state.finish()
-        await _send_main_menu(callback.message)
+        await _send_main_menu(callback.message, config)
         return
     data = await state.get_data()
     if target == "video_model":
@@ -579,7 +606,7 @@ async def flow_back_callback_handler(
             )
         return
     if target == "video_mode":
-        model = data.get("model") or config.sora_model
+        model = data.get("model") or config.default_video_model
         provider = data.get("provider") or model
         model_label = data.get("model_label") or _resolve_model_label(model, config)
         product = data.get("product", "sora_video")
@@ -960,10 +987,12 @@ async def _send_job_update(dp: Dispatcher, job: GenerationJobRecord) -> None:
         log.exception("Failed to send job update to %s", job.user_id)
 
 
-async def start_command(message: Message, db: Database, state: FSMContext) -> None:
+async def start_command(
+    message: Message, db: Database, state: FSMContext, config: Config
+) -> None:
     await state.finish()
     await _ensure_user(message, db)
-    await _send_main_menu(message)
+    await _send_main_menu(message, config)
 
 
 async def help_command(
@@ -971,7 +1000,11 @@ async def help_command(
 ) -> None:
     await _ensure_user(message, db)
     await message.answer(
-        i18n.t("help.main"),
+        i18n.t(
+            "help.main",
+            video_models=_video_models_description(config),
+            image_model=_image_model_description(config),
+        ),
         reply_markup=_build_help_keyboard(config),
     )
 
@@ -987,6 +1020,10 @@ async def generate_video_menu(
     user_id = await _ensure_user(message, db)
     SESSION_MANAGER.get(user_id)
     options = _video_model_options(config)
+    if not options:
+        await message.answer(i18n.t("errors.video_models_unavailable"))
+        await _send_main_menu(message, config)
+        return
     keyboard = _build_video_models_keyboard(options)
     await state.update_data(
         flow_type="video",
@@ -1006,6 +1043,10 @@ async def generate_image_menu(
     await state.finish()
     user_id = await _ensure_user(message, db)
     SESSION_MANAGER.get(user_id)
+    if not config.vertex_enabled:
+        await message.answer(i18n.t("errors.image_generation_disabled"))
+        await _send_main_menu(message, config)
+        return
     model_label = i18n.t("image.model.gemini")
     await state.update_data(
         flow_type="image",
@@ -1044,7 +1085,7 @@ async def handle_text_input(
     session = SESSION_MANAGER.get(user_id)
     state_data = await state.get_data()
     category = state_data.get("flow_type", "video")
-    model = state_data.get("model") or config.sora_model
+    model = state_data.get("model") or config.default_video_model
     provider = state_data.get("provider") or model
     model_label = state_data.get("model_label") or _resolve_model_label(model, config)
     include_size = bool(state_data.get("include_size", category == "video"))
@@ -1089,7 +1130,7 @@ async def handle_photo_input(
     session = SESSION_MANAGER.get(user_id)
     state_data = await state.get_data()
     category = state_data.get("flow_type", "video")
-    model = state_data.get("model") or config.sora_model
+    model = state_data.get("model") or config.default_video_model
     provider = state_data.get("provider") or model
     model_label = state_data.get("model_label") or _resolve_model_label(model, config)
     include_size = bool(state_data.get("include_size", category == "video"))
@@ -1180,7 +1221,7 @@ async def video_mode_callback_handler(
         return
     session = SESSION_MANAGER.get(user.id)
     data = await state.get_data()
-    model = data.get("model") or config.sora_model
+    model = data.get("model") or config.default_video_model
     provider = data.get("provider") or model
     model_label = data.get("model_label") or _resolve_model_label(model, config)
     include_size = True
@@ -1275,7 +1316,7 @@ async def option_callback_handler(
     state_data = await state.get_data()
     if state_data.get("flow_type", "video") != "video":
         return
-    model = state_data.get("model") or config.sora_model
+    model = state_data.get("model") or config.default_video_model
     model_label = state_data.get("model_label") or _resolve_model_label(model, config)
     try:
         if context == "photo":
@@ -1607,7 +1648,7 @@ def register_handlers(
     )
 
     dp.register_message_handler(
-        lambda message, state: start_command(message, db, state),
+        lambda message, state: start_command(message, db, state, config),
         CommandStart(),
         state="*",
     )

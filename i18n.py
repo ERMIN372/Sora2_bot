@@ -93,12 +93,15 @@ class _Translator:
 TRANSLATIONS: Dict[str, Dict[str, str]] = {
     "ru": {
         "main.welcome": (
-            "👋 Привет! Я генерирую видео через Sora 2.\n"
+            "👋 Привет! Я генерирую видео через: {video_models}.\n"
+            "Фото — {image_model}.\n"
             "Выберите действие ниже или пришлите запрос текстом.\n\n"
             "Пример: <code>кот идёт по неону и что-то рассказывает, стиль: киберпанк</code>\n"
         ),
         "help.main": (
             "ℹ️ Как пользоваться ботом\n\n"
+            "🎬 Видео: {video_models}\n"
+            "🖼 Изображения: {image_model}\n\n"
             "1) Сгенерировать по тексту  \n"
             "Опишите идею 1–2 фразами. Пример: <code>кот идёт по неону и что-то рассказывает, стиль: киберпанк</code>  \n"
             "2) Сгенерировать по фото  \n"
@@ -130,6 +133,7 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "video.models.sora": "sora 2",
         "video.models.veo3": "Veo 3",
         "video.models.veo31": "Veo 3.1",
+        "video.models.unavailable": "недоступно",
         "video.mode.prompt": "Как будем генерировать видео?",
         "video.mode.text": "По тексту",
         "video.mode.photo": "По фото",
@@ -137,6 +141,7 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "image.mode.text": "По тексту",
         "image.mode.photo": "По фото",
         "image.model.gemini": "Gemini Image",
+        "image.model.unavailable": "недоступно",
         "video.prompt.text": (
             "Опишите, что нужно создать. Текущий кадр: {size}. Модель: {model}.\n"
             "Используйте подсказки ниже или пришлите описание."
@@ -184,6 +189,8 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "status.completed_url": "Готово: {url}",
         "status.failed": "Не удалось создать. Ошибка {error}.",
         "status.generic": "Статус задачи: {status}.",
+        "errors.video_models_unavailable": "Нет доступных моделей видеогенерации. Обратитесь к оператору или попробуйте позже.",
+        "errors.image_generation_disabled": "Генерация изображений недоступна. Обратитесь к оператору или попробуйте позже.",
         "errors.unknown": "неизвестная ошибка",
         "balance.info": "Ваш баланс: {credits} кредит(ов).",
         "payment.unavailable": "Оплата картой временно недоступна.",
@@ -200,7 +207,7 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "web.return.success": "<h1>Оплата принята</h1><p>Спасибо за покупку!</p>",
         "web.return.canceled": "<h1>Оплата отменена</h1><p>Средства не списаны.</p>",
         "web.return.pending": "<h1>Платёж обрабатывается</h1><p>Проверьте баланс позже.</p>",
-        "errors.pro_unavailable": "Pro-версия недоступна. Используется Sora-2.",
+        "errors.pro_unavailable": "Pro-версия недоступна. Используется Sora 2.",
     }
 }
 

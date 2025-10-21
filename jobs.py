@@ -100,7 +100,7 @@ class JobQueue:
         preset: Optional[str] = None,
         payload: Optional[Dict[str, Any]] = None,
     ) -> GenerationJobRecord:
-        model_key = model or self._config.sora_model
+        model_key = model or self._config.default_video_model
         client, provider_key = self._resolve_provider(provider or model_key)
         request_settings: Dict[str, Any] = dict(settings or {})
         if size:
@@ -197,7 +197,7 @@ class JobQueue:
                 prompt=job.prompt,
                 corr_id=job.corr_id or job.id,
                 size=job.size or "",
-                model=job.model or self._config.sora_model,
+                model=job.model or self._config.default_video_model,
                 provider=job.model or self._default_provider,
                 username=job.username,
             )
