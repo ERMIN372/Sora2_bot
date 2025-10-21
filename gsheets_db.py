@@ -27,6 +27,44 @@ from asyncio import Lock
 log = logging.getLogger(__name__)
 
 
+_MAX_CELL_LENGTH = 50000
+
+
+def _sanitise_cell_value(value: Any, *, column: Optional[str] = None) -> Any:
+    """Normalise a value so it respects the Google Sheets cell limits."""
+
+    if value is None:
+        return ""
+    if isinstance(value, (int, float, bool)):
+        return value
+
+    text = str(value)
+    if not text:
+        return ""
+
+    if text.startswith("data:") and ";base64," in text:
+        header = text.split(",", 1)[0]
+        summary = f"[inline asset: {header} | original length {len(text)} chars]"
+        log.warning(
+            "Replacing inline asset value for column %s with summary to stay under Google Sheets limits",
+            column or "?",
+        )
+        return summary[:_MAX_CELL_LENGTH]
+
+    if len(text) <= _MAX_CELL_LENGTH:
+        return text
+
+    suffix = f"… [truncated; original length {len(text)} chars]"
+    if len(suffix) >= _MAX_CELL_LENGTH:
+        truncated = suffix[:_MAX_CELL_LENGTH]
+    else:
+        truncated = text[: _MAX_CELL_LENGTH - len(suffix)] + suffix
+    log.warning(
+        "Truncated value for column %s from %d to %d characters", column or "?", len(text), len(truncated)
+    )
+    return truncated
+
+
 _USERS_HEADERS = [
     "user_id",
     "credits",
@@ -504,7 +542,11 @@ def _ensure_now(value: Optional[str]) -> str:
 
 
 async def _write_row(state: _SheetState, row_index: int, data: Dict[str, Any]) -> None:
-    values = [data.get(header, "") for header in state.headers]
+    values = []
+    for header in state.headers:
+        sanitised = _sanitise_cell_value(data.get(header, ""), column=header)
+        data[header] = sanitised
+        values.append(sanitised)
     await _to_thread(_worksheet_update, state.worksheet, _row_range(state, row_index), [values])
 
 
@@ -513,7 +555,8 @@ async def _update_cells(state: _SheetState, updates: Dict[str, Tuple[int, Any]])
     for column, (row, value) in updates.items():
         col_idx = state.headers.index(column) + 1
         col_letter = _column_letter(col_idx)
-        requests.append({"range": f"{col_letter}{row}", "values": [[value]]})
+        sanitised = _sanitise_cell_value(value, column=column)
+        requests.append({"range": f"{col_letter}{row}", "values": [[sanitised]]})
     if requests:
         await _to_thread(_worksheet_batch_update, state.worksheet, requests)
 
@@ -998,13 +1041,15 @@ async def update_job_status(job_id: str, status: str, **fields: Any) -> None:
         row = state.index[job_id]
         updates: Dict[str, Tuple[int, Any]] = {}
         if status:
-            record["status"] = status
-            updates["status"] = (row, status)
+            sanitised_status = _sanitise_cell_value(status, column="status")
+            record["status"] = sanitised_status
+            updates["status"] = (row, sanitised_status)
         for key, value in fields.items():
             if key not in state.headers:
                 continue
-            record[key] = value if value is not None else ""
-            updates[key] = (row, record[key])
+            sanitised_value = _sanitise_cell_value(value, column=key)
+            record[key] = sanitised_value
+            updates[key] = (row, sanitised_value)
         record["updated_at"] = _now()
         updates["updated_at"] = (row, record["updated_at"])
         await _update_cells(state, updates)
