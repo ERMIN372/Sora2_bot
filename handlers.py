@@ -352,12 +352,7 @@ async def _send_order_confirmation(
     can_launch: bool,
     include_back: bool = True,
 ) -> Message:
-    approx_rub = config.generation_cost_approx_rubles()
-    price_text = i18n.t(
-        "flow.price_tag",
-        credits=format_credits(config.generation_cost_credits),
-        approx=f"{approx_rub} ₽",
-    )
+    price_text = config.format_price_tag(config.generation_cost_credits)
     prompt_text: SafeText = format_prompt(order.prompt)
     if order.flow == "photo":
         body = i18n.t(
@@ -381,7 +376,7 @@ def _format_packages_list(config: Config) -> str:
     lines: list[str] = [i18n.t("payment.packages.title")]
     for package in config.credit_packages:
         credits_label = format_credits(package.credits_int)
-        price_label = f"{package.price_rubles} ₽"
+        price_label = config.format_rubles(package.price_rub)
         lines.append(i18n.t("payment.packages.line", credits=credits_label, price=price_label))
     lines.append("")
     lines.append(i18n.t("payment.store.instructions"))

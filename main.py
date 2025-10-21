@@ -18,6 +18,7 @@ from db import Database
 from handlers import register_handlers
 from jobs import JobQueue
 from healthcheck import run_startup_healthcheck
+from providers import NanoBananaClient, Veo31Client, Veo3Client
 from sora_client import SoraClient
 import yookassa_client
 
@@ -57,7 +58,19 @@ def _init_application(config: Config) -> ApplicationState:
     dp = Dispatcher(bot, storage=MemoryStorage())
     db = Database()
     sora_client = SoraClient(config=config)
-    job_queue = JobQueue(db=db, sora_client=sora_client, config=config)
+    providers = {
+        config.sora_model: sora_client,
+        "sora": sora_client,
+        "veo3": Veo3Client(config=config),
+        "veo3.1": Veo31Client(config=config),
+        "nanobanana": NanoBananaClient(config=config),
+    }
+    job_queue = JobQueue(
+        db=db,
+        providers=providers,
+        default_provider=config.sora_model,
+        config=config,
+    )
     register_handlers(dp, db=db, config=config, job_queue=job_queue)
 
     app, yookassa_processor = create_app(config=config, dp=dp, bot=bot, db=db)

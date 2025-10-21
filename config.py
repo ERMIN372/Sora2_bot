@@ -7,8 +7,8 @@ import json
 import logging
 import os
 from dataclasses import dataclass, field
-from decimal import ROUND_HALF_UP, Decimal
-from typing import Dict, Mapping, Optional, Tuple
+from decimal import ROUND_CEILING, Decimal
+from typing import Dict, Iterable, Mapping, Optional, Tuple
 
 from dotenv import load_dotenv
 
@@ -16,17 +16,30 @@ load_dotenv()
 
 log = logging.getLogger(__name__)
 
-CREDIT_PRICE_KOPEKS = 2580
-SORA_VIDEO_CREDITS = Decimal("5")
+# ---------------------------------------------------------------------------
+# Pricing constants
+# ---------------------------------------------------------------------------
+
+DEFAULT_CREDIT_PRICE_RUB = Decimal("25.8")
+DEFAULT_MARKUP_PCT = Decimal("30")
+DEFAULT_FIX_FEE_RUB = Decimal("0")
+_DEFAULT_PROVIDER_COSTS: Mapping[str, Decimal] = {
+    "sora2_default": Decimal("18.0"),
+}
+
+DEFAULT_PRODUCTS: Dict[str, Decimal] = {
+    "sora_video": Decimal("5"),
+}
 
 
 @dataclass(frozen=True)
 class CreditPackage:
-    """A bundle of credits sold for a fixed price in kopeks."""
+    """A bundle of credits sold for a fixed price in rubles."""
 
     package_id: str
     credits: int
-    price_kopeks: int
+    price_rub: Decimal
+    discount_pct: Decimal = Decimal("0")
 
     def __post_init__(self) -> None:  # pragma: no cover - dataclass validation
         if self.credits <= 0:
@@ -36,28 +49,89 @@ class CreditPackage:
 
     @property
     def credits_int(self) -> int:
-        """Return the credit amount as an integer for current economy version."""
+        """Return the credit amount as an integer."""
 
         return int(self.credits)
 
     @property
-    def price_rubles(self) -> int:
-        """Return the rounded package price in rubles."""
+    def price_kopeks(self) -> int:
+        """Return the rounded package price in kopeks."""
 
-        return self.price_kopeks // 100
+        value = (self.price_rub * Decimal(100)).quantize(Decimal("1"))
+        return int(value)
+
+    @property
+    def price_rubles(self) -> str:
+        value = self.price_rub.quantize(Decimal("0.01"))
+        return f"{value:.2f}".replace(".", ",")
 
 
-DEFAULT_PRODUCTS: Dict[str, Decimal] = {
-    "sora_video": SORA_VIDEO_CREDITS,
-}
-
-DEFAULT_CREDIT_PACKAGES: Tuple[CreditPackage, ...] = (
-    CreditPackage("c5", 5, 12900),
-    CreditPackage("c10", 10, 25000),
-    CreditPackage("c25", 25, 61300),
-    CreditPackage("c50", 50, 120000),
-    CreditPackage("c150", 150, 356000),
+_DEFAULT_PACKAGE_LAYOUT: Tuple[Tuple[str, int], ...] = (
+    ("c5", 5),
+    ("c10", 10),
+    ("c25", 25),
+    ("c50", 50),
+    ("c150", 150),
 )
+
+
+def _build_packages(
+    credit_price_rub: Decimal, discounts: Optional[Mapping[str, Decimal]] = None
+) -> Tuple[CreditPackage, ...]:
+    discounts = discounts or {}
+    packages: list[CreditPackage] = []
+    for package_id, credits in _DEFAULT_PACKAGE_LAYOUT:
+        discount = discounts.get(package_id, Decimal("0"))
+        base_price = credit_price_rub * Decimal(credits)
+        price = base_price * (Decimal("100") - discount) / Decimal("100")
+        packages.append(
+            CreditPackage(
+                package_id,
+                credits,
+                price.quantize(Decimal("0.01")),
+                discount_pct=discount,
+            )
+        )
+    return tuple(packages)
+
+
+DEFAULT_CREDIT_PACKAGES: Tuple[CreditPackage, ...] = _build_packages(
+    DEFAULT_CREDIT_PRICE_RUB
+)
+
+
+@dataclass(frozen=True)
+class PricingConfig:
+    """Runtime pricing parameters loaded from the environment."""
+
+    credit_price_rub: Decimal
+    markup_pct: Decimal
+    fix_fee_rub: Decimal
+    provider_costs: Mapping[str, Decimal]
+
+    def cost_for(self, key: str, default: Optional[Decimal] = None) -> Optional[Decimal]:
+        value = self.provider_costs.get(key)
+        if value is not None:
+            return value
+        if default is not None:
+            return default
+        return _DEFAULT_PROVIDER_COSTS.get(key)
+
+
+def _load_provider_costs(prefixes: Iterable[str]) -> Dict[str, Decimal]:
+    costs: Dict[str, Decimal] = {}
+    for env_key, value in os.environ.items():
+        for prefix in prefixes:
+            if env_key.startswith(prefix):
+                key = env_key[len(prefix) :].lower()
+                try:
+                    costs[key] = Decimal(value)
+                except Exception as exc:  # pragma: no cover - config guard
+                    raise RuntimeError(
+                        f"Environment variable {env_key!r} must be a decimal number"
+                    ) from exc
+                break
+    return costs
 
 
 @dataclass(frozen=True)
@@ -68,6 +142,12 @@ class Config:
     sora_api_key: str
     sora_api_url: str = "https://api.sora.ai/v1"
     sora_model: str = "sora-2"
+    veo3_api_key: Optional[str] = None
+    veo3_api_url: str = "https://api.veo3.ai/v1"
+    veo31_api_key: Optional[str] = None
+    veo31_api_url: str = "https://api.veo31.ai/v1"
+    nanobanana_api_key: Optional[str] = None
+    nanobanana_api_url: str = "https://api.nanobanana.ai/v1"
     database_path: str = "./bot.db"
     jobs_concurrency: int = 2
     max_jobs_per_user: int = 3
@@ -92,9 +172,17 @@ class Config:
     gs_payments_sheet: str = "payments"
     gs_jobs_sheet: str = "jobs"
     gs_errors_sheet: str = "errors"
-    credit_price_kopeks: int = CREDIT_PRICE_KOPEKS
+    pricing: PricingConfig = field(
+        default_factory=lambda: PricingConfig(
+            credit_price_rub=DEFAULT_CREDIT_PRICE_RUB,
+            markup_pct=DEFAULT_MARKUP_PCT,
+            fix_fee_rub=DEFAULT_FIX_FEE_RUB,
+            provider_costs=dict(_DEFAULT_PROVIDER_COSTS),
+        )
+    )
     products: Mapping[str, Decimal] = field(default_factory=lambda: DEFAULT_PRODUCTS.copy())
     credit_packages: Tuple[CreditPackage, ...] = DEFAULT_CREDIT_PACKAGES
+    package_discounts: Mapping[str, Decimal] = field(default_factory=dict)
     payments_read_only: bool = False
     terms_url: str = "https://telegra.ph/Oferta-10-15-3"
     admin_ids: Tuple[int, ...] = ()
@@ -128,22 +216,50 @@ class Config:
         return None
 
     @property
+    def credit_price_rub(self) -> Decimal:
+        return self.pricing.credit_price_rub
+
+    @property
+    def credit_price_kopeks(self) -> int:
+        return int((self.pricing.credit_price_rub * Decimal(100)).quantize(Decimal("1")))
+
+    def credits_for_rubles(self, value_rub: Decimal) -> int:
+        """Convert *value_rub* to credits using ceil rounding (min 1)."""
+
+        if value_rub <= 0:
+            return 1
+        credits = (value_rub / self.pricing.credit_price_rub).quantize(
+            Decimal("1"), rounding=ROUND_CEILING
+        )
+        return max(1, int(credits))
+
+    def rubles_for_credits(self, credits: int) -> Decimal:
+        return (self.pricing.credit_price_rub * Decimal(credits)).quantize(Decimal("0.01"))
+
+    def format_rubles(self, value: Decimal) -> str:
+        amount = Decimal(value).quantize(Decimal("0.01"))
+        formatted = f"{amount:,.2f}".replace(",", " ").replace(".", ",")
+        return f"{formatted}\u00A0₽"
+
+    def format_price_tag(self, credits: int) -> str:
+        rub_str = self.format_rubles(self.rubles_for_credits(credits))
+        return f"{credits} кредитов (~{rub_str})"
+
+    def get_product_credits(self, key: str = "sora_video") -> int:
+        value = self.products.get(key)
+        if value is None:
+            return 0
+        return int(Decimal(value))
+
+    @property
     def generation_cost_credits(self) -> int:
-        """Return the configured credit price for a single Sora video."""
+        return self.get_product_credits("sora_video")
 
-        return int(self.products.get("sora_video", SORA_VIDEO_CREDITS))
-
-    def credits_to_kopeks(self, credits: Decimal | int) -> int:
-        """Convert *credits* to kopeks using the base credit price."""
-
-        value = Decimal(credits)
-        total = (value * Decimal(self.credit_price_kopeks)).quantize(Decimal("1"), rounding=ROUND_HALF_UP)
-        return int(total)
-
-    def generation_cost_approx_rubles(self) -> int:
-        """Return the approximate ruble cost of one Sora video without discounts."""
-
-        return self.credits_to_kopeks(self.products.get("sora_video", SORA_VIDEO_CREDITS)) // 100
+    def generation_cost_approx_rubles(self, key: str = "sora_video") -> Decimal:
+        credits = self.get_product_credits(key)
+        if credits <= 0:
+            return Decimal("0")
+        return self.rubles_for_credits(credits)
 
     @property
     def aiogram_redis_url(self) -> Optional[str]:
@@ -170,6 +286,16 @@ def _get_env_float(key: str, default: float) -> float:
         return float(value)
     except ValueError as exc:  # pragma: no cover - defensive
         raise RuntimeError(f"Environment variable {key!r} must be a float") from exc
+
+
+def _get_env_decimal(key: str, default: Decimal) -> Decimal:
+    value = os.getenv(key)
+    if value is None or not value.strip():
+        return Decimal(default)
+    try:
+        return Decimal(value)
+    except Exception as exc:  # pragma: no cover - defensive
+        raise RuntimeError(f"Environment variable {key!r} must be a decimal number") from exc
 
 
 def _get_env_bool(key: str, default: bool) -> bool:
@@ -226,6 +352,26 @@ def _load_service_account_info() -> Dict[str, object]:
     return data
 
 
+def _parse_package_discounts(raw: Optional[str]) -> Dict[str, Decimal]:
+    if not raw:
+        return {}
+    items = {}
+    for part in raw.split(","):
+        if not part:
+            continue
+        key, _, value = part.partition(":")
+        key = key.strip()
+        if not key or not value:
+            continue
+        try:
+            items[key] = Decimal(value)
+        except Exception as exc:  # pragma: no cover - config guard
+            raise RuntimeError(
+                f"Invalid discount value for package {key!r}: {value!r}"
+            ) from exc
+    return items
+
+
 def load_config() -> Config:
     """Load configuration from the process environment."""
 
@@ -256,6 +402,20 @@ def load_config() -> Config:
     jobs_sheet = os.getenv("GS_JOBS_SHEET", Config.gs_jobs_sheet)
     errors_sheet = os.getenv("GS_ERRORS_SHEET", Config.gs_errors_sheet)
 
+    prefixes = [
+        "VEO3_COST_RUB_",
+        "VEO31_COST_RUB_",
+        "SORA2_COST_RUB_",
+        "NANOBANANA_COST_RUB_",
+    ]
+    pricing = PricingConfig(
+        credit_price_rub=_get_env_decimal("CREDIT_PRICE_RUB", DEFAULT_CREDIT_PRICE_RUB),
+        markup_pct=_get_env_decimal("MARKUP_PCT", DEFAULT_MARKUP_PCT),
+        fix_fee_rub=_get_env_decimal("FIX_FEE_RUB", DEFAULT_FIX_FEE_RUB),
+        provider_costs=_load_provider_costs(prefixes),
+    )
+    package_discounts = _parse_package_discounts(os.getenv("CREDIT_PACKAGE_DISCOUNTS"))
+
     return Config(
         bot_token=bot_token,
         sora_api_key=sora_api_key,
@@ -268,6 +428,15 @@ def load_config() -> Config:
         gs_jobs_sheet=jobs_sheet,
         gs_errors_sheet=errors_sheet,
         sora_model=sora_model,
+        veo3_api_key=os.getenv("VEO3_API_KEY"),
+        veo3_api_url=os.getenv("VEO3_API_URL", Config.veo3_api_url),
+        veo31_api_key=os.getenv("VEO31_API_KEY"),
+        veo31_api_url=os.getenv("VEO31_API_URL", Config.veo31_api_url),
+        nanobanana_api_key=os.getenv("NANOBANANA_API_KEY"),
+        nanobanana_api_url=os.getenv("NANOBANANA_API_URL", Config.nanobanana_api_url),
+        pricing=pricing,
+        credit_packages=_build_packages(pricing.credit_price_rub, package_discounts),
+        package_discounts=package_discounts,
         jobs_concurrency=_get_env_int("JOBS_CONCURRENCY", Config.jobs_concurrency),
         max_jobs_per_user=_get_env_int("MAX_JOBS_PER_USER", Config.max_jobs_per_user),
         request_timeout=_get_env_float("REQUEST_TIMEOUT", Config.request_timeout),
@@ -354,9 +523,8 @@ CFG = _load_runtime_config()
 
 
 __all__ = [
-    "CREDIT_PRICE_KOPEKS",
-    "SORA_VIDEO_CREDITS",
     "CreditPackage",
+    "PricingConfig",
     "Config",
     "RuntimeConfig",
     "CFG",
