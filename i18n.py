@@ -130,7 +130,7 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "chips.vertical": "Вертикаль",
         "chips.horizontal": "Горизонталь",
         "video.models.prompt": "Выберите модель видеогенерации:",
-        "video.models.sora": "Sora 2",
+        "video.models.sora": "sora 2",
         "video.models.veo3": "Veo 3",
         "video.models.veo31": "Veo 3.1",
         "video.models.unavailable": "недоступно",
