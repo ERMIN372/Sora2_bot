@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import base64
 import binascii
 import json
@@ -180,7 +181,8 @@ def _worksheet_update(worksheet: gspread.Worksheet, range_name: str, values: Lis
 
 @retry(**_API_RETRY)
 def _worksheet_batch_update(worksheet: gspread.Worksheet, body: List[Dict[str, Any]]) -> None:
-    worksheet.batch_update(body)
+    safe_body = copy.deepcopy(body)
+    worksheet.batch_update(safe_body)
 
 
 @retry(**_API_RETRY)
