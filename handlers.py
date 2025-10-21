@@ -277,7 +277,19 @@ def _mark_selected(label: str, selected: bool) -> str:
     return f"✅ {label}" if selected else label
 
 
-def _build_options_keyboard(session: UserSession, context: str) -> InlineKeyboardMarkup:
+def _back_button(target: str) -> InlineKeyboardButton:
+    return InlineKeyboardButton(
+        text=i18n.t("buttons.back"), callback_data=f"flow:back:{target}"
+    )
+
+
+def _build_back_keyboard(target: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[[_back_button(target)]])
+
+
+def _build_options_keyboard(
+    session: UserSession, context: str, back_target: Optional[str] = None
+) -> InlineKeyboardMarkup:
     size_row = []
     for token, value in SIZE_OPTIONS.items():
         label_key = SIZE_LABEL_KEYS[token]
@@ -288,7 +300,10 @@ def _build_options_keyboard(session: UserSession, context: str) -> InlineKeyboar
                 callback_data=f"opt:size:{context}:{token}",
             )
         )
-    return InlineKeyboardMarkup(inline_keyboard=[size_row])
+    rows: list[list[InlineKeyboardButton]] = [size_row]
+    if back_target:
+        rows.append([_back_button(back_target)])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def _build_confirmation_keyboard(*, can_launch: bool, include_back: bool = True) -> InlineKeyboardMarkup:
@@ -322,6 +337,7 @@ def _build_video_models_keyboard(options: list[VideoModelOption]) -> InlineKeybo
                 )
             ]
         )
+    rows.append([_back_button("main")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -330,14 +346,17 @@ def _build_mode_keyboard(category: Literal["video", "image"]) -> InlineKeyboardM
         text_label = i18n.t("video.mode.text")
         photo_label = i18n.t("video.mode.photo")
         prefix = "video:mode"
+        back_target = "video_model"
     else:
         text_label = i18n.t("image.mode.text")
         photo_label = i18n.t("image.mode.photo")
         prefix = "image:mode"
+        back_target = "main"
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text=text_label, callback_data=f"{prefix}:text")],
             [InlineKeyboardButton(text=photo_label, callback_data=f"{prefix}:photo")],
+            [_back_button(back_target)],
         ]
     )
 
@@ -462,13 +481,16 @@ async def _send_generation_prompt(
             body = i18n.t("video.prompt.photo", size=size, model=model_label)
         else:
             body = i18n.t("video.prompt.text", size=size, model=model_label)
-        markup = _build_options_keyboard(session, mode) if include_size else None
+        if include_size:
+            markup = _build_options_keyboard(session, mode, back_target="video_mode")
+        else:
+            markup = _build_back_keyboard("video_mode")
     else:
         if mode == "photo":
             body = i18n.t("image.prompt.photo", model=model_label)
         else:
             body = i18n.t("image.prompt.text", model=model_label)
-        markup = None
+        markup = _build_back_keyboard("image_mode")
     await message.answer(body, reply_markup=markup)
 
 
@@ -518,6 +540,93 @@ async def _send_order_confirmation(
             )
     keyboard = _build_confirmation_keyboard(can_launch=can_launch, include_back=include_back)
     return await bot.send_message(chat_id, body, reply_markup=keyboard)
+
+
+async def flow_back_callback_handler(
+    callback: CallbackQuery, state: FSMContext, config: Config
+) -> None:
+    await callback.answer()
+    parts = (callback.data or "").split(":", maxsplit=2)
+    if len(parts) != 3:
+        return
+    _, _, target = parts
+    if target == "main":
+        await state.finish()
+        await _send_main_menu(callback.message)
+        return
+    data = await state.get_data()
+    if target == "video_model":
+        product = data.get("product", "sora_video")
+        await state.update_data(
+            flow_type="video",
+            model=None,
+            provider=None,
+            model_label=None,
+            include_size=True,
+            product=product,
+            mode=None,
+        )
+        await GenerationStates.video_model.set()
+        keyboard = _build_video_models_keyboard(_video_model_options(config))
+        try:
+            await callback.message.edit_text(
+                i18n.t("video.models.prompt"), reply_markup=keyboard
+            )
+        except Exception:  # pragma: no cover - Telegram edits may fail
+            await callback.message.answer(
+                i18n.t("video.models.prompt"), reply_markup=keyboard
+            )
+        return
+    if target == "video_mode":
+        model = data.get("model") or config.sora_model
+        provider = data.get("provider") or model
+        model_label = data.get("model_label") or _resolve_model_label(model, config)
+        product = data.get("product", "sora_video")
+        await state.update_data(
+            flow_type="video",
+            model=model,
+            provider=provider,
+            model_label=model_label,
+            include_size=True,
+            product=product,
+            mode=None,
+        )
+        await GenerationStates.video_mode.set()
+        keyboard = _build_mode_keyboard("video")
+        try:
+            await callback.message.edit_text(
+                i18n.t("video.mode.prompt"), reply_markup=keyboard
+            )
+        except Exception:  # pragma: no cover - Telegram edits may fail
+            await callback.message.answer(
+                i18n.t("video.mode.prompt"), reply_markup=keyboard
+            )
+        return
+    if target == "image_mode":
+        model = data.get("model") or "nanobanana"
+        provider = data.get("provider") or "nanobanana"
+        model_label = data.get("model_label") or _resolve_model_label(model, config)
+        product = data.get("product", "sora_video")
+        await state.update_data(
+            flow_type="image",
+            model=model,
+            provider=provider,
+            model_label=model_label,
+            include_size=False,
+            product=product,
+            mode=None,
+        )
+        await GenerationStates.image_mode.set()
+        keyboard = _build_mode_keyboard("image")
+        try:
+            await callback.message.edit_text(
+                i18n.t("image.mode.prompt"), reply_markup=keyboard
+            )
+        except Exception:  # pragma: no cover - Telegram edits may fail
+            await callback.message.answer(
+                i18n.t("image.mode.prompt"), reply_markup=keyboard
+            )
+        return
 
 
 def _format_packages_list(config: Config) -> str:
@@ -1163,7 +1272,9 @@ async def option_callback_handler(
             body = i18n.t("video.prompt.text", size=session.last_size, model=model_label)
         await callback.message.edit_text(
             body,
-            reply_markup=_build_options_keyboard(session, context),
+            reply_markup=_build_options_keyboard(
+                session, context, back_target="video_mode"
+            ),
         )
     except Exception:  # pragma: no cover - Telegram may block edits on old messages
         log.debug("Failed to edit options message", exc_info=True)
@@ -1586,6 +1697,11 @@ def register_handlers(
     dp.register_callback_query_handler(
         lambda call, state: option_callback_handler(call, state, config),
         lambda call: call.data and call.data.startswith("opt:"),
+        state="*",
+    )
+    dp.register_callback_query_handler(
+        lambda call, state: flow_back_callback_handler(call, state, config),
+        lambda call: call.data and call.data.startswith("flow:back:"),
         state="*",
     )
     dp.register_callback_query_handler(
