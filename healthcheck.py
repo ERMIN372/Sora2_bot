@@ -10,6 +10,7 @@ import aiohttp
 import gsheets_db
 
 from config import Config
+from providers.google_auth import ServiceAccountTokenProvider
 from observability import HealthCheckResult, record_healthcheck
 
 log = logging.getLogger(__name__)
@@ -18,14 +19,22 @@ log = logging.getLogger(__name__)
 async def _probe_vertex_models(config: Config) -> Tuple[bool, str]:
     if not config.vertex_enabled:
         return True, "disabled"
-    if not config.vertex_api_key or not config.gcp_project_id:
+    if not config.google_service_account or not config.gcp_project_id:
         return False, "missing credentials"
     base = (
         f"https://{config.vertex_location}-aiplatform.googleapis.com/v1/projects/{config.gcp_project_id}"
         f"/locations/{config.vertex_location}/publishers/google/models"
     )
+    token_provider = ServiceAccountTokenProvider(
+        config.google_service_account,
+        scopes=["https://www.googleapis.com/auth/cloud-platform"],
+    )
+    try:
+        token = await token_provider.get_token()
+    except Exception as exc:  # pragma: no cover - auth failure
+        return False, f"auth: {exc}"
     headers = {
-        "Authorization": f"Bearer {config.vertex_api_key}",
+        "Authorization": f"Bearer {token}",
         "Content-Type": "application/json",
     }
     timeout = aiohttp.ClientTimeout(
@@ -105,11 +114,11 @@ async def run_startup_healthcheck(*, config: Config, mode: str) -> HealthCheckRe
 
     add_check("VERTEX_ENABLED", config.vertex_enabled, str(config.vertex_enabled).lower())
     if config.vertex_enabled:
-        add_check("VERTEX_API_KEY", bool(config.vertex_api_key))
+        add_check("GOOGLE_SERVICE_ACCOUNT", bool(config.google_service_account))
         add_check("GCP_PROJECT_ID", bool(config.gcp_project_id))
         add_check("VERTEX_LOCATION", bool(config.vertex_location), config.vertex_location)
     else:
-        add_check("VERTEX_API_KEY", True, "disabled")
+        add_check("GOOGLE_SERVICE_ACCOUNT", True, "disabled")
         add_check("GCP_PROJECT_ID", True, "disabled")
         add_check("VERTEX_LOCATION", True, "disabled")
     add_check("SORA_ENABLED", config.sora_enabled, str(config.sora_enabled).lower())
