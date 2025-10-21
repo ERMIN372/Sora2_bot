@@ -140,7 +140,6 @@ class Config:
 
     bot_token: str
     vertex_enabled: bool = True
-    vertex_api_key: str = ""
     gcp_project_id: str = ""
     vertex_location: str = "us-central1"
     sora_enabled: bool = False
@@ -387,15 +386,12 @@ def load_config() -> Config:
     if not vertex_enabled and not sora_enabled:
         raise RuntimeError("At least one provider must be enabled (Vertex or Sora)")
 
-    vertex_api_key = (os.getenv("VERTEX_API_KEY") or "").strip()
     gcp_project_id = (os.getenv("GCP_PROJECT_ID") or "").strip()
     vertex_location = (
         os.getenv("VERTEX_LOCATION", Config.vertex_location).strip() or Config.vertex_location
     )
 
     if vertex_enabled:
-        if not vertex_api_key:
-            raise RuntimeError("VERTEX_API_KEY environment variable is required when VERTEX_ENABLED=true")
         if not gcp_project_id:
             raise RuntimeError("GCP_PROJECT_ID environment variable is required when VERTEX_ENABLED=true")
 
@@ -463,7 +459,6 @@ def load_config() -> Config:
     return Config(
         bot_token=bot_token,
         vertex_enabled=vertex_enabled,
-        vertex_api_key=vertex_api_key,
         gcp_project_id=gcp_project_id,
         vertex_location=vertex_location,
         sora_enabled=sora_enabled,

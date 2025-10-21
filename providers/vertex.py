@@ -13,6 +13,7 @@ from .base import (
     ProviderJobStatus,
     ProviderJobSubmission,
 )
+from .google_auth import ServiceAccountTokenProvider
 
 log = logging.getLogger(__name__)
 
@@ -35,12 +36,49 @@ class VertexGenerativeClient(BaseProviderClient):
         super().__init__(
             config=config,
             base_url=endpoint,
-            api_key=config.vertex_api_key,
+            api_key="",
             provider_name=provider_name,
         )
         self._model = model
         self._method = method
         self._pending: Dict[str, Tuple[Dict[str, Any], int, int, Dict[str, Any]]] = {}
+        self._token_provider = ServiceAccountTokenProvider(
+            config.google_service_account,
+            scopes=["https://www.googleapis.com/auth/cloud-platform"],
+        )
+
+    def _build_headers(self) -> Dict[str, str]:
+        headers = dict(self._default_headers)
+        headers.setdefault("Content-Type", "application/json")
+        return headers
+
+    async def _request(
+        self,
+        method: str,
+        path: str,
+        *,
+        idempotency_key: Optional[str] = None,
+        **kwargs: Any,
+    ) -> Tuple[Dict[str, Any], int, int]:
+        try:
+            token = await self._token_provider.get_token()
+        except Exception as exc:  # pragma: no cover - auth failure
+            raise ProviderAPIError(
+                provider=self.provider_name,
+                status_code=0,
+                message="Failed to obtain Vertex access token",
+                error_type="auth",
+                provider_message=str(exc),
+            ) from exc
+        headers = dict(kwargs.pop("headers", {}))
+        headers["Authorization"] = f"Bearer {token}"
+        return await super()._request(
+            method,
+            path,
+            idempotency_key=idempotency_key,
+            headers=headers,
+            **kwargs,
+        )
 
     def _jobs_path(self) -> str:
         return f"/{self._model}:{self._method}"
