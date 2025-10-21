@@ -1,0 +1,258 @@
+"""Clients for Google Vertex AI video and image generation."""
+from __future__ import annotations
+
+import logging
+from typing import Any, Dict, Optional, Tuple
+from uuid import uuid4
+
+from config import Config
+
+from .base import (
+    BaseProviderClient,
+    ProviderAPIError,
+    ProviderJobStatus,
+    ProviderJobSubmission,
+)
+
+log = logging.getLogger(__name__)
+
+
+class VertexGenerativeClient(BaseProviderClient):
+    """Base client for synchronous Vertex AI generateContent calls."""
+
+    def __init__(
+        self,
+        *,
+        config: Config,
+        model: str,
+        method: str,
+        provider_name: str,
+    ) -> None:
+        endpoint = (
+            f"https://{config.vertex_location}-aiplatform.googleapis.com/v1/projects/"
+            f"{config.gcp_project_id}/locations/{config.vertex_location}/publishers/google/models"
+        )
+        super().__init__(
+            config=config,
+            base_url=endpoint,
+            api_key=config.vertex_api_key,
+            provider_name=provider_name,
+        )
+        self._model = model
+        self._method = method
+        self._pending: Dict[str, Tuple[Dict[str, Any], int, int, Dict[str, Any]]] = {}
+
+    def _jobs_path(self) -> str:
+        return f"/{self._model}:{self._method}"
+
+    def _build_error(self, status: int, text: str, duration_ms: int) -> ProviderAPIError:
+        error = super()._build_error(status, text, duration_ms)
+        if status == 429:
+            error.retryable = True
+        return error
+
+    async def enqueue_job(
+        self,
+        *,
+        prompt: str,
+        settings: Optional[Dict[str, Any]] = None,
+        payload: Optional[Dict[str, Any]] = None,
+        idempotency_key: Optional[str] = None,
+        **_: Any,
+    ) -> ProviderJobSubmission:
+        body = self._build_enqueue_payload(
+            prompt=prompt, settings=settings, payload=payload
+        )
+        data, status_code, duration_ms = await self._request(
+            "POST",
+            self._jobs_path(),
+            json=body,
+            idempotency_key=idempotency_key,
+        )
+        job_id = idempotency_key or str(uuid4())
+        meta = {
+            "prompt": prompt,
+            "settings": settings or {},
+            "payload": body,
+        }
+        self._pending[job_id] = (data, status_code, duration_ms, meta)
+        size = (settings or {}).get("size")
+        duration = (settings or {}).get("duration")
+        log.info(
+            "vertex.call corr_id=%s provider=%s model=%s size=%s duration=%s status=%s latency_ms=%s",
+            idempotency_key or job_id,
+            self.provider_name,
+            self._model,
+            size or "",
+            duration or "",
+            status_code,
+            duration_ms,
+        )
+        return ProviderJobSubmission(
+            job_id=job_id,
+            status_code=status_code,
+            duration_ms=duration_ms,
+            data=data,
+        )
+
+    async def get_job_status(self, job_id: str) -> ProviderJobStatus:
+        record = self._pending.pop(job_id, None)
+        if record is None:
+            return ProviderJobStatus(
+                job_id=job_id,
+                status="failed",
+                error="Result not found",
+                assets={},
+                data={},
+                status_code=404,
+                duration_ms=0,
+            )
+        data, status_code, duration_ms, meta = record
+        status, error, assets = self._extract_result(data)
+        if status != "completed" and not error:
+            error = "Не удалось создать. Ошибка неизвестна"
+        return ProviderJobStatus(
+            job_id=job_id,
+            status=status,
+            error=error,
+            assets=assets,
+            data={"response": data, "meta": meta},
+            status_code=status_code,
+            duration_ms=duration_ms,
+        )
+
+    def _extract_result(self, payload: Dict[str, Any]) -> Tuple[str, Optional[str], Dict[str, str]]:
+        if not isinstance(payload, dict):
+            return "failed", "Пустой ответ провайдера", {}
+        error = payload.get("error")
+        if isinstance(error, dict):
+            message = error.get("message") or error.get("status")
+            return "failed", f"{message}" if message else "Неизвестная ошибка", {}
+        candidates = payload.get("candidates")
+        if not candidates:
+            return "failed", "Пустой ответ модели", {}
+        first = candidates[0] or {}
+        content = first.get("content") if isinstance(first, dict) else {}
+        parts = []
+        if isinstance(content, dict):
+            raw_parts = content.get("parts")
+            if isinstance(raw_parts, list):
+                parts = [part for part in raw_parts if isinstance(part, dict)]
+        assets: Dict[str, str] = {}
+        for part in parts:
+            self._collect_assets(part, assets)
+        if assets:
+            return "completed", None, assets
+        finish_reason = first.get("finishReason") if isinstance(first, dict) else None
+        if isinstance(finish_reason, str) and finish_reason:
+            return "failed", finish_reason, {}
+        return "failed", "Модель не вернула результат", {}
+
+    def _collect_assets(self, part: Dict[str, Any], assets: Dict[str, str]) -> None:
+        media = part.get("media")
+        if isinstance(media, dict):
+            uri = media.get("uri") or media.get("downloadUri")
+            if uri:
+                assets[f"media_{len(assets)}"] = str(uri)
+        file_data = part.get("fileData")
+        if isinstance(file_data, dict):
+            uri = file_data.get("fileUri") or file_data.get("uri")
+            if uri:
+                assets[f"media_{len(assets)}"] = str(uri)
+        inline = part.get("inlineData") or part.get("inline_data")
+        if isinstance(inline, dict):
+            data = inline.get("data")
+            if data:
+                mime = inline.get("mimeType") or inline.get("mime_type") or "application/octet-stream"
+                assets[f"inline_{len(assets)}"] = f"data:{mime};base64,{data}"
+
+    def _build_enqueue_payload(
+        self,
+        *,
+        prompt: str,
+        settings: Optional[Dict[str, Any]] = None,
+        payload: Optional[Dict[str, Any]] = None,
+        **_: Any,
+    ) -> Dict[str, Any]:
+        if payload is not None:
+            return payload
+        raise NotImplementedError
+
+
+class VertexVideoClient(VertexGenerativeClient):
+    """Generate video clips using Veo models on Vertex AI."""
+
+    def _build_enqueue_payload(
+        self,
+        *,
+        prompt: str,
+        settings: Optional[Dict[str, Any]] = None,
+        payload: Optional[Dict[str, Any]] = None,
+        **_: Any,
+    ) -> Dict[str, Any]:
+        if payload is not None:
+            return payload
+        config = settings or {}
+        dimension = str(config.get("size") or "1280x720")
+        if dimension not in {"1280x720", "720x1280"}:
+            dimension = "1280x720"
+        duration = int(config.get("duration") or 6)
+        if duration not in {4, 6, 8}:
+            duration = 6
+        reference = config.get("reference_inline_data")
+        parts = [{"text": prompt}]
+        if isinstance(reference, dict) and reference.get("data"):
+            inline = {
+                "mime_type": reference.get("mime_type", "image/jpeg"),
+                "data": reference.get("data"),
+            }
+            parts.append({"inline_data": inline})
+        body = {
+            "contents": [
+                {
+                    "role": "user",
+                    "parts": parts,
+                }
+            ],
+            "generationConfig": {
+                "video": {
+                    "dimension": dimension,
+                    "duration_seconds": duration,
+                    "fps": 24,
+                }
+            },
+        }
+        config.setdefault("size", dimension)
+        config.setdefault("duration", duration)
+        return body
+
+
+class VertexImageClient(VertexGenerativeClient):
+    """Generate images using Gemini models on Vertex AI."""
+
+    def _build_enqueue_payload(
+        self,
+        *,
+        prompt: str,
+        settings: Optional[Dict[str, Any]] = None,
+        payload: Optional[Dict[str, Any]] = None,
+        **_: Any,
+    ) -> Dict[str, Any]:
+        if payload is not None:
+            return payload
+        reference = (settings or {}).get("reference_inline_data")
+        parts = [{"text": prompt}]
+        if isinstance(reference, dict) and reference.get("data"):
+            inline = {
+                "mime_type": reference.get("mime_type", "image/jpeg"),
+                "data": reference.get("data"),
+            }
+            parts.append({"inline_data": inline})
+        return {
+            "contents": [
+                {
+                    "role": "user",
+                    "parts": parts,
+                }
+            ]
+        }

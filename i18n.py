@@ -127,7 +127,7 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "chips.vertical": "Вертикаль",
         "chips.horizontal": "Горизонталь",
         "video.models.prompt": "Выберите модель видеогенерации:",
-        "video.models.sora": "Sora 2",
+        "video.models.sora": "sora 2",
         "video.models.veo3": "Veo 3",
         "video.models.veo31": "Veo 3.1",
         "video.mode.prompt": "Как будем генерировать видео?",
@@ -136,7 +136,7 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "image.mode.prompt": "Как будем генерировать изображение?",
         "image.mode.text": "По тексту",
         "image.mode.photo": "По фото",
-        "image.model.nanobanana": "NanoBanana",
+        "image.model.gemini": "Gemini Image",
         "video.prompt.text": (
             "Опишите, что нужно создать. Текущий кадр: {size}. Модель: {model}.\n"
             "Используйте подсказки ниже или пришлите описание."
@@ -182,7 +182,7 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "status.running": "⚙️ Генерирую…",
         "status.completed_file": "✅ Готово. Отправляю ролик.",
         "status.completed_url": "Готово: {url}",
-        "status.failed": "Не удалось создать видео: {error}. Кредит возвращён.",
+        "status.failed": "Не удалось создать. Ошибка {error}.",
         "status.generic": "Статус задачи: {status}.",
         "errors.unknown": "неизвестная ошибка",
         "balance.info": "Ваш баланс: {credits} кредит(ов).",

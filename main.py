@@ -18,8 +18,7 @@ from db import Database
 from handlers import register_handlers
 from jobs import JobQueue
 from healthcheck import run_startup_healthcheck
-from providers import NanoBananaClient, Veo31Client, Veo3Client
-from sora_client import SoraClient
+from providers import VertexImageClient, VertexVideoClient
 import yookassa_client
 
 logging.basicConfig(level=logging.INFO)
@@ -35,7 +34,6 @@ class ApplicationState:
     dp: Dispatcher
     db: Database
     job_queue: JobQueue
-    sora_client: SoraClient
     app: FastAPI
     yookassa_processor: Optional[YooKassaProcessor]
     background_tasks: List[asyncio.Task[Any]] = field(default_factory=list)
@@ -57,14 +55,33 @@ def _init_application(config: Config) -> ApplicationState:
     bot = Bot(token=config.bot_token, parse_mode="HTML")
     dp = Dispatcher(bot, storage=MemoryStorage())
     db = Database()
-    sora_client = SoraClient(config=config)
+    veo3_client = VertexVideoClient(
+        config=config,
+        model="veo-3.0-generate-001",
+        method="generateContent",
+        provider_name="veo3",
+    )
+    veo31_client = VertexVideoClient(
+        config=config,
+        model="veo-3.1-generate-preview",
+        method="generateContent",
+        provider_name="veo3.1",
+    )
+    gemini_client = VertexImageClient(
+        config=config,
+        model="gemini-2.5-flash-image",
+        method="generateContent",
+        provider_name="gemini-image",
+    )
     providers = {
-        config.sora_model: sora_client,
-        "sora": sora_client,
-        "veo3": Veo3Client(config=config),
-        "veo3.1": Veo31Client(config=config),
-        "nanobanana": NanoBananaClient(config=config),
+        "veo3": veo3_client,
+        "sora2": veo3_client,
+        "veo3.1": veo31_client,
+        "veo31": veo31_client,
+        "gemini-image": gemini_client,
     }
+    if config.sora_model not in providers:
+        providers[config.sora_model] = veo3_client
     job_queue = JobQueue(
         db=db,
         providers=providers,
@@ -81,7 +98,6 @@ def _init_application(config: Config) -> ApplicationState:
         dp=dp,
         db=db,
         job_queue=job_queue,
-        sora_client=sora_client,
         app=app,
         yookassa_processor=yookassa_processor,
     )
@@ -105,7 +121,7 @@ async def _startup(state: ApplicationState, *, mode: str) -> None:
         log.info("Webhook configured at %s", CFG.WEBHOOK_URL)
 
     await state.db.init()
-    await run_startup_healthcheck(config=state.config, mode=mode, sora_client=state.sora_client)
+    await run_startup_healthcheck(config=state.config, mode=mode)
 
     async def _fetch_profile(user_id: int) -> Optional[Dict[str, Optional[str]]]:
         try:
@@ -157,7 +173,6 @@ async def _shutdown(state: ApplicationState, *, mode: str) -> None:
     state.background_tasks.clear()
 
     await state.job_queue.stop()
-    await state.sora_client.close()
 
     try:
         await state.bot.delete_webhook(drop_pending_updates=False)
