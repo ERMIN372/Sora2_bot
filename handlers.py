@@ -35,6 +35,7 @@ from observability import (
     should_notify_support,
 )
 from providers import ProviderAPIError
+from utils import build_inline_data_from_telegram_file
 import yookassa_client
 
 log = logging.getLogger(__name__)
@@ -121,12 +122,6 @@ class VideoModelOption:
 def _video_model_options(config: Config) -> list[VideoModelOption]:
     options: list[VideoModelOption] = [
         VideoModelOption(
-            key="sora",
-            model=config.sora_model,
-            provider=config.sora_model,
-            label=i18n.t("video.models.sora"),
-        ),
-        VideoModelOption(
             key="veo3",
             model="veo3",
             provider="veo3",
@@ -137,6 +132,12 @@ def _video_model_options(config: Config) -> list[VideoModelOption]:
             model="veo3.1",
             provider="veo3.1",
             label=i18n.t("video.models.veo31"),
+        ),
+        VideoModelOption(
+            key="sora2",
+            model="sora2",
+            provider="veo3",
+            label=i18n.t("video.models.sora"),
         ),
     ]
     return options
@@ -150,14 +151,14 @@ def _find_video_model_option(config: Config, key: str) -> Optional[VideoModelOpt
 
 
 def _resolve_model_label(model: str, config: Config) -> str:
-    if model == config.sora_model or model == "sora":
+    if model in {config.sora_model, "sora", "sora2"}:
         return i18n.t("video.models.sora")
-    if model == "veo3":
+    if model in {"veo3", "veo-3.0-generate-001"}:
         return i18n.t("video.models.veo3")
-    if model in {"veo3.1", "veo31"}:
+    if model in {"veo3.1", "veo31", "veo-3.1-generate-preview"}:
         return i18n.t("video.models.veo31")
-    if model == "nanobanana":
-        return i18n.t("image.model.nanobanana")
+    if model in {"gemini-image", "gemini"}:
+        return i18n.t("image.model.gemini")
     return model
 
 
@@ -200,7 +201,7 @@ def _map_provider_error(error: ProviderAPIError) -> tuple[str, str, bool, str]:
     else:
         detail = escape_html(provider_message or (error.args[0] if error.args else ""))
         message = f"Не удалось выполнить запрос: {detail or 'попробуйте позже.'}"
-        short = _shorten(provider_message or "Ошибка Sora")
+        short = _shorten(provider_message or "Ошибка Vertex")
     return message, short, notify_support, hint
 
 
@@ -603,8 +604,8 @@ async def flow_back_callback_handler(
             )
         return
     if target == "image_mode":
-        model = data.get("model") or "nanobanana"
-        provider = data.get("provider") or "nanobanana"
+        model = data.get("model") or "gemini-image"
+        provider = data.get("provider") or "gemini-image"
         model_label = data.get("model_label") or _resolve_model_label(model, config)
         product = data.get("product", "sora_video")
         await state.update_data(
@@ -786,6 +787,16 @@ async def _launch_order(
         balance_after,
     )
 
+    provider_settings: Dict[str, Any] = {}
+    if order.category == "video":
+        provider_settings["duration"] = 6
+    if order.image_file_id:
+        inline_data = await build_inline_data_from_telegram_file(
+            callback.message.bot, order.image_file_id
+        )
+        if inline_data:
+            provider_settings["reference_inline_data"] = inline_data
+
     try:
         await job_queue.submit(
             user_id=user_id,
@@ -796,6 +807,7 @@ async def _launch_order(
             image_file_id=order.image_file_id,
             username=user.username,
             provider=provider_key,
+            settings=provider_settings or None,
         )
     except ProviderAPIError as exc:
         message, short, notify_support, hint = _map_provider_error(exc)
@@ -994,11 +1006,11 @@ async def generate_image_menu(
     await state.finish()
     user_id = await _ensure_user(message, db)
     SESSION_MANAGER.get(user_id)
-    model_label = i18n.t("image.model.nanobanana")
+    model_label = i18n.t("image.model.gemini")
     await state.update_data(
         flow_type="image",
-        model="nanobanana",
-        provider="nanobanana",
+        model="gemini-image",
+        provider="gemini-image",
         model_label=model_label,
         include_size=False,
         product="sora_video",
@@ -1213,8 +1225,8 @@ async def image_mode_callback_handler(
         return
     session = SESSION_MANAGER.get(user.id)
     data = await state.get_data()
-    model = data.get("model") or "nanobanana"
-    provider = data.get("provider") or "nanobanana"
+    model = data.get("model") or "gemini-image"
+    provider = data.get("provider") or "gemini-image"
     model_label = data.get("model_label") or _resolve_model_label(model, config)
     product = data.get("product", "sora_video")
     await state.update_data(

@@ -24,7 +24,7 @@ DEFAULT_CREDIT_PRICE_RUB = Decimal("25.8")
 DEFAULT_MARKUP_PCT = Decimal("30")
 DEFAULT_FIX_FEE_RUB = Decimal("0")
 _DEFAULT_PROVIDER_COSTS: Mapping[str, Decimal] = {
-    "sora2_default": Decimal("18.0"),
+    "veo3_default": Decimal("18.0"),
 }
 
 DEFAULT_PRODUCTS: Dict[str, Decimal] = {
@@ -139,21 +139,16 @@ class Config:
     """Configuration values loaded from the environment."""
 
     bot_token: str
-    sora_api_key: str
-    sora_api_url: str = "https://api.sora.ai/v1"
-    sora_model: str = "sora-2"
-    veo3_api_key: Optional[str] = None
-    veo3_api_url: str = "https://api.veo3.ai/v1"
-    veo31_api_key: Optional[str] = None
-    veo31_api_url: str = "https://api.veo31.ai/v1"
-    nanobanana_api_key: Optional[str] = None
-    nanobanana_api_url: str = "https://api.nanobanana.ai/v1"
+    vertex_api_key: str
+    gcp_project_id: str
+    vertex_location: str = "us-central1"
+    sora_model: str = "veo3"
     database_path: str = "./bot.db"
     jobs_concurrency: int = 2
     max_jobs_per_user: int = 3
-    request_timeout: float = 30.0
+    request_timeout: float = 20.0
     request_connect_timeout: float = 10.0
-    request_read_timeout: float = 120.0
+    request_read_timeout: float = 20.0
     request_retries: int = 3
     retry_backoff: float = 2.0
     yookassa_shop_id: Optional[str] = None
@@ -381,17 +376,29 @@ def load_config() -> Config:
             "TELEGRAM_BOT_TOKEN environment variable is required (BOT_TOKEN is accepted for backwards compatibility)"
         )
 
-    sora_api_key = os.getenv("OPENAI_API_KEY") or os.getenv("SORA_API_KEY")
-    if not sora_api_key:
-        raise RuntimeError(
-            "OPENAI_API_KEY environment variable is required (SORA_API_KEY is accepted for backwards compatibility)"
-        )
+    vertex_api_key = os.getenv("VERTEX_API_KEY")
+    if not vertex_api_key:
+        raise RuntimeError("VERTEX_API_KEY environment variable is required")
 
-    sora_api_url = os.getenv("SORA_API_URL", Config.sora_api_url)
-    raw_model = os.getenv("SORA_MODEL", Config.sora_model)
-    if (raw_model or "").strip().lower() != "sora-2":
-        log.warning("Unsupported SORA_MODEL value %r; forcing 'sora-2'", raw_model)
-    sora_model = Config.sora_model
+    gcp_project_id = os.getenv("GCP_PROJECT_ID")
+    if not gcp_project_id:
+        raise RuntimeError("GCP_PROJECT_ID environment variable is required")
+
+    vertex_location = os.getenv("VERTEX_LOCATION", Config.vertex_location)
+
+    raw_model = (
+        os.getenv("DEFAULT_VIDEO_MODEL")
+        or os.getenv("SORA_MODEL")
+        or Config.sora_model
+    )
+    sora_model = (raw_model or Config.sora_model).strip() or Config.sora_model
+    normalized = sora_model.replace("_", "-").lower()
+    if normalized in {"sora-2", "sora2"}:
+        sora_model = "sora2"
+    elif normalized in {"veo3", "veo-3"}:
+        sora_model = "veo3"
+    elif normalized in {"veo31", "veo-3.1"}:
+        sora_model = "veo3.1"
     database_path = os.getenv("DATABASE_PATH", Config.database_path)
     google_sheet_id = os.getenv("GOOGLE_SHEET_ID")
     if not google_sheet_id:
@@ -405,8 +412,8 @@ def load_config() -> Config:
     prefixes = [
         "VEO3_COST_RUB_",
         "VEO31_COST_RUB_",
-        "SORA2_COST_RUB_",
-        "NANOBANANA_COST_RUB_",
+        "GEMINI_COST_RUB_",
+        "VERTEX_COST_RUB_",
     ]
     pricing = PricingConfig(
         credit_price_rub=_get_env_decimal("CREDIT_PRICE_RUB", DEFAULT_CREDIT_PRICE_RUB),
@@ -418,8 +425,9 @@ def load_config() -> Config:
 
     return Config(
         bot_token=bot_token,
-        sora_api_key=sora_api_key,
-        sora_api_url=sora_api_url,
+        vertex_api_key=vertex_api_key,
+        gcp_project_id=gcp_project_id,
+        vertex_location=vertex_location,
         database_path=database_path,
         google_sheet_id=google_sheet_id,
         google_service_account=service_account,
@@ -428,12 +436,6 @@ def load_config() -> Config:
         gs_jobs_sheet=jobs_sheet,
         gs_errors_sheet=errors_sheet,
         sora_model=sora_model,
-        veo3_api_key=os.getenv("VEO3_API_KEY"),
-        veo3_api_url=os.getenv("VEO3_API_URL", Config.veo3_api_url),
-        veo31_api_key=os.getenv("VEO31_API_KEY"),
-        veo31_api_url=os.getenv("VEO31_API_URL", Config.veo31_api_url),
-        nanobanana_api_key=os.getenv("NANOBANANA_API_KEY"),
-        nanobanana_api_url=os.getenv("NANOBANANA_API_URL", Config.nanobanana_api_url),
         pricing=pricing,
         credit_packages=_build_packages(pricing.credit_price_rub, package_discounts),
         package_discounts=package_discounts,

@@ -2,8 +2,12 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import imghdr
+import io
 import logging
-from typing import Awaitable, Callable, TypeVar
+import mimetypes
+from typing import Awaitable, Callable, Optional, TypeVar
 
 from aiogram import Bot
 
@@ -54,7 +58,38 @@ async def run_cancellable(task: Awaitable[T]) -> T:
         raise
 
 
-__all__ = ["async_retry", "run_cancellable"]
+__all__ = ["async_retry", "run_cancellable", "build_inline_data_from_telegram_file"]
+
+
+async def build_inline_data_from_telegram_file(
+    bot: Bot, file_id: str
+) -> Optional[dict[str, str]]:
+    """Download *file_id* and return Vertex inline_data payload."""
+
+    try:
+        telegram_file = await bot.get_file(file_id)
+    except Exception:  # pragma: no cover - Telegram API interaction
+        log.exception("Failed to fetch file metadata file_id=%s", file_id)
+        return None
+    buffer = io.BytesIO()
+    try:
+        await bot.download_file(telegram_file.file_path, buffer)
+    except Exception:  # pragma: no cover - Telegram API interaction
+        log.exception("Failed to download reference file file_id=%s", file_id)
+        return None
+    data = buffer.getvalue()
+    if not data:
+        return None
+    mime = None
+    if telegram_file.file_path:
+        mime = mimetypes.guess_type(telegram_file.file_path)[0]
+    if not mime:
+        kind = imghdr.what(None, data)
+        if kind:
+            mime = f"image/{kind}"
+    mime = mime or "image/jpeg"
+    encoded = base64.b64encode(data).decode("ascii")
+    return {"mime_type": mime, "data": encoded}
 
 
 async def check_subscription(bot: Bot, user_id: int, config: Config) -> bool:

@@ -10,12 +10,11 @@ import gsheets_db
 
 from config import Config
 from observability import HealthCheckResult, record_healthcheck
-from sora_client import SoraAPIError, SoraClient
 
 log = logging.getLogger(__name__)
 
 
-async def run_startup_healthcheck(*, config: Config, mode: str, sora_client: SoraClient) -> HealthCheckResult:
+async def run_startup_healthcheck(*, config: Config, mode: str) -> HealthCheckResult:
     checks: List[Dict[str, Any]] = []
     errors: List[str] = []
 
@@ -27,8 +26,9 @@ async def run_startup_healthcheck(*, config: Config, mode: str, sora_client: Sor
             errors.append(f"{label}: {detail if detail else 'failed'}")
         checks.append(entry)
 
-    add_check("OPENAI_API_KEY", bool(config.sora_api_key))
-    add_check("SORA_MODEL", config.sora_model == "sora-2", config.sora_model)
+    add_check("VERTEX_API_KEY", bool(config.vertex_api_key))
+    add_check("GCP_PROJECT_ID", bool(config.gcp_project_id))
+    add_check("VERTEX_LOCATION", bool(config.vertex_location), config.vertex_location)
     add_check("CREDIT_PRICE_KOPEKS", config.credit_price_kopeks > 0, config.credit_price_kopeks)
     add_check("SORA_VIDEO_CREDITS", config.generation_cost_credits > 0, config.generation_cost_credits)
 
@@ -46,23 +46,6 @@ async def run_startup_healthcheck(*, config: Config, mode: str, sora_client: Sor
         add_check("YooKassa", config.yookassa_ready, "готово" if config.yookassa_ready else "нет base URL")
     else:
         add_check("YooKassa", True, "отключено")
-
-    sora_ok = True
-    latency_ms: float | None = None
-    try:
-        start = time.monotonic()
-        await sora_client.list_models()
-        latency_ms = (time.monotonic() - start) * 1000
-    except SoraAPIError as exc:
-        sora_ok = False
-        latency_ms = exc.duration_ms
-        errors.append(f"sora_api: {exc.status_code} {exc.error_type or exc.error_code or exc}")
-        log.warning("Sora healthcheck failed", exc_info=True)
-    except Exception as exc:  # pragma: no cover - defensive
-        sora_ok = False
-        errors.append(f"sora_api: {exc}")
-        log.warning("Sora healthcheck failed", exc_info=True)
-    add_check("Sora ping", sora_ok, f"{latency_ms:.0f}ms" if latency_ms is not None else "n/a")
 
     details: Dict[str, Any] = {"mode": mode, "checks": checks}
     ok = all(item.get("ok") for item in checks)
