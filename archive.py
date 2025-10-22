@@ -14,12 +14,10 @@ from aiogram import Bot
 from aiogram.types import InputFile
 from aiogram.utils.exceptions import (
     BadRequest,
-    CantTalkWithBot,
     ChatNotFound,
     NetworkError,
     RetryAfter,
     TelegramAPIError,
-    TelegramServerError,
     Unauthorized,
 )
 
