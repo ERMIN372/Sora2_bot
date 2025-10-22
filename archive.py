@@ -190,7 +190,11 @@ class ArchivePublisher:
                     error_short = "429"
                     delay = exc.timeout or (_RETRY_BASE_DELAY * math.pow(2, attempt - 1))
                     log.warning(
-                        "Archive publish rate limited corr_id=%s attempt=%s delay=%s", corr_id, attempt, delay
+                        "Archive publish rate limited corr_id=%s attempt=%s delay=%s error=%s",
+                        corr_id,
+                        attempt,
+                        delay,
+                        getattr(exc, "message", str(exc)),
                     )
                     if attempt >= _RETRY_ATTEMPTS:
                         log.warning(
@@ -202,11 +206,21 @@ class ArchivePublisher:
                         break
                     await asyncio.sleep(delay)
                     continue
-                except (NetworkError, TelegramServerError, aiohttp.ClientError, asyncio.TimeoutError):
-                    error_short = "timeout"
+                except (
+                    NetworkError,
+                    TelegramServerError,
+                    aiohttp.ClientError,
+                    asyncio.TimeoutError,
+                ) as exc:
+                    error_short = self._network_error_short(exc)
                     delay = _RETRY_BASE_DELAY * math.pow(2, attempt - 1)
                     log.warning(
-                        "Archive publish network error corr_id=%s attempt=%s retry_in=%s", corr_id, attempt, delay
+                        "Archive publish network error corr_id=%s attempt=%s retry_in=%s error=%s",
+                        corr_id,
+                        attempt,
+                        delay,
+                        str(exc),
+                        exc_info=True,
                     )
                     if attempt >= _RETRY_ATTEMPTS:
                         log.warning(
@@ -429,6 +443,20 @@ class ArchivePublisher:
             if "not enough rights" in lowered:
                 return "no_admin"
             return "400"
+        return exc.__class__.__name__.lower()
+
+    @staticmethod
+    def _network_error_short(exc: BaseException) -> str:
+        if isinstance(exc, asyncio.TimeoutError):
+            return "timeout"
+        if isinstance(exc, aiohttp.ClientResponseError):
+            return f"http_{exc.status}"
+        if isinstance(exc, aiohttp.ClientConnectorError):
+            return "connect"
+        if isinstance(exc, TelegramServerError):
+            return "telegram_server"
+        if isinstance(exc, NetworkError):
+            return "network"
         return exc.__class__.__name__.lower()
 
     async def _log_attempt(
