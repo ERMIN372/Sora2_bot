@@ -4,7 +4,6 @@ from __future__ import annotations
 import base64
 import binascii
 import logging
-import math
 from typing import Any, Dict, List, Optional, Tuple
 from uuid import uuid4
 
@@ -305,8 +304,224 @@ class VertexGenerativeClient(BaseProviderClient):
         raise NotImplementedError
 
 
+_VEO_ALLOWED_DURATIONS = {4, 6, 8}
+_VEO_ALLOWED_ASPECT_RATIOS = {"16:9", "9:16"}
+_VEO_ALLOWED_RESOLUTIONS = {"720p", "1080p"}
+
+_VEO_ASPECT_ALIASES = {
+    "horizontal": "16:9",
+    "горизонталь": "16:9",
+    "vertical": "9:16",
+    "вертикаль": "9:16",
+    "16x9": "16:9",
+    "9x16": "9:16",
+}
+
+_VEO_SIZE_TO_ASPECT = {
+    "1280x720": "16:9",
+    "720x1280": "9:16",
+}
+
+_VEO_RESOLUTION_ALIASES = {
+    "hd": "720p",
+    "720": "720p",
+    "1280x720": "720p",
+    "720p": "720p",
+    "full hd": "1080p",
+    "full_hd": "1080p",
+    "fhd": "1080p",
+    "1080": "1080p",
+    "1080p": "1080p",
+}
+
+_VEO_TRUE_VALUES = {"1", "true", "yes", "on", "да"}
+_VEO_FALSE_VALUES = {"0", "false", "no", "off", "нет"}
+
+
+def _coerce_int(value: Any, *, field: str, positive: bool = True, errors: List[str]) -> Optional[int]:
+    if value is None:
+        return None
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        errors.append(f"{field}=not_int")
+        return None
+    if positive and number <= 0:
+        errors.append(f"{field}=non_positive")
+        return None
+    return number
+
+
+def _coerce_bool(value: Any) -> Optional[bool]:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in _VEO_TRUE_VALUES:
+            return True
+        if normalized in _VEO_FALSE_VALUES:
+            return False
+    return None
+
+
+def _normalise_aspect_ratio(config: Dict[str, Any]) -> Optional[str]:
+    raw_aspect = config.get("aspectRatio") or config.get("aspect_ratio")
+    if isinstance(raw_aspect, str) and raw_aspect.strip():
+        normalized = raw_aspect.strip().lower()
+        return _VEO_ASPECT_ALIASES.get(normalized, raw_aspect.strip())
+    orientation = str(config.get("orientation") or "").strip().lower()
+    if orientation:
+        mapped = _VEO_ASPECT_ALIASES.get(orientation)
+        if mapped:
+            return mapped
+    size_value = str(config.get("size") or "").strip().lower()
+    if size_value:
+        size_mapped = _VEO_ASPECT_ALIASES.get(size_value)
+        if size_mapped:
+            return size_mapped
+        size_mapped = _VEO_SIZE_TO_ASPECT.get(size_value)
+        if size_mapped:
+            return size_mapped
+    return None
+
+
+def _normalise_resolution(config: Dict[str, Any]) -> Optional[str]:
+    raw_resolution = config.get("resolution") or config.get("quality")
+    if isinstance(raw_resolution, str) and raw_resolution.strip():
+        normalized = raw_resolution.strip().lower()
+        return _VEO_RESOLUTION_ALIASES.get(normalized, raw_resolution.strip())
+    size_value = str(config.get("size") or "").strip().lower()
+    if size_value:
+        mapped = _VEO_RESOLUTION_ALIASES.get(size_value)
+        if mapped:
+            return mapped
+    return None
+
+
+def _build_veo_parameters(
+    config: Dict[str, Any],
+) -> Tuple[Dict[str, Any], List[str], List[str], bool]:
+    invalid_keys: List[str] = []
+    validation_errors: List[str] = []
+
+    forbidden_root = {
+        "generation_config",
+        "generationConfig",
+        "width",
+        "height",
+    }
+    for forbidden in forbidden_root:
+        if forbidden in config:
+            invalid_keys.append(forbidden)
+
+    raw_parameters = config.get("parameters") if isinstance(config.get("parameters"), dict) else {}
+    allowed_parameter_keys = {
+        "durationSeconds",
+        "aspectRatio",
+        "resolution",
+        "generateAudio",
+        "seed",
+        "sampleCount",
+    }
+    extra_raw_parameter_keys = sorted(
+        set(raw_parameters.keys()) - allowed_parameter_keys
+    )
+    if extra_raw_parameter_keys:
+        invalid_keys.extend(extra_raw_parameter_keys)
+
+    parameters: Dict[str, Any] = {
+        key: raw_parameters[key]
+        for key in allowed_parameter_keys
+        if key in raw_parameters
+    }
+
+    duration_seconds = config.get("durationSeconds")
+    if duration_seconds is None:
+        duration_seconds = config.get("duration_seconds")
+    if duration_seconds is None:
+        duration_seconds = config.get("duration")
+    duration_value = _coerce_int(
+        duration_seconds, field="duration", positive=True, errors=validation_errors
+    )
+    if duration_value is not None:
+        if duration_value not in _VEO_ALLOWED_DURATIONS:
+            validation_errors.append(f"duration={duration_value}")
+        else:
+            parameters["durationSeconds"] = duration_value
+
+    aspect_ratio_value = _normalise_aspect_ratio(config)
+    if aspect_ratio_value:
+        if aspect_ratio_value not in _VEO_ALLOWED_ASPECT_RATIOS:
+            validation_errors.append(f"aspectRatio={aspect_ratio_value}")
+        else:
+            parameters["aspectRatio"] = aspect_ratio_value
+
+    resolution_value = _normalise_resolution(config)
+    if resolution_value:
+        if resolution_value not in _VEO_ALLOWED_RESOLUTIONS:
+            validation_errors.append(f"resolution={resolution_value}")
+        else:
+            parameters["resolution"] = resolution_value
+
+    generate_audio_source = None
+    for key in ("generateAudio", "generate_audio", "audio", "sound"):
+        if key in config:
+            generate_audio_source = config[key]
+            break
+    if generate_audio_source is None and "generateAudio" in raw_parameters:
+        generate_audio_source = raw_parameters["generateAudio"]
+    generate_audio_value = _coerce_bool(generate_audio_source)
+    if generate_audio_value is None:
+        generate_audio_value = False
+    parameters["generateAudio"] = generate_audio_value
+
+    seed_value = config.get("seed")
+    if seed_value is None and "seed" in raw_parameters:
+        seed_value = raw_parameters["seed"]
+    seed_int = _coerce_int(seed_value, field="seed", positive=False, errors=validation_errors)
+    if seed_int is not None:
+        parameters["seed"] = seed_int
+
+    sample_count_value = config.get("sampleCount")
+    if sample_count_value is None:
+        sample_count_value = config.get("sample_count")
+    if sample_count_value is None and "sampleCount" in raw_parameters:
+        sample_count_value = raw_parameters["sampleCount"]
+    sample_count_int = _coerce_int(
+        sample_count_value, field="sampleCount", positive=True, errors=validation_errors
+    )
+    if sample_count_int is not None:
+        parameters["sampleCount"] = sample_count_int
+
+    if "durationSeconds" not in parameters:
+        parameters["durationSeconds"] = 6
+    if parameters["durationSeconds"] not in _VEO_ALLOWED_DURATIONS:
+        validation_errors.append(f"duration={parameters['durationSeconds']}")
+
+    if "aspectRatio" not in parameters:
+        parameters["aspectRatio"] = "16:9"
+    if parameters["aspectRatio"] not in _VEO_ALLOWED_ASPECT_RATIOS:
+        validation_errors.append(f"aspectRatio={parameters['aspectRatio']}")
+
+    if "resolution" not in parameters:
+        parameters["resolution"] = "720p"
+    if parameters["resolution"] not in _VEO_ALLOWED_RESOLUTIONS:
+        validation_errors.append(f"resolution={parameters['resolution']}")
+
+    reference = config.get("reference_inline_data")
+    has_reference_inline = bool(
+        isinstance(reference, dict) and reference.get("data")
+    )
+
+    return parameters, sorted(set(invalid_keys)), sorted(set(validation_errors)), has_reference_inline
+
+
 class VertexVideoClient(VertexGenerativeClient):
     """Generate video clips using Veo models on Vertex AI."""
+
+    _ALLOWED_ROOT_KEYS = {"contents", "parameters"}
 
     def _build_enqueue_payload(
         self,
@@ -319,32 +534,50 @@ class VertexVideoClient(VertexGenerativeClient):
         if payload is not None:
             return payload
         config = settings or {}
-        dimension = str(config.get("size") or "1280x720")
-        if dimension not in {"1280x720", "720x1280"}:
-            dimension = "1280x720"
-        duration = int(config.get("duration") or 6)
-        if duration not in {4, 6, 8}:
-            duration = 6
+        parameters, invalid_keys, validation_errors, has_reference = _build_veo_parameters(
+            config
+        )
+
+        if invalid_keys:
+            log.warning(
+                "vertex.veo.invalid_params invalid_keys=%s settings_keys=%s",
+                invalid_keys,
+                sorted(config.keys()),
+            )
+            raise ProviderAPIError(
+                provider=self.provider_name,
+                status_code=0,
+                message=(
+                    "Неверные параметры для Veo. Длительность поддерживается 4, 6 или 8 секунд; "
+                    "соотношение сторон 16:9 или 9:16; разрешение 720p или 1080p."
+                ),
+                error_type="invalid_request",
+            )
+
+        if validation_errors:
+            log.warning(
+                "vertex.veo.validation_error errors=%s settings=%s",
+                validation_errors,
+                sorted(config.keys()),
+            )
+            raise ProviderAPIError(
+                provider=self.provider_name,
+                status_code=0,
+                message=(
+                    "Неверные параметры для Veo. Длительность поддерживается 4, 6 или 8 секунд; "
+                    "соотношение сторон 16:9 или 9:16; разрешение 720p или 1080p."
+                ),
+                error_type="invalid_request",
+            )
+
         reference = config.get("reference_inline_data")
         parts = [{"text": prompt}]
-        if isinstance(reference, dict) and reference.get("data"):
+        if has_reference:
             inline = {
                 "mime_type": reference.get("mime_type", "image/jpeg"),
                 "data": reference.get("data"),
             }
             parts.append({"inline_data": inline})
-        if dimension == "720x1280":
-            width, height, aspect_ratio = 720, 1280, "9:16"
-        else:
-            width, height, aspect_ratio = 1280, 720, "16:9"
-
-        generation_config: Dict[str, Any] = {
-            "width": width,
-            "height": height,
-            "aspect_ratio": aspect_ratio,
-            "duration_seconds": duration,
-            "fps": 24,
-        }
 
         body = {
             "contents": [
@@ -353,42 +586,48 @@ class VertexVideoClient(VertexGenerativeClient):
                     "parts": parts,
                 }
             ],
-            "generationConfig": generation_config,
+            "parameters": parameters,
         }
-        config.setdefault("size", dimension)
-        config.setdefault("duration", duration)
-        config.setdefault("width", width)
-        config.setdefault("height", height)
-        config.setdefault("aspect_ratio", aspect_ratio)
+
+        extra_root_keys = sorted(set(body.keys()) - self._ALLOWED_ROOT_KEYS)
+        if extra_root_keys:
+            log.warning(
+                "vertex.veo.invalid_payload root_keys=%s payload_preview=%s",
+                extra_root_keys,
+                {"parameters": parameters},
+            )
+            raise ProviderAPIError(
+                provider=self.provider_name,
+                status_code=0,
+                message=(
+                    "Неверные параметры для Veo. Длительность поддерживается 4, 6 или 8 секунд; "
+                    "соотношение сторон 16:9 или 9:16; разрешение 720p или 1080p."
+                ),
+                error_type="invalid_request",
+            )
+
+        log.info(
+            "vertex.veo.payload_preview invalid_keys=%s parameters=%s has_reference=%s",
+            invalid_keys,
+            {
+                "durationSeconds": parameters.get("durationSeconds"),
+                "aspectRatio": parameters.get("aspectRatio"),
+                "resolution": parameters.get("resolution"),
+                "generateAudio": parameters.get("generateAudio"),
+                "seed": parameters.get("seed"),
+                "sampleCount": parameters.get("sampleCount"),
+            },
+            has_reference,
+        )
+
         return body
 
 
 class VertexVeoPreviewClient(VertexGenerativeClient):
     """Generate Veo 3.1 inline preview videos using the predict endpoint."""
 
-    _GENERATION_CONFIG_ALLOWLIST = {
-        "width",
-        "height",
-        "aspect_ratio",
-        "duration_seconds",
-        "fps",
-        "seed",
-        "safety_settings",
-    }
-
-    _SIZE_PRESETS: Dict[str, Tuple[int, int, str]] = {
-        "1280x720": (1280, 720, "16:9"),
-        "720x1280": (720, 1280, "9:16"),
-    }
-
-    _SIZE_ALIASES: Dict[str, str] = {
-        "horizontal": "1280x720",
-        "горизонталь": "1280x720",
-        "vertical": "720x1280",
-        "вертикаль": "720x1280",
-    }
-
     _ALLOWED_ROOT_KEYS = {"instances"}
+    _ALLOWED_INSTANCE_KEYS = {"prompt", "parameters"}
 
     def _build_enqueue_payload(
         self,
@@ -401,180 +640,74 @@ class VertexVeoPreviewClient(VertexGenerativeClient):
         if payload is not None:
             return payload
         config = settings or {}
-        invalid_keys: List[str] = []
-        validation_errors: List[str] = []
 
-        raw_generation_config = (
-            config.get("generation_config")
-            if isinstance(config.get("generation_config"), dict)
-            else {}
-        )
-        for key in raw_generation_config:
-            if key not in self._GENERATION_CONFIG_ALLOWLIST:
-                invalid_keys.append(key)
-
-        size_value = str(config.get("size") or "").strip()
-        normalized_size = size_value.lower()
-        normalized_size = self._SIZE_ALIASES.get(normalized_size, normalized_size)
-        if not normalized_size:
-            normalized_size = "1280x720"
-        if normalized_size in self._SIZE_PRESETS:
-            width_default, height_default, aspect_default = self._SIZE_PRESETS[
-                normalized_size
-            ]
-            size_key = normalized_size
-        else:
-            width_default = height_default = 0
-            aspect_default = ""
-            if size_value:
-                validation_errors.append(f"size={size_value}")
-            size_key = "1280x720"
-
-        def _coerce_positive_int(value: Any, field: str) -> Optional[int]:
-            if value is None:
-                return None
-            try:
-                number = int(value)
-            except (TypeError, ValueError):
-                validation_errors.append(f"{field}=not_int")
-                return None
-            if number <= 0:
-                validation_errors.append(f"{field}=non_positive")
-                return None
-            return number
-
-        def _reduce_aspect_ratio(width: int, height: int) -> str:
-            divisor = math.gcd(width, height) or 1
-            return f"{width // divisor}:{height // divisor}"
-
-        width = _coerce_positive_int(
-            raw_generation_config.get("width", config.get("width", width_default)),
-            "width",
-        )
-        height = _coerce_positive_int(
-            raw_generation_config.get("height", config.get("height", height_default)),
-            "height",
-        )
-
-        duration_seconds = _coerce_positive_int(
-            raw_generation_config.get(
-                "duration_seconds",
-                config.get("duration_seconds", config.get("duration")),
-            ),
-            "duration",
-        )
-        if duration_seconds is None:
-            duration_seconds = 6
-
-        fps = _coerce_positive_int(
-            raw_generation_config.get(
-                "fps", config.get("fps", config.get("frame_rate"))
-            ),
-            "fps",
-        )
-        if fps is None:
-            fps = 24
-
-        aspect_ratio = raw_generation_config.get(
-            "aspect_ratio", config.get("aspect_ratio", aspect_default)
-        )
-        if not isinstance(aspect_ratio, str) or not aspect_ratio:
-            aspect_ratio = ""
-        if width and height and not aspect_ratio:
-            aspect_ratio = _reduce_aspect_ratio(width, height)
-
-        seed = raw_generation_config.get("seed", config.get("seed"))
-        if seed is not None:
-            seed = _coerce_positive_int(seed, "seed")
-
-        safety_settings = raw_generation_config.get(
-            "safety_settings", config.get("safety_settings")
-        )
-        if safety_settings is not None and not isinstance(safety_settings, (list, dict)):
-            validation_errors.append("safety_settings=invalid_type")
-            safety_settings = None
-
-        generation_config: Dict[str, Any] = {}
-        if width:
-            generation_config["width"] = width
-        if height:
-            generation_config["height"] = height
-        if aspect_ratio:
-            generation_config["aspect_ratio"] = aspect_ratio
-        if duration_seconds:
-            generation_config["duration_seconds"] = duration_seconds
-        if fps:
-            generation_config["fps"] = fps
-        if seed:
-            generation_config["seed"] = seed
-        if safety_settings is not None:
-            generation_config["safety_settings"] = safety_settings
-
-        body = {
-            "instances": [
-                {
-                    "prompt": prompt,
-                    "generationConfig": generation_config,
-                }
-            ]
-        }
-
-        payload_preview = {
-            "instances": [
-                {
-                    "prompt_preview": (prompt or "")[:120],
-                    "generationConfig": generation_config,
-                }
-            ]
-        }
-
-        invalid_keys = sorted(set(invalid_keys))
-        validation_errors = sorted(set(validation_errors))
+        parameters, invalid_keys, validation_errors, _ = _build_veo_parameters(config)
 
         if invalid_keys or validation_errors:
             log.warning(
-                "vertex.veo_preview.invalid_payload invalid_keys=%s validation_errors=%s payload_preview=%s",
+                "vertex.veo_preview.invalid_params invalid_keys=%s validation_errors=%s",
                 invalid_keys,
                 validation_errors,
-                payload_preview,
             )
             raise ProviderAPIError(
                 provider=self.provider_name,
                 status_code=0,
-                message="Неверные параметры запроса. Проверь размер, длительность и модель.",
+                message=(
+                    "Неверные параметры для Veo. Длительность поддерживается 4, 6 или 8 секунд; "
+                    "соотношение сторон 16:9 или 9:16; разрешение 720p или 1080p."
+                ),
                 error_type="invalid_request",
             )
+
+        instance = {
+            "prompt": prompt,
+            "parameters": parameters,
+        }
+
+        extra_instance_keys = sorted(set(instance.keys()) - self._ALLOWED_INSTANCE_KEYS)
+        if extra_instance_keys:
+            log.warning(
+                "vertex.veo_preview.invalid_instance_keys keys=%s", extra_instance_keys
+            )
+            raise ProviderAPIError(
+                provider=self.provider_name,
+                status_code=0,
+                message=(
+                    "Неверные параметры для Veo. Длительность поддерживается 4, 6 или 8 секунд; "
+                    "соотношение сторон 16:9 или 9:16; разрешение 720p или 1080p."
+                ),
+                error_type="invalid_request",
+            )
+
+        body = {"instances": [instance]}
 
         extra_root_keys = sorted(set(body.keys()) - self._ALLOWED_ROOT_KEYS)
         if extra_root_keys:
             log.warning(
-                "vertex.veo_preview.invalid_payload invalid_keys=%s payload_preview=%s",
-                extra_root_keys,
-                payload_preview,
+                "vertex.veo_preview.invalid_payload root_keys=%s", extra_root_keys
             )
             raise ProviderAPIError(
                 provider=self.provider_name,
                 status_code=0,
-                message="Неверные параметры запроса. Проверь размер, длительность и модель.",
+                message=(
+                    "Неверные параметры для Veo. Длительность поддерживается 4, 6 или 8 секунд; "
+                    "соотношение сторон 16:9 или 9:16; разрешение 720p или 1080p."
+                ),
                 error_type="invalid_request",
             )
 
         log.info(
-            "vertex.veo_preview.payload_preview invalid_keys=%s validation_errors=%s payload_preview=%s",
-            invalid_keys,
-            validation_errors,
-            payload_preview,
+            "vertex.veo_preview.payload_preview parameters=%s",
+            {
+                "durationSeconds": parameters.get("durationSeconds"),
+                "aspectRatio": parameters.get("aspectRatio"),
+                "resolution": parameters.get("resolution"),
+                "generateAudio": parameters.get("generateAudio"),
+                "seed": parameters.get("seed"),
+                "sampleCount": parameters.get("sampleCount"),
+            },
         )
 
-        config.setdefault("size", size_key)
-        config.setdefault("duration_seconds", duration_seconds)
-        config.setdefault("fps", fps)
-        if aspect_ratio:
-            config.setdefault("aspect_ratio", aspect_ratio)
-        if width:
-            config.setdefault("width", width)
-        if height:
-            config.setdefault("height", height)
         return body
 
     def _extract_result(
