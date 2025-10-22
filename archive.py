@@ -14,10 +14,12 @@ from aiogram import Bot
 from aiogram.types import InputFile
 from aiogram.utils.exceptions import (
     BadRequest,
+    CantTalkWithBot,
     ChatNotFound,
     NetworkError,
     RetryAfter,
     TelegramAPIError,
+    TelegramServerError,
     Unauthorized,
 )
 
@@ -27,7 +29,7 @@ from db import ArchiveLogRecord, Database
 log = logging.getLogger(__name__)
 
 
-_MD_V2_SPECIAL_CHARS = r"_*[]()~`>#+-=|{}.!"
+_MD_V2_SPECIAL_CHARS = "_*[]()~`>#+-=|{}.!"
 _MAX_TELEGRAM_FILE_BYTES = 2 * 1024 * 1024 * 1024
 _MAX_CAPTION_LENGTH = 1024
 _RETRY_ATTEMPTS = 3
@@ -317,7 +319,7 @@ class ArchivePublisher:
         if not value:
             return "-"
         text = value.replace("\\", "\\\\")
-        pattern = re.compile(rf"([{_MD_V2_SPECIAL_CHARS}])")
+        pattern = re.compile(rf"([{re.escape(_MD_V2_SPECIAL_CHARS)}])")
         text = pattern.sub(r"\\\\\1", text)
         text = text.replace("\n", "\\n").replace("\r", "")
         return text
