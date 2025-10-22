@@ -5,7 +5,7 @@ import asyncio
 import logging
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Awaitable, Callable, Dict, Optional
+from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 from config import Config
 from db import Database, ErrorLogRecord, GenerationJobRecord
@@ -227,10 +227,15 @@ class JobQueue:
     async def _process_job(self, pending: PendingJob) -> None:
         log.info("Processing job %s", pending.job_id)
         await self._db.update_job(pending.job_id, "running")
+        result: Optional[ProviderJobStatus] = None
+        inline_assets: List[Dict[str, Any]] = []
+        assets_meta: List[Dict[str, Any]] = []
+        job_extra: Dict[str, Any] = {}
+        asset_label: Optional[str] = None
         try:
             client, provider_key = self._resolve_provider(pending.provider)
             try:
-                result: ProviderJobStatus = await client.get_job_status(pending.job_id)
+                result = await client.get_job_status(pending.job_id)
             except ProviderAPIError as exc:
                 log_event(
                     level="ERROR",
@@ -288,14 +293,42 @@ class JobQueue:
                     username=pending.username,
                 )
                 return
-            assets_meta = {}
+            raw_inline = []
             if isinstance(result.data, dict):
-                raw_meta = result.data.get("assets_meta")
-                if isinstance(raw_meta, dict):
-                    assets_meta = raw_meta
-            extra_poll = {"status": result.status}
+                raw_inline = result.data.get("inline_assets") or []
+            if isinstance(raw_inline, list):
+                inline_assets = [dict(asset) for asset in raw_inline if isinstance(asset, dict)]
+            inline_asset_map = {
+                f"inline_{idx}": asset for idx, asset in enumerate(inline_assets)
+            }
+            assets_meta = []
+            for key, value in result.assets.items():
+                entry: Dict[str, Any] = {"key": key}
+                inline_meta = inline_asset_map.get(key)
+                if inline_meta:
+                    entry.update(
+                        {
+                            "inline": True,
+                            "kind": inline_meta.get("kind"),
+                            "mime": inline_meta.get("mime"),
+                            "bytes": inline_meta.get("bytes"),
+                        }
+                    )
+                else:
+                    entry.update({"inline": False, "url": value})
+                assets_meta.append(entry)
+            if inline_assets:
+                first_inline = inline_assets[0]
+                mime = first_inline.get("mime") or "application/octet-stream"
+                size_bytes = first_inline.get("bytes") or 0
+                asset_label = f"[inline {mime}, {size_bytes} bytes]"
+                job_extra["inline_assets"] = inline_assets
+            else:
+                asset_label = next(iter(result.assets.values()), None)
             if assets_meta:
-                extra_poll["assets_meta"] = assets_meta
+                job_extra["assets_meta"] = assets_meta
+            if result.data and isinstance(result.data, dict):
+                job_extra.setdefault("provider_data", result.data)
             log_event(
                 level="INFO",
                 event="poll",
@@ -308,24 +341,27 @@ class JobQueue:
                 size=pending.size,
                 status_code=result.status_code,
                 duration_ms=result.duration_ms,
-                extra=extra_poll,
+                extra=(
+                    {"status": result.status, "assets_meta": assets_meta}
+                    if assets_meta
+                    else {"status": result.status}
+                ),
             )
-            asset_url = next(iter(result.assets.values()), None)
-            if result.status == "completed" and asset_url:
+            if result.status == "completed" and asset_label:
                 gsheets_ok = True
                 try:
                     await self._db.update_job(
                         pending.job_id,
                         "completed",
-                        video_url=asset_url,
+                        video_url=asset_label,
                         error=None,
                     )
                 except Exception:
                     log.exception("Failed to update job %s as completed", pending.job_id)
                     gsheets_ok = False
-                extra_done = {"assets": list(result.assets.keys())}
+                done_extra: Dict[str, Any] = {"assets": list(result.assets.keys())}
                 if assets_meta:
-                    extra_done["assets_meta"] = assets_meta
+                    done_extra["assets_meta"] = assets_meta
                 log_event(
                     level="INFO",
                     event="done",
@@ -339,7 +375,7 @@ class JobQueue:
                     status_code=result.status_code,
                     duration_ms=result.duration_ms,
                     gsheets_ok=gsheets_ok,
-                    extra=extra_done,
+                    extra=done_extra,
                 )
             elif result.status in {"failed", "errored"}:
                 error_message = result.error or "Unknown error"
@@ -425,6 +461,8 @@ class JobQueue:
         finally:
             job = await self._db.get_job(pending.job_id)
             if job:
+                if job_extra:
+                    job.extra.update(job_extra)
                 await self._notify(job)
 
 

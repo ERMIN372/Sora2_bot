@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 import re
 import uuid
 from datetime import datetime
-from typing import Dict, Literal, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 from aiogram import Bot, Dispatcher
 from aiogram.dispatcher import FSMContext
@@ -51,10 +51,8 @@ SIZE_OPTIONS: Dict[str, str] = {
     "horizontal": "1280x720",
 }
 
-ASPECT_RATIO_OPTIONS: Dict[str, str] = {
-    "vertical": "9:16",
-    "horizontal": "16:9",
-}
+_INLINE_ASSET_MAX_BYTES = 9 * 1024 * 1024
+
 
 SIZE_LABEL_KEYS: Dict[str, str] = {
     "vertical": "chips.vertical",
@@ -992,10 +990,7 @@ async def _launch_order(
 def _format_job_message(job: GenerationJobRecord) -> str:
     if job.status == "completed":
         if job.video_url:
-            video_payload = _parse_inline_video(job.video_url)
-            if video_payload:
-                if len(video_payload[1]) > MAX_INLINE_VIDEO_BYTES:
-                    return i18n.t("status.inline_video_too_large")
+            if job.video_url.startswith("[inline"):
                 return i18n.t("status.completed_file")
             if _parse_inline_image(job.video_url):
                 return i18n.t("status.completed_file")
@@ -1010,15 +1005,17 @@ def _format_job_message(job: GenerationJobRecord) -> str:
 
 async def _send_job_update(dp: Dispatcher, job: GenerationJobRecord) -> None:
     try:
-        if job.status == "completed" and job.video_url:
-            inline_video = _parse_inline_video(job.video_url)
-            if inline_video:
-                await _send_inline_video(dp, job, inline_video)
-                return
-            inline_image = _parse_inline_image(job.video_url)
-            if inline_image:
-                await _send_inline_image(dp, job, inline_image)
-                return
+        if job.status == "completed":
+            inline_assets = _collect_inline_assets(job)
+            if inline_assets:
+                responded = await _send_inline_assets(dp, job, inline_assets)
+                if responded:
+                    return
+            if job.video_url:
+                inline_image = _parse_inline_image(job.video_url)
+                if inline_image:
+                    await _send_inline_image(dp, job, inline_image)
+                    return
         await dp.bot.send_message(job.user_id, _format_job_message(job))
     except Exception:  # pragma: no cover - external dependency
         log.exception("Failed to send job update to %s", job.user_id)
@@ -1027,8 +1024,18 @@ async def _send_job_update(dp: Dispatcher, job: GenerationJobRecord) -> None:
 def _parse_inline_image(data_uri: Optional[str]) -> Optional[tuple[str, bytes]]:
     if not data_uri:
         return None
-    uri = data_uri.strip()
-    if not uri.lower().startswith("data:image/"):
+    decoded = _decode_data_uri(data_uri)
+    if not decoded:
+        return None
+    mime, payload = decoded
+    if not mime.startswith("image/"):
+        return None
+    return mime, payload
+
+
+def _decode_data_uri(data_uri: str) -> Optional[tuple[str, bytes]]:
+    uri = (data_uri or "").strip()
+    if not uri.lower().startswith("data:"):
         return None
     try:
         header, encoded = uri.split(",", 1)
@@ -1036,7 +1043,7 @@ def _parse_inline_image(data_uri: Optional[str]) -> Optional[tuple[str, bytes]]:
         return None
     if ";base64" not in header.lower():
         return None
-    mime = header[5:].split(";", 1)[0] or "image/jpeg"
+    mime = header[5:].split(";", 1)[0] or "application/octet-stream"
     normalized = "".join(encoded.split())
     try:
         payload = base64.b64decode(normalized)
@@ -1045,25 +1052,16 @@ def _parse_inline_image(data_uri: Optional[str]) -> Optional[tuple[str, bytes]]:
     return mime, payload
 
 
-def _parse_inline_video(data_uri: Optional[str]) -> Optional[tuple[str, bytes]]:
-    if not data_uri:
-        return None
-    uri = data_uri.strip()
-    if not uri.lower().startswith("data:video/"):
-        return None
-    try:
-        header, encoded = uri.split(",", 1)
-    except ValueError:
-        return None
-    if ";base64" not in header.lower():
-        return None
-    mime = header[5:].split(";", 1)[0] or "video/mp4"
-    normalized = "".join(encoded.split())
-    try:
-        payload = base64.b64decode(normalized, validate=True)
-    except (binascii.Error, ValueError):
-        return None
-    return mime, payload
+def _collect_inline_assets(job: GenerationJobRecord) -> List[Dict[str, Any]]:
+    extra = getattr(job, "extra", {}) or {}
+    raw_assets = extra.get("inline_assets") if isinstance(extra, dict) else None
+    if not isinstance(raw_assets, list):
+        return []
+    assets: List[Dict[str, Any]] = []
+    for asset in raw_assets:
+        if isinstance(asset, dict) and isinstance(asset.get("data_uri"), str):
+            assets.append(asset)
+    return assets
 
 
 async def _send_inline_image(
@@ -1081,25 +1079,53 @@ async def _send_inline_image(
     )
 
 
-async def _send_inline_video(
-    dp: Dispatcher, job: GenerationJobRecord, inline_video: tuple[str, bytes]
-) -> None:
-    mime, payload = inline_video
-    if len(payload) > MAX_INLINE_VIDEO_BYTES:
-        await dp.bot.send_message(
-            job.user_id,
-            i18n.t("status.inline_video_too_large"),
-        )
-        return
-    buffer = io.BytesIO(payload)
-    suffix = mimetypes.guess_extension(mime) or ".mp4"
-    filename = f"preview{suffix}"
-    input_file = InputFile(buffer, filename=filename)
-    await dp.bot.send_document(
-        job.user_id,
-        input_file,
-        caption=i18n.t("status.completed_file"),
-    )
+async def _send_inline_assets(
+    dp: Dispatcher, job: GenerationJobRecord, assets: List[Dict[str, Any]]
+) -> bool:
+    responded = False
+    sent_assets = False
+    for index, asset in enumerate(assets):
+        data_uri = asset.get("data_uri")
+        if not isinstance(data_uri, str):
+            continue
+        decoded = _decode_data_uri(data_uri)
+        if not decoded:
+            responded = True
+            await dp.bot.send_message(
+                job.user_id, i18n.t("status.inline_decode_failed")
+            )
+            continue
+        mime, payload = decoded
+        size = len(payload)
+        if size > _INLINE_ASSET_MAX_BYTES:
+            responded = True
+            await dp.bot.send_message(
+                job.user_id,
+                i18n.t(
+                    "status.inline_too_large",
+                    mime=mime,
+                    size=size,
+                    limit_mb=_INLINE_ASSET_MAX_BYTES // (1024 * 1024),
+                ),
+            )
+            continue
+        buffer = io.BytesIO(payload)
+        suffix = mimetypes.guess_extension(mime) or ".bin"
+        base_name = re.sub(r"[^a-zA-Z0-9_-]", "", str(asset.get("kind") or "asset"))
+        if not base_name:
+            base_name = "asset"
+        filename = f"{base_name}_{index}{suffix}"
+        input_file = InputFile(buffer, filename=filename)
+        caption = i18n.t("status.completed_file") if not sent_assets else None
+        if mime.startswith("image/"):
+            buffer.seek(0)
+            await dp.bot.send_photo(job.user_id, input_file, caption=caption)
+        else:
+            buffer.seek(0)
+            await dp.bot.send_document(job.user_id, input_file, caption=caption)
+        responded = True
+        sent_assets = True
+    return responded
 
 
 async def start_command(

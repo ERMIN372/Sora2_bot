@@ -187,7 +187,10 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "status.running": "⚙️ Генерирую…",
         "status.completed_file": "✅ Готово. Отправляю ролик.",
         "status.completed_url": "Готово: {url}",
-        "status.inline_video_too_large": "Предпросмотр больше 9 МБ — пришлём ссылку в истории задач.",
+        "status.inline_too_large": (
+            "Файл от модели ({mime}, {size} байт) превышает лимит Telegram ({limit_mb} МБ)."
+        ),
+        "status.inline_decode_failed": "Не удалось обработать файл от модели.",
         "status.failed": "Не удалось создать. Ошибка {error}.",
         "status.generic": "Статус задачи: {status}.",
         "errors.video_models_unavailable": "Нет доступных моделей видеогенерации. Обратитесь к оператору или попробуйте позже.",
