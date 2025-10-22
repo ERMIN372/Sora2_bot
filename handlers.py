@@ -30,6 +30,7 @@ from aiogram.types import (
 
 from config import Config
 from db import Database, ErrorLogRecord, GenerationJobRecord
+from generation_gate import GateDecision, GenerationRequestGate, normalize_prompt
 from i18n import SafeText, escape_html, format_credits, format_prompt, i18n
 from jobs import JobQueue
 from observability import (
@@ -359,6 +360,19 @@ def _build_confirmation_keyboard(*, can_launch: bool, include_back: bool = True)
     if include_back:
         rows.append([InlineKeyboardButton(text=i18n.t("buttons.back"), callback_data="order:back")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _build_generation_in_progress_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="⏳ Генерация идёт",
+                    callback_data="order:busy",
+                )
+            ]
+        ]
+    )
 
 
 def _build_balance_keyboard() -> InlineKeyboardMarkup:
@@ -764,6 +778,7 @@ async def _launch_order(
     db: Database,
     job_queue: JobQueue,
     config: Config,
+    gate: GenerationRequestGate,
 ) -> None:
     user = callback.from_user
     if user is None:  # pragma: no cover - defensive
@@ -775,6 +790,17 @@ async def _launch_order(
     preflight = run_preflight(original_prompt)
     corr_id = order.corr_id or str(uuid.uuid4())
     order.corr_id = corr_id
+
+    async def _release_lock(reason: str, status: str) -> None:
+        try:
+            await gate.release(
+                user_id=user_id,
+                corr_id=corr_id,
+                reason=reason,
+                status=status,
+            )
+        except Exception:  # pragma: no cover - defensive
+            log.exception("Failed to release generation gate lock", exc_info=True)
 
     if preflight.blocked:
         explanation = preflight.user_message or policy_message(preflight.scope or "unknown")
@@ -839,12 +865,56 @@ async def _launch_order(
         first_name=user.first_name,
         last_name=user.last_name,
     )
-    if session.last_launch_key == key and now - session.last_launch_ts < 5:
-        await callback.message.answer(i18n.t("flow.duplicate"))
-        return
-
     provider_key = order.provider or order.model
     credits_cost = order.credits_cost or config.generation_cost_credits
+
+    normalized = normalize_prompt(order.prompt)
+    gate_options: Dict[str, Any] = {
+        "category": order.category,
+        "flow": order.flow,
+        "size": order.size,
+        "model": order.model,
+        "provider": provider_key,
+        "image_file_id": order.image_file_id,
+        "aspect_ratio": order.aspect_ratio,
+        "product": order.product,
+    }
+
+    gate_result = await gate.evaluate(
+        user_id=user_id,
+        corr_id=corr_id,
+        model=order.model,
+        normalized_prompt=normalized,
+        options=gate_options,
+    )
+    if gate_result.timeout_released:
+        await callback.message.answer(
+            "Похоже очередь подвисла. Я остановил задачу. Можешь запустить снова."
+        )
+    if gate_result.decision is GateDecision.BLOCK_BUSY:
+        try:
+            await callback.message.edit_reply_markup(
+                _build_generation_in_progress_keyboard()
+            )
+        except Exception:  # pragma: no cover - Telegram may block edits on old messages
+            log.debug("Failed to switch keyboard to busy state", exc_info=True)
+        await callback.message.answer(
+            "Я уже генерирую по текущему запросу. Дай мне пару минут, пришлю результат сюда."
+        )
+        return
+    if gate_result.decision is GateDecision.BLOCK_DUPLICATE:
+        await callback.message.answer(
+            "Вижу повтор того же запроса. Использую уже запущенную задачу."
+        )
+        return
+
+    idempotency_key = gate_result.idempotency_key or corr_id
+    try:
+        await callback.message.edit_reply_markup(
+            _build_generation_in_progress_keyboard()
+        )
+    except Exception:  # pragma: no cover - Telegram may block edits on old messages
+        log.debug("Failed to switch keyboard to busy state", exc_info=True)
 
     log_event(
         level="INFO",
@@ -879,6 +949,7 @@ async def _launch_order(
             error_msg_short="Недостаточно кредитов",
             prompt=order.prompt,
         )
+        await _release_lock("submit_failed", "insufficient_credits")
         await callback.message.answer(i18n.t("flow.not_enough"))
         session.awaiting_payment = True
         await _send_payment_showcase(callback.message.bot, callback.message.chat.id, config)
@@ -934,6 +1005,7 @@ async def _launch_order(
             auto_sanitized=preflight.auto_sanitized,
             preflight_reason=preflight.reason,
             preflight_scope=preflight.scope,
+            idempotency_key=idempotency_key,
         )
     except ProviderAPIError as exc:
         message, short, notify_support, hint = _map_provider_error(exc)
@@ -943,6 +1015,7 @@ async def _launch_order(
             refunded = True
         except Exception:  # pragma: no cover - external dependency
             log.exception("Failed to refund credits after submit error")
+        await _release_lock("submit_failed", exc.error_type or "submit_failed")
         sheet_ok = await db.log_error_record(
             ErrorLogRecord(
                 ts=datetime.utcnow(),
@@ -1022,6 +1095,7 @@ async def _launch_order(
             refunded = True
         except Exception:
             log.exception("Failed to refund credits after unexpected error")
+        await _release_lock("submit_failed", "unexpected_error")
         short = _shorten(str(exc) or "Неизвестная ошибка")
         sheet_ok = await db.log_error_record(
             ErrorLogRecord(
@@ -1109,18 +1183,33 @@ def _format_job_message(job: GenerationJobRecord) -> str:
 
 async def _send_job_update(dp: Dispatcher, job: GenerationJobRecord) -> None:
     try:
+        reply_markup = _main_keyboard() if job.status in {"completed", "failed"} else None
         if job.status == "completed":
             inline_assets = _collect_inline_assets(job)
             if inline_assets:
                 responded = await _send_inline_assets(dp, job, inline_assets)
                 if responded:
+                    await dp.bot.send_message(
+                        job.user_id,
+                        _format_job_message(job),
+                        reply_markup=reply_markup,
+                    )
                     return
             if job.video_url:
                 inline_image = _parse_inline_image(job.video_url)
                 if inline_image:
                     await _send_inline_image(dp, job, inline_image)
+                    await dp.bot.send_message(
+                        job.user_id,
+                        _format_job_message(job),
+                        reply_markup=reply_markup,
+                    )
                     return
-        await dp.bot.send_message(job.user_id, _format_job_message(job))
+        await dp.bot.send_message(
+            job.user_id,
+            _format_job_message(job),
+            reply_markup=reply_markup,
+        )
     except Exception:  # pragma: no cover - external dependency
         log.exception("Failed to send job update to %s", job.user_id)
 
@@ -1587,6 +1676,7 @@ async def order_callback_handler(
     db: Database,
     job_queue: JobQueue,
     config: Config,
+    gate: GenerationRequestGate,
 ) -> None:
     await callback.answer()
     action = (callback.data or "").split(":", maxsplit=1)[-1]
@@ -1595,6 +1685,8 @@ async def order_callback_handler(
         return
     session = SESSION_MANAGER.get(user.id)
     order = session.pending_order
+    if action == "busy":
+        return
     if action == "back":
         session.pending_order = None
         session.awaiting_payment = False
@@ -1638,6 +1730,7 @@ async def order_callback_handler(
             db=db,
             job_queue=job_queue,
             config=config,
+            gate=gate,
         )
 
 
@@ -1889,6 +1982,7 @@ def register_handlers(
     db: Database,
     config: Config,
     job_queue: JobQueue,
+    gate: GenerationRequestGate,
 ) -> None:
     job_queue.register_notification_callback(
         name="telegram",
@@ -2006,7 +2100,7 @@ def register_handlers(
         state="*",
     )
     dp.register_callback_query_handler(
-        lambda call, state: order_callback_handler(call, state, db, job_queue, config),
+        lambda call, state: order_callback_handler(call, state, db, job_queue, config, gate),
         lambda call: call.data and call.data.startswith("order:"),
         state="*",
     )

@@ -11,6 +11,7 @@ from config import Config
 from db import Database, ErrorLogRecord, GenerationJobRecord
 from moderation import classify_safety_response, policy_message, render_error_json
 from observability import log_event
+from generation_gate import GenerationRequestGate
 from providers import BaseProviderClient, ProviderAPIError, ProviderJobStatus, ProviderJobSubmission
 
 log = logging.getLogger(__name__)
@@ -43,11 +44,13 @@ class JobQueue:
         providers: Dict[str, BaseProviderClient],
         default_provider: str,
         config: Config,
+        gate: Optional[GenerationRequestGate] = None,
     ) -> None:
         self._db = db
         self._providers = providers
         self._default_provider = default_provider
         self._config = config
+        self._gate = gate
         self._queue: asyncio.Queue[PendingJob] = asyncio.Queue()
         self._workers: list[asyncio.Task[None]] = []
         self._stopped = asyncio.Event()
@@ -110,6 +113,7 @@ class JobQueue:
         auto_sanitized: bool = False,
         preflight_reason: Optional[str] = None,
         preflight_scope: Optional[str] = None,
+        idempotency_key: Optional[str] = None,
     ) -> GenerationJobRecord:
         model_key = model or self._config.default_video_model
         client, provider_key = self._resolve_provider(provider or model_key)
@@ -125,7 +129,7 @@ class JobQueue:
             settings=request_settings or None,
             preset=preset,
             payload=payload,
-            idempotency_key=corr_id,
+            idempotency_key=idempotency_key or corr_id,
         )
         job_id = submission.job_id
         now = datetime.utcnow()
@@ -422,7 +426,8 @@ class JobQueue:
                     gsheets_ok=gsheets_ok,
                     extra=done_extra,
                 )
-            elif result.status in {"failed", "errored"}:
+                await self._release_gate(pending, reason="success", status="completed")
+            elif result.status in {"failed", "errored", "stopped"}:
                 raw_error = result.error or "Unknown error"
                 response_payload: Optional[Dict[str, Any]] = None
                 if isinstance(result.data, dict):
@@ -528,6 +533,11 @@ class JobQueue:
                     credits_cost=self._config.generation_cost_credits,
                     refund_done=refunded,
                 )
+                await self._release_gate(
+                    pending,
+                    reason="job_failed",
+                    status=result.status,
+                )
             else:
                 # Job still running - requeue for later polling
                 await self._db.update_job(pending.job_id, result.status)
@@ -554,6 +564,25 @@ class JobQueue:
                 if job_extra:
                     job.extra.update(job_extra)
                 await self._notify(job)
+
+    async def _release_gate(
+        self, pending: PendingJob, *, reason: str, status: Optional[str]
+    ) -> None:
+        if not self._gate:
+            return
+        try:
+            await self._gate.release(
+                user_id=pending.user_id,
+                corr_id=pending.corr_id,
+                reason=reason,
+                status=status,
+            )
+        except Exception:  # pragma: no cover - defensive
+            log.exception(
+                "Failed to release gate for user %s corr_id=%s",
+                pending.user_id,
+                pending.corr_id,
+            )
 
 
 __all__ = ["JobQueue"]
