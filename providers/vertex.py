@@ -1,9 +1,11 @@
 """Clients for Google Vertex AI video and image generation."""
 from __future__ import annotations
 
+import asyncio
 import base64
 import binascii
 import logging
+import time
 from typing import Any, Dict, List, Optional, Tuple
 from uuid import uuid4
 
@@ -41,7 +43,8 @@ log = logging.getLogger(__name__)
 
 @dataclass(slots=True)
 class _VeoSanitisedConfig:
-    config_fields: Dict[str, Any]
+    rest_parameters: Dict[str, Any]
+    genai_config: Dict[str, Any]
     accepted_args: List[str]
     rejected_args: List[str]
     validation_errors: List[str]
@@ -53,10 +56,13 @@ class _VeoSanitisedConfig:
 @dataclass(slots=True)
 class _VeoRequestPlan:
     client: str
-    body: Dict[str, Any]
+    body: Optional[Dict[str, Any]]
     accepted_args: List[str]
     rejected_args: List[str]
     payload_preview: Dict[str, Any]
+    model_name: str
+    genai_config: Dict[str, Any]
+    reference_inline: Optional[Dict[str, Any]]
 
 
 def list_models(config: Config) -> Tuple[bool, str]:
@@ -415,43 +421,9 @@ def _coerce_bool(value: Any) -> Optional[bool]:
     return None
 
 
-def _normalise_aspect_ratio(config: Dict[str, Any]) -> Optional[str]:
-    raw_aspect = config.get("aspectRatio") or config.get("aspect_ratio")
-    if isinstance(raw_aspect, str) and raw_aspect.strip():
-        normalized = raw_aspect.strip().lower()
-        return _VEO_ASPECT_ALIASES.get(normalized, raw_aspect.strip())
-    orientation = str(config.get("orientation") or "").strip().lower()
-    if orientation:
-        mapped = _VEO_ASPECT_ALIASES.get(orientation)
-        if mapped:
-            return mapped
-    size_value = str(config.get("size") or "").strip().lower()
-    if size_value:
-        size_mapped = _VEO_ASPECT_ALIASES.get(size_value)
-        if size_mapped:
-            return size_mapped
-        size_mapped = _VEO_SIZE_TO_ASPECT.get(size_value)
-        if size_mapped:
-            return size_mapped
-    return None
-
-
-def _normalise_resolution(config: Dict[str, Any]) -> Optional[str]:
-    raw_resolution = config.get("resolution") or config.get("quality")
-    if isinstance(raw_resolution, str) and raw_resolution.strip():
-        normalized = raw_resolution.strip().lower()
-        return _VEO_RESOLUTION_ALIASES.get(normalized, raw_resolution.strip())
-    size_value = str(config.get("size") or "").strip().lower()
-    if size_value:
-        mapped = _VEO_RESOLUTION_ALIASES.get(size_value)
-        if mapped:
-            return mapped
-    return None
-
-
 def _detect_veo_client() -> str:
     if _GenAIClient and _genai_models and _genai_types:
-        return "genai"
+        return "google-genai"
     if _VertexGenerativeModel:
         return "vertexai"
     return "rest"
@@ -469,28 +441,33 @@ def _prepare_veo_config(config: Dict[str, Any]) -> _VeoSanitisedConfig:
         key for key in config.keys() if isinstance(key, str)
     }
     consumed_keys: set[str] = set()
-    config_fields: Dict[str, Any] = {}
+    rest_parameters: Dict[str, Any] = {}
+    genai_config: Dict[str, Any] = {}
     accepted_args: List[str] = []
     validation_errors: List[str] = []
     user_messages: List[str] = []
     payload_preview: Dict[str, Any] = {}
 
-    unsupported_map = {
+    blocked_keys = {
+        "width": "Ширина и высота не задаются вручную, выбери aspectRatio 16:9 или 9:16",
+        "height": "Ширина и высота не задаются вручную, выбери aspectRatio 16:9 или 9:16",
         "fps": "fps недоступен для Veo",
-        "width": "width/height не поддерживаются, выбери 16:9 или 9:16 и 720p/1080p",
-        "height": "width/height не поддерживаются, выбери 16:9 или 9:16 и 720p/1080p",
-        "parameters": "Поле parameters недоступно для Veo",
-        "generation_config": "Поле generation_config недоступно для Veo",
-        "generationConfig": "Поле generation_config недоступно для Veo",
+        "generation_config": "generation_config недоступен для Veo",
+        "generationConfig": "generation_config недоступен для Veo",
+        "duration_seconds": "Используй durationSeconds со значением 4, 6 или 8",
+        "aspect_ratio": "Используй aspectRatio со значением 16:9 или 9:16",
+        "sample_count": "Используй sampleCount от 1 до 4",
+        "negative_prompt": "Используй negativePrompt в camelCase",
+        "person_generation": "Используй personGeneration в camelCase",
+        "parameters": "Поле parameters формируется автоматически",
     }
-    for key, message in unsupported_map.items():
-        if key in config:
-            consumed_keys.add(key)
+    for key, message in blocked_keys.items():
+        if key in provided_keys:
             if message not in user_messages:
                 user_messages.append(message)
 
     duration_value: Optional[int] = None
-    for key in ("durationSeconds", "duration_seconds", "duration"):
+    for key in ("durationSeconds", "duration"):
         if key in config:
             consumed_keys.add(key)
             duration_value = _coerce_int(
@@ -499,60 +476,89 @@ def _prepare_veo_config(config: Dict[str, Any]) -> _VeoSanitisedConfig:
             break
     if duration_value is None:
         duration_value = 6
-    if duration_value is not None:
-        if duration_value not in _VEO_ALLOWED_DURATIONS:
-            validation_errors.append(f"duration={duration_value}")
-        else:
-            config_fields["duration_seconds"] = duration_value
-            payload_preview["durationSeconds"] = duration_value
-            accepted_args.append("duration_seconds")
-
-    for key in ("aspectRatio", "aspect_ratio", "orientation", "size"):
-        if key in config:
-            consumed_keys.add(key)
-    aspect_ratio_value = _normalise_aspect_ratio(config)
-    if aspect_ratio_value:
-        if aspect_ratio_value not in _VEO_ALLOWED_ASPECT_RATIOS:
-            validation_errors.append(f"aspectRatio={aspect_ratio_value}")
-        else:
-            config_fields["aspect_ratio"] = aspect_ratio_value
-            payload_preview["aspectRatio"] = aspect_ratio_value
-            accepted_args.append("aspect_ratio")
+    if duration_value not in _VEO_ALLOWED_DURATIONS:
+        validation_errors.append(f"duration={duration_value}")
     else:
-        config_fields.setdefault("aspect_ratio", "16:9")
-        payload_preview.setdefault("aspectRatio", "16:9")
-        if "aspect_ratio" not in accepted_args:
-            accepted_args.append("aspect_ratio")
+        rest_parameters["durationSeconds"] = duration_value
+        genai_config["duration_seconds"] = duration_value
+        payload_preview["durationSeconds"] = duration_value
+        accepted_args.append("durationSeconds")
 
-    for key in ("resolution", "quality"):
-        if key in config:
-            consumed_keys.add(key)
-    resolution_value = _normalise_resolution(config)
-    if resolution_value:
-        if resolution_value not in _VEO_ALLOWED_RESOLUTIONS:
-            validation_errors.append(f"resolution={resolution_value}")
-        else:
-            config_fields["resolution"] = resolution_value
-            payload_preview["resolution"] = resolution_value
-            accepted_args.append("resolution")
+    aspect_ratio_value: Optional[str] = None
+    if "aspectRatio" in config:
+        consumed_keys.add("aspectRatio")
+        raw = config.get("aspectRatio")
+        if isinstance(raw, str) and raw.strip():
+            key = raw.strip()
+            aspect_ratio_value = _VEO_ASPECT_ALIASES.get(key.lower(), key)
+    elif "orientation" in config:
+        consumed_keys.add("orientation")
+        raw = config.get("orientation")
+        if isinstance(raw, str) and raw.strip():
+            key = raw.strip()
+            aspect_ratio_value = _VEO_ASPECT_ALIASES.get(key.lower(), key)
+    elif "size" in config:
+        consumed_keys.add("size")
+        raw = config.get("size")
+        if isinstance(raw, str) and raw.strip():
+            key = raw.strip().lower()
+            mapped = _VEO_ASPECT_ALIASES.get(key)
+            if mapped:
+                aspect_ratio_value = mapped
+            else:
+                aspect_ratio_value = _VEO_SIZE_TO_ASPECT.get(key, raw.strip())
+    if not aspect_ratio_value:
+        aspect_ratio_value = "16:9"
+    if aspect_ratio_value not in _VEO_ALLOWED_ASPECT_RATIOS:
+        validation_errors.append(f"aspectRatio={aspect_ratio_value}")
     else:
-        config_fields.setdefault("resolution", "720p")
-        payload_preview.setdefault("resolution", "720p")
-        if "resolution" not in accepted_args:
-            accepted_args.append("resolution")
+        rest_parameters["aspectRatio"] = aspect_ratio_value
+        genai_config["aspect_ratio"] = aspect_ratio_value
+        payload_preview["aspectRatio"] = aspect_ratio_value
+        accepted_args.append("aspectRatio")
 
-    generate_audio_value: Optional[bool] = None
-    for key in ("generateAudio", "generate_audio", "audio", "sound"):
-        if key in config:
-            consumed_keys.add(key)
-            generate_audio_value = _coerce_bool(config.get(key))
-            if generate_audio_value is None:
-                validation_errors.append("generateAudio=invalid")
-            break
-    if generate_audio_value is not None:
-        config_fields["generate_audio"] = generate_audio_value
-        payload_preview["generateAudio"] = generate_audio_value
-        accepted_args.append("generate_audio")
+    resolution_value: Optional[str] = None
+    if "resolution" in config:
+        consumed_keys.add("resolution")
+        raw = config.get("resolution")
+        if isinstance(raw, str) and raw.strip():
+            key = raw.strip().lower()
+            resolution_value = _VEO_RESOLUTION_ALIASES.get(key, raw.strip())
+    elif "quality" in config:
+        consumed_keys.add("quality")
+        raw = config.get("quality")
+        if isinstance(raw, str) and raw.strip():
+            key = raw.strip().lower()
+            resolution_value = _VEO_RESOLUTION_ALIASES.get(key, raw.strip())
+    elif "size" in config:
+        consumed_keys.add("size")
+        raw = config.get("size")
+        if isinstance(raw, str) and raw.strip():
+            key = raw.strip().lower()
+            resolution_value = _VEO_RESOLUTION_ALIASES.get(key)
+    if not resolution_value:
+        resolution_value = "720p"
+    if resolution_value not in _VEO_ALLOWED_RESOLUTIONS:
+        validation_errors.append(f"resolution={resolution_value}")
+    else:
+        rest_parameters["resolution"] = resolution_value
+        genai_config["resolution"] = resolution_value
+        payload_preview["resolution"] = resolution_value
+        accepted_args.append("resolution")
+
+    if "sampleCount" in config:
+        consumed_keys.add("sampleCount")
+        sample_value = _coerce_int(
+            config.get("sampleCount"), field="sampleCount", positive=True, errors=validation_errors
+        )
+        if sample_value is not None:
+            if not 1 <= sample_value <= 4:
+                validation_errors.append(f"sampleCount={sample_value}")
+            else:
+                rest_parameters["sampleCount"] = sample_value
+                genai_config["number_of_videos"] = sample_value
+                payload_preview["sampleCount"] = sample_value
+                accepted_args.append("sampleCount")
 
     if "seed" in config:
         consumed_keys.add("seed")
@@ -560,22 +566,38 @@ def _prepare_veo_config(config: Dict[str, Any]) -> _VeoSanitisedConfig:
             config.get("seed"), field="seed", positive=False, errors=validation_errors
         )
         if seed_value is not None:
-            config_fields["seed"] = seed_value
+            rest_parameters["seed"] = seed_value
+            genai_config["seed"] = seed_value
             payload_preview["seed"] = seed_value
             accepted_args.append("seed")
 
-    sample_value: Optional[int] = None
-    for key in ("sampleCount", "sample_count", "samples"):
-        if key in config:
-            consumed_keys.add(key)
-            sample_value = _coerce_int(
-                config.get(key), field="sampleCount", positive=True, errors=validation_errors
-            )
-            break
-    if sample_value is not None and sample_value > 0:
-        config_fields["number_of_videos"] = sample_value
-        payload_preview["sampleCount"] = sample_value
-        accepted_args.append("number_of_videos")
+    if "personGeneration" in config:
+        consumed_keys.add("personGeneration")
+        raw_value = config.get("personGeneration")
+        value: Optional[str]
+        if isinstance(raw_value, bool):
+            value = "allow" if raw_value else "block"
+        elif isinstance(raw_value, (int, float)):
+            value = "allow" if raw_value else "block"
+        elif isinstance(raw_value, str) and raw_value.strip():
+            value = raw_value.strip()
+        else:
+            value = None
+        if value:
+            rest_parameters["personGeneration"] = value
+            genai_config["person_generation"] = value
+            payload_preview["personGeneration"] = value
+            accepted_args.append("personGeneration")
+
+    if "negativePrompt" in config:
+        consumed_keys.add("negativePrompt")
+        raw_value = config.get("negativePrompt")
+        if isinstance(raw_value, str) and raw_value.strip():
+            value = raw_value.strip()
+            rest_parameters["negativePrompt"] = value
+            genai_config["negative_prompt"] = value
+            payload_preview["negativePrompt"] = value
+            accepted_args.append("negativePrompt")
 
     reference_inline = config.get("reference_inline_data")
     if isinstance(reference_inline, dict):
@@ -587,13 +609,17 @@ def _prepare_veo_config(config: Dict[str, Any]) -> _VeoSanitisedConfig:
     else:
         reference_inline = None
 
+    accepted_args = sorted(set(accepted_args))
     rejected_args = sorted(provided_keys - consumed_keys)
+    validation_errors = sorted(set(validation_errors))
+    user_messages = list(dict.fromkeys(user_messages))
 
     return _VeoSanitisedConfig(
-        config_fields=config_fields,
-        accepted_args=sorted(set(accepted_args)),
+        rest_parameters=rest_parameters,
+        genai_config=genai_config,
+        accepted_args=accepted_args,
         rejected_args=rejected_args,
-        validation_errors=sorted(set(validation_errors)),
+        validation_errors=validation_errors,
         user_messages=user_messages,
         payload_preview=payload_preview,
         reference_inline=reference_inline,
@@ -602,119 +628,17 @@ def _prepare_veo_config(config: Dict[str, Any]) -> _VeoSanitisedConfig:
 def _build_veo_parameters(
     config: Dict[str, Any],
 ) -> Tuple[Dict[str, Any], List[str], List[str], bool]:
-    invalid_keys: List[str] = []
-    validation_errors: List[str] = []
-
-    forbidden_root = {
-        "generation_config",
-        "generationConfig",
-        "width",
-        "height",
-    }
-    for forbidden in forbidden_root:
-        if forbidden in config:
-            invalid_keys.append(forbidden)
-
-    raw_parameters = config.get("parameters") if isinstance(config.get("parameters"), dict) else {}
-    allowed_parameter_keys = {
-        "durationSeconds",
-        "aspectRatio",
-        "resolution",
-        "generateAudio",
-        "seed",
-        "sampleCount",
-    }
-    extra_raw_parameter_keys = sorted(
-        set(raw_parameters.keys()) - allowed_parameter_keys
+    sanitised = _prepare_veo_config(config)
+    invalid_keys = list(sanitised.rejected_args)
+    validation_errors = list(sanitised.validation_errors)
+    if sanitised.user_messages:
+        validation_errors.extend(sanitised.user_messages)
+    return (
+        dict(sanitised.rest_parameters),
+        sorted(set(invalid_keys)),
+        sorted(set(validation_errors)),
+        bool(sanitised.reference_inline),
     )
-    if extra_raw_parameter_keys:
-        invalid_keys.extend(extra_raw_parameter_keys)
-
-    parameters: Dict[str, Any] = {
-        key: raw_parameters[key]
-        for key in allowed_parameter_keys
-        if key in raw_parameters
-    }
-
-    duration_seconds = config.get("durationSeconds")
-    if duration_seconds is None:
-        duration_seconds = config.get("duration_seconds")
-    if duration_seconds is None:
-        duration_seconds = config.get("duration")
-    duration_value = _coerce_int(
-        duration_seconds, field="duration", positive=True, errors=validation_errors
-    )
-    if duration_value is not None:
-        if duration_value not in _VEO_ALLOWED_DURATIONS:
-            validation_errors.append(f"duration={duration_value}")
-        else:
-            parameters["durationSeconds"] = duration_value
-
-    aspect_ratio_value = _normalise_aspect_ratio(config)
-    if aspect_ratio_value:
-        if aspect_ratio_value not in _VEO_ALLOWED_ASPECT_RATIOS:
-            validation_errors.append(f"aspectRatio={aspect_ratio_value}")
-        else:
-            parameters["aspectRatio"] = aspect_ratio_value
-
-    resolution_value = _normalise_resolution(config)
-    if resolution_value:
-        if resolution_value not in _VEO_ALLOWED_RESOLUTIONS:
-            validation_errors.append(f"resolution={resolution_value}")
-        else:
-            parameters["resolution"] = resolution_value
-
-    generate_audio_source = None
-    for key in ("generateAudio", "generate_audio", "audio", "sound"):
-        if key in config:
-            generate_audio_source = config[key]
-            break
-    if generate_audio_source is None and "generateAudio" in raw_parameters:
-        generate_audio_source = raw_parameters["generateAudio"]
-    generate_audio_value = _coerce_bool(generate_audio_source)
-    if generate_audio_value is None:
-        generate_audio_value = False
-    parameters["generateAudio"] = generate_audio_value
-
-    seed_value = config.get("seed")
-    if seed_value is None and "seed" in raw_parameters:
-        seed_value = raw_parameters["seed"]
-    seed_int = _coerce_int(seed_value, field="seed", positive=False, errors=validation_errors)
-    if seed_int is not None:
-        parameters["seed"] = seed_int
-
-    sample_count_value = config.get("sampleCount")
-    if sample_count_value is None:
-        sample_count_value = config.get("sample_count")
-    if sample_count_value is None and "sampleCount" in raw_parameters:
-        sample_count_value = raw_parameters["sampleCount"]
-    sample_count_int = _coerce_int(
-        sample_count_value, field="sampleCount", positive=True, errors=validation_errors
-    )
-    if sample_count_int is not None:
-        parameters["sampleCount"] = sample_count_int
-
-    if "durationSeconds" not in parameters:
-        parameters["durationSeconds"] = 6
-    if parameters["durationSeconds"] not in _VEO_ALLOWED_DURATIONS:
-        validation_errors.append(f"duration={parameters['durationSeconds']}")
-
-    if "aspectRatio" not in parameters:
-        parameters["aspectRatio"] = "16:9"
-    if parameters["aspectRatio"] not in _VEO_ALLOWED_ASPECT_RATIOS:
-        validation_errors.append(f"aspectRatio={parameters['aspectRatio']}")
-
-    if "resolution" not in parameters:
-        parameters["resolution"] = "720p"
-    if parameters["resolution"] not in _VEO_ALLOWED_RESOLUTIONS:
-        validation_errors.append(f"resolution={parameters['resolution']}")
-
-    reference = config.get("reference_inline_data")
-    has_reference_inline = bool(
-        isinstance(reference, dict) and reference.get("data")
-    )
-
-    return parameters, sorted(set(invalid_keys)), sorted(set(validation_errors)), has_reference_inline
 
 
 def veo_request(
@@ -750,104 +674,23 @@ def veo_request(
 
     selected_client = _detect_veo_client()
 
-    if selected_client == "genai" and _GenAIClient and _genai_types and _genai_models:
-        if not config.google_service_account:
+    body: Optional[Dict[str, Any]] = None
+    if selected_client == "google-genai":
+        if not (_GenAIClient and _genai_types and _genai_models):
+            selected_client = "rest"
+        elif not config.google_service_account:
             raise ProviderAPIError(
                 provider=provider_name,
                 status_code=0,
                 message="Не настроен сервисный аккаунт Google для Veo",
                 error_type="config",
             )
-        try:
-            credentials = Credentials.from_service_account_info(
-                config.google_service_account,
-                scopes=_GOOGLE_SCOPES,
-            )
-        except Exception as exc:  # pragma: no cover - auth failure
-            raise ProviderAPIError(
-                provider=provider_name,
-                status_code=0,
-                message="Не удалось создать учетные данные для Veo",
-                error_type="config",
-                provider_message=str(exc),
-            ) from exc
 
-        client = _GenAIClient(
-            vertexai=True,
-            project=config.gcp_project_id,
-            location=config.vertex_location,
-            credentials=credentials,
-        )
-
-        config_kwargs = dict(sanitised.config_fields)
-
-        reference_inline = sanitised.reference_inline
-        if reference_inline and _genai_types:
-            data = reference_inline.get("data")
-            if isinstance(data, str):
-                payload = "".join(data.split())
-                try:
-                    binary = base64.b64decode(payload, validate=True)
-                except (binascii.Error, ValueError):
-                    binary = None
-                if binary:
-                    image_kwargs = {"image_bytes": binary}
-                    mime = reference_inline.get("mime_type") or reference_inline.get("mimeType")
-                    if isinstance(mime, str) and mime:
-                        image_kwargs["mime_type"] = mime
-                    reference_image = _genai_types.VideoGenerationReferenceImage(
-                        image=_genai_types.Image(**image_kwargs)
-                    )
-                    config_kwargs.setdefault("reference_images", []).append(reference_image)
-
-        if config_kwargs:
-            config_obj = _genai_types.GenerateVideosConfig(**config_kwargs)
-        else:
-            config_obj = None
-
-        parameters = _genai_types._GenerateVideosParameters(
-            model=model_name,
-            prompt=prompt,
-            config=config_obj,
-        )
-        request_dict = _genai_models._GenerateVideosParameters_to_vertex(
-            client._api_client, parameters
-        )
-        request_dict.pop("_url", None)
-        body = request_dict
-
-    elif selected_client == "vertexai" and _VertexGenerativeModel:
-        instance = {
-            "prompt": prompt,
+    if selected_client != "google-genai":
+        body = {
+            "instances": [{"prompt": prompt}],
+            "parameters": dict(sanitised.rest_parameters),
         }
-        if sanitised.config_fields.get("duration_seconds") is not None:
-            instance["durationSeconds"] = sanitised.config_fields["duration_seconds"]
-        if sanitised.config_fields.get("aspect_ratio"):
-            instance["aspectRatio"] = sanitised.config_fields["aspect_ratio"]
-        if sanitised.config_fields.get("resolution"):
-            instance["resolution"] = sanitised.config_fields["resolution"]
-        if sanitised.config_fields.get("generate_audio") is not None:
-            instance["generateAudio"] = sanitised.config_fields["generate_audio"]
-        if sanitised.config_fields.get("seed") is not None:
-            instance["seed"] = sanitised.config_fields["seed"]
-        if sanitised.config_fields.get("number_of_videos"):
-            instance["sampleCount"] = sanitised.config_fields["number_of_videos"]
-        body = {"instances": [instance]}
-    else:
-        instance = {"prompt": prompt}
-        if sanitised.config_fields.get("duration_seconds") is not None:
-            instance["durationSeconds"] = sanitised.config_fields["duration_seconds"]
-        if sanitised.config_fields.get("aspect_ratio"):
-            instance["aspectRatio"] = sanitised.config_fields["aspect_ratio"]
-        if sanitised.config_fields.get("resolution"):
-            instance["resolution"] = sanitised.config_fields["resolution"]
-        if sanitised.config_fields.get("generate_audio") is not None:
-            instance["generateAudio"] = sanitised.config_fields["generate_audio"]
-        if sanitised.config_fields.get("seed") is not None:
-            instance["seed"] = sanitised.config_fields["seed"]
-        if sanitised.config_fields.get("number_of_videos"):
-            instance["sampleCount"] = sanitised.config_fields["number_of_videos"]
-        body = {"instances": [instance]}
 
     log.info(
         "vertex.veo.request selected_client=%s accepted_args=%s rejected_args=%s payload_preview=%s",
@@ -863,6 +706,9 @@ def veo_request(
         accepted_args=sanitised.accepted_args,
         rejected_args=sanitised.rejected_args,
         payload_preview=sanitised.payload_preview,
+        model_name=model_name,
+        genai_config=dict(sanitised.genai_config),
+        reference_inline=sanitised.reference_inline,
     )
 
 
@@ -889,7 +735,12 @@ class VertexVideoClient(VertexGenerativeClient):
             config=self._config,
             provider_name=self.provider_name,
         )
-        return plan.body
+        if plan.body is not None:
+            return plan.body
+        return {
+            "instances": [{"prompt": prompt}],
+            "parameters": dict(plan.payload_preview),
+        }
 
     async def enqueue_job(
         self,
@@ -916,17 +767,23 @@ class VertexVideoClient(VertexGenerativeClient):
             config=self._config,
             provider_name=self.provider_name,
         )
-        data, status_code, duration_ms = await self._request(
-            "POST",
-            self._jobs_path(),
-            json=plan.body,
-            idempotency_key=idempotency_key,
-        )
+        if plan.client == "google-genai":
+            data, status_code, duration_ms = await self._generate_with_google_genai(
+                prompt=prompt,
+                plan=plan,
+            )
+        else:
+            data, status_code, duration_ms = await self._request(
+                "POST",
+                self._jobs_path(),
+                json=plan.body,
+                idempotency_key=idempotency_key,
+            )
         job_id = idempotency_key or str(uuid4())
         meta = {
             "prompt": prompt,
             "settings": settings or {},
-            "payload": plan.body,
+            "payload": plan.body if plan.body is not None else {"parameters": plan.payload_preview},
             "assets_meta": {},
             "veo": {
                 "selected_client": plan.client,
@@ -955,6 +812,95 @@ class VertexVideoClient(VertexGenerativeClient):
             duration_ms=duration_ms,
             data=data,
         )
+
+    async def _generate_with_google_genai(
+        self,
+        *,
+        prompt: str,
+        plan: _VeoRequestPlan,
+    ) -> Tuple[Dict[str, Any], int, int]:
+        if not (_GenAIClient and _genai_types and _genai_models):
+            raise ProviderAPIError(
+                provider=self.provider_name,
+                status_code=0,
+                message="Библиотека google-genai недоступна",
+                error_type="config",
+            )
+        try:
+            credentials = Credentials.from_service_account_info(
+                self._config.google_service_account,
+                scopes=_GOOGLE_SCOPES,
+            )
+        except Exception as exc:  # pragma: no cover - auth failure
+            raise ProviderAPIError(
+                provider=self.provider_name,
+                status_code=0,
+                message="Не удалось создать учетные данные для Veo",
+                error_type="config",
+                provider_message=str(exc),
+            ) from exc
+
+        config_kwargs = dict(plan.genai_config)
+        reference_inline = plan.reference_inline
+        if reference_inline and _genai_types:
+            data = reference_inline.get("data")
+            if isinstance(data, str):
+                payload = "".join(data.split())
+                try:
+                    binary = base64.b64decode(payload, validate=True)
+                except (binascii.Error, ValueError):
+                    binary = None
+                if binary:
+                    image_kwargs = {"image_bytes": binary}
+                    mime = reference_inline.get("mime_type") or reference_inline.get("mimeType")
+                    if isinstance(mime, str) and mime:
+                        image_kwargs["mime_type"] = mime
+                    reference_image = _genai_types.VideoGenerationReferenceImage(
+                        image=_genai_types.Image(**image_kwargs)
+                    )
+                    config_kwargs.setdefault("reference_images", []).append(reference_image)
+
+        def _invoke() -> Any:
+            client = _GenAIClient(
+                vertexai=True,
+                project=self._config.gcp_project_id,
+                location=self._config.vertex_location,
+                credentials=credentials,
+            )
+            config_obj = (
+                _genai_types.GenerateVideosConfig(**config_kwargs)
+                if config_kwargs
+                else None
+            )
+            return client.models.generate_videos(
+                model=plan.model_name,
+                prompt=prompt,
+                config=config_obj,
+            )
+
+        start = time.perf_counter()
+        try:
+            operation = await asyncio.to_thread(_invoke)
+        except Exception as exc:  # pragma: no cover - network guard
+            raise ProviderAPIError(
+                provider=self.provider_name,
+                status_code=0,
+                message="Ошибка обращения к google-genai",
+                error_type="api",
+                provider_message=str(exc),
+            ) from exc
+        duration_ms = int((time.perf_counter() - start) * 1000)
+
+        if hasattr(operation, "model_dump") and callable(operation.model_dump):
+            data = operation.model_dump()
+        elif hasattr(operation, "to_json_dict") and callable(operation.to_json_dict):
+            data = operation.to_json_dict()
+        elif hasattr(operation, "dict") and callable(operation.dict):
+            data = operation.dict()
+        else:
+            data = {"response": getattr(operation, "response", None)}
+
+        return data, 200, duration_ms
 
 
 class VertexVeoPreviewClient(VertexGenerativeClient):
