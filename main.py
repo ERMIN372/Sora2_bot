@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import os
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
@@ -35,8 +36,20 @@ from providers import (
 )
 import yookassa_client
 
-logging.basicConfig(level=logging.INFO)
+_LOG_LEVEL_NAME = os.getenv("LOG_LEVEL", "INFO").upper()
+_LOG_LEVEL = getattr(logging, _LOG_LEVEL_NAME, None)
+_LOG_FORMAT = "%(asctime)s %(levelname)s [%(name)s:%(lineno)d] %(message)s"
+
+if not isinstance(_LOG_LEVEL, int):
+    _LOG_LEVEL = logging.INFO
+
+logging.basicConfig(level=_LOG_LEVEL, format=_LOG_FORMAT, datefmt="%Y-%m-%d %H:%M:%S")
 log = logging.getLogger(__name__)
+
+if not isinstance(getattr(logging, _LOG_LEVEL_NAME, None), int):
+    log.warning("Unknown LOG_LEVEL %s, defaulting to INFO", _LOG_LEVEL_NAME)
+else:
+    log.debug("Logging configured level=%s", logging.getLevelName(_LOG_LEVEL))
 
 ALLOWED_UPDATES: List[str] = ["message", "callback_query"]
 

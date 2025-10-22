@@ -17,6 +17,13 @@ from providers import BaseProviderClient, ProviderAPIError, ProviderJobStatus, P
 log = logging.getLogger(__name__)
 
 
+def _prompt_preview(prompt: str, limit: int = 120) -> str:
+    snippet = (prompt or "").strip().replace("\n", " ")
+    if len(snippet) > limit:
+        return f"{snippet[:limit]}…(+{len(snippet) - limit} chars)"
+    return snippet
+
+
 @dataclass
 class PendingJob:
     job_id: str
@@ -124,6 +131,15 @@ class JobQueue:
         if image_file_id:
             request_settings.setdefault("image_file_id", image_file_id)
         effective_prompt = sanitized_prompt or prompt
+        log.debug(
+            "Submitting provider job corr_id=%s user_id=%s provider=%s model=%s settings=%s prompt=%s",
+            corr_id,
+            user_id,
+            provider_key,
+            model_key,
+            request_settings,
+            _prompt_preview(effective_prompt),
+        )
         submission: ProviderJobSubmission = await client.enqueue_job(
             prompt=effective_prompt,
             settings=request_settings or None,
@@ -164,6 +180,14 @@ class JobQueue:
             auto_sanitized=auto_sanitized,
             preflight_reason=preflight_reason,
             preflight_scope=preflight_scope,
+        )
+        log.debug(
+            "Job queued corr_id=%s job_id=%s provider=%s user_id=%s queue_size=%s",
+            corr_id,
+            job_id,
+            provider_key,
+            user_id,
+            self._queue.qsize(),
         )
         log_event(
             level="INFO",
@@ -207,6 +231,13 @@ class JobQueue:
         preflight_scope: Optional[str] = None,
     ) -> None:
         provider_key = provider or model
+        log.debug(
+            "Enqueueing pending job job_id=%s provider=%s corr_id=%s user_id=%s", 
+            job_id,
+            provider_key,
+            corr_id,
+            user_id,
+        )
         await self._queue.put(
             PendingJob(
                 job_id=job_id,
@@ -264,7 +295,7 @@ class JobQueue:
                 self._queue.task_done()
 
     async def _process_job(self, pending: PendingJob) -> None:
-        log.info("Processing job %s", pending.job_id)
+        log.info("Processing job %s corr_id=%s provider=%s", pending.job_id, pending.corr_id, pending.provider)
         await self._db.update_job(pending.job_id, "running")
         result: Optional[ProviderJobStatus] = None
         inline_assets: List[Dict[str, Any]] = []
@@ -274,8 +305,24 @@ class JobQueue:
         try:
             client, provider_key = self._resolve_provider(pending.provider)
             try:
+                log.debug(
+                    "Polling provider job job_id=%s provider=%s corr_id=%s",
+                    pending.job_id,
+                    provider_key,
+                    pending.corr_id,
+                )
                 result = await client.get_job_status(pending.job_id)
             except ProviderAPIError as exc:
+                log.warning(
+                    "Provider polling failed job_id=%s corr_id=%s provider=%s status=%s error_type=%s error_code=%s message=%s",
+                    pending.job_id,
+                    pending.corr_id,
+                    provider_key,
+                    exc.status_code,
+                    exc.error_type,
+                    exc.error_code,
+                    exc,
+                )
                 log_event(
                     level="ERROR",
                     event="poll",
@@ -397,6 +444,13 @@ class JobQueue:
                 ),
             )
             if result.status == "completed" and asset_label:
+                log.debug(
+                    "Job completed job_id=%s corr_id=%s provider=%s assets=%s",
+                    pending.job_id,
+                    pending.corr_id,
+                    provider_key,
+                    list(result.assets.keys()),
+                )
                 gsheets_ok = True
                 try:
                     await self._db.update_job(
@@ -428,6 +482,14 @@ class JobQueue:
                 )
                 await self._release_gate(pending, reason="success", status="completed")
             elif result.status in {"failed", "errored", "stopped"}:
+                log.warning(
+                    "Job failed job_id=%s corr_id=%s provider=%s status=%s error=%s",
+                    pending.job_id,
+                    pending.corr_id,
+                    provider_key,
+                    result.status,
+                    result.error,
+                )
                 raw_error = result.error or "Unknown error"
                 response_payload: Optional[Dict[str, Any]] = None
                 if isinstance(result.data, dict):
@@ -540,6 +602,13 @@ class JobQueue:
                 )
             else:
                 # Job still running - requeue for later polling
+                log.debug(
+                    "Job still running job_id=%s corr_id=%s provider=%s status=%s requeueing", 
+                    pending.job_id,
+                    pending.corr_id,
+                    provider_key,
+                    result.status,
+                )
                 await self._db.update_job(pending.job_id, result.status)
                 await asyncio.sleep(3)
                 await self.enqueue(
