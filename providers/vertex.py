@@ -514,7 +514,7 @@ class VertexVeoPreviewClient(VertexGenerativeClient):
             "instances": [
                 {
                     "prompt": prompt,
-                    "generation_config": generation_config,
+                    "generationConfig": generation_config,
                 }
             ]
         }
@@ -523,7 +523,7 @@ class VertexVeoPreviewClient(VertexGenerativeClient):
             "instances": [
                 {
                     "prompt_preview": (prompt or "")[:120],
-                    "generation_config": generation_config,
+                    "generationConfig": generation_config,
                 }
             ]
         }
