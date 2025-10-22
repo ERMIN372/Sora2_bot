@@ -415,7 +415,7 @@ class ArchivePublisher:
     @staticmethod
     def _escape_markdown(value: str) -> str:
         if not value:
-            return "-"
+            value = "-"
         text = value.replace("\\", "\\\\")
         pattern = re.compile(rf"([{re.escape(_MD_V2_SPECIAL_CHARS)}])")
         text = pattern.sub(r"\\\\\1", text)
