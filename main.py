@@ -21,6 +21,7 @@ from config import (
     load_config,
 )
 from db import Database
+from generation_gate import GenerationRequestGate
 from handlers import register_handlers
 from jobs import JobQueue
 from healthcheck import run_startup_healthcheck
@@ -46,6 +47,7 @@ class ApplicationState:
     dp: Dispatcher
     db: Database
     job_queue: JobQueue
+    gate: GenerationRequestGate
     app: FastAPI
     yookassa_processor: Optional[YooKassaProcessor]
     background_tasks: List[asyncio.Task[Any]] = field(default_factory=list)
@@ -67,6 +69,7 @@ def _init_application(config: Config) -> ApplicationState:
     bot = Bot(token=config.bot_token, parse_mode="HTML")
     dp = Dispatcher(bot, storage=MemoryStorage())
     db = Database()
+    gate = GenerationRequestGate()
     providers: Dict[str, BaseProviderClient] = {}
 
     if config.vertex_enabled:
@@ -123,8 +126,9 @@ def _init_application(config: Config) -> ApplicationState:
         providers=providers,
         default_provider=default_provider,
         config=config,
+        gate=gate,
     )
-    register_handlers(dp, db=db, config=config, job_queue=job_queue)
+    register_handlers(dp, db=db, config=config, job_queue=job_queue, gate=gate)
 
     app, yookassa_processor = create_app(config=config, dp=dp, bot=bot, db=db)
 
@@ -134,6 +138,7 @@ def _init_application(config: Config) -> ApplicationState:
         dp=dp,
         db=db,
         job_queue=job_queue,
+        gate=gate,
         app=app,
         yookassa_processor=yookassa_processor,
     )
