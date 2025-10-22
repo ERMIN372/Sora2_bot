@@ -58,6 +58,12 @@ class ErrorLogRecord:
     error_type: Optional[str]
     error_msg_short: str
     refunded: bool
+    preflight_blocked: bool = False
+    preflight_reason: str = ""
+    auto_sanitized: bool = False
+    sanitized_prompt: Optional[str] = None
+    error_scope: Optional[str] = None
+    error_json: Optional[str] = None
 
 
 def _parse_datetime(value: str) -> datetime:
@@ -447,6 +453,12 @@ class Database:
                 error_type=record.error_type or "",
                 error_msg_short=record.error_msg_short,
                 refunded=record.refunded,
+                preflight_blocked=record.preflight_blocked,
+                preflight_reason=record.preflight_reason,
+                auto_sanitized=record.auto_sanitized,
+                sanitized_prompt=record.sanitized_prompt or "",
+                error_scope=record.error_scope or "",
+                error_json=record.error_json or "",
             )
         except Exception:  # pragma: no cover - external dependency
             log.warning("Failed to append error record", exc_info=True)

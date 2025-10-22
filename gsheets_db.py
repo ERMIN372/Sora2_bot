@@ -131,6 +131,12 @@ _ERRORS_HEADERS = [
     "error_type",
     "error_msg_short",
     "refunded",
+    "preflight_blocked",
+    "preflight_reason",
+    "auto_sanitized",
+    "sanitized_prompt",
+    "error_scope",
+    "error_json",
 ]
 
 _API_RETRY = dict(
@@ -1094,6 +1100,10 @@ async def append_error_record(**record: Any) -> None:
         refunded_value = payload.get("refunded")
         if isinstance(refunded_value, bool):
             payload["refunded"] = "TRUE" if refunded_value else "FALSE"
+        for flag in ("preflight_blocked", "auto_sanitized"):
+            flag_value = payload.get(flag)
+            if isinstance(flag_value, bool):
+                payload[flag] = "TRUE" if flag_value else "FALSE"
         username_raw = payload.get("username")
         if username_raw is not None:
             payload["username"] = _clean_username(username_raw)

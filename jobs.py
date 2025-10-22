@@ -9,6 +9,7 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 from config import Config
 from db import Database, ErrorLogRecord, GenerationJobRecord
+from moderation import classify_safety_response, policy_message, render_error_json
 from observability import log_event
 from providers import BaseProviderClient, ProviderAPIError, ProviderJobStatus, ProviderJobSubmission
 
@@ -25,6 +26,11 @@ class PendingJob:
     model: str
     provider: str
     username: Optional[str]
+    original_prompt: Optional[str] = None
+    sanitized_prompt: Optional[str] = None
+    auto_sanitized: bool = False
+    preflight_reason: Optional[str] = None
+    preflight_scope: Optional[str] = None
 
 
 class JobQueue:
@@ -99,6 +105,11 @@ class JobQueue:
         settings: Optional[Dict[str, Any]] = None,
         preset: Optional[str] = None,
         payload: Optional[Dict[str, Any]] = None,
+        original_prompt: Optional[str] = None,
+        sanitized_prompt: Optional[str] = None,
+        auto_sanitized: bool = False,
+        preflight_reason: Optional[str] = None,
+        preflight_scope: Optional[str] = None,
     ) -> GenerationJobRecord:
         model_key = model or self._config.default_video_model
         client, provider_key = self._resolve_provider(provider or model_key)
@@ -108,8 +119,9 @@ class JobQueue:
         request_settings.setdefault("model", model_key)
         if image_file_id:
             request_settings.setdefault("image_file_id", image_file_id)
+        effective_prompt = sanitized_prompt or prompt
         submission: ProviderJobSubmission = await client.enqueue_job(
-            prompt=prompt,
+            prompt=effective_prompt,
             settings=request_settings or None,
             preset=preset,
             payload=payload,
@@ -120,7 +132,7 @@ class JobQueue:
         record = GenerationJobRecord(
             id=job_id,
             user_id=user_id,
-            prompt=prompt,
+            prompt=effective_prompt,
             status="queued",
             video_url=None,
             error=None,
@@ -137,12 +149,17 @@ class JobQueue:
         await self.enqueue(
             job_id=job_id,
             user_id=user_id,
-            prompt=prompt,
+            prompt=effective_prompt,
             corr_id=corr_id,
             size=size,
             model=model_key,
             provider=provider_key,
             username=username,
+            original_prompt=original_prompt or prompt,
+            sanitized_prompt=effective_prompt,
+            auto_sanitized=auto_sanitized,
+            preflight_reason=preflight_reason,
+            preflight_scope=preflight_scope,
         )
         log_event(
             level="INFO",
@@ -157,8 +174,14 @@ class JobQueue:
             credits_cost=self._config.generation_cost_credits,
             duration_ms=submission.duration_ms,
             status_code=submission.status_code,
-            prompt=prompt,
+            prompt=effective_prompt,
             gsheets_ok=True,
+            extra={
+                "preflight_blocked": False,
+                "preflight_reason": preflight_reason,
+                "preflight_scope": preflight_scope,
+                "preflight_auto_sanitized": auto_sanitized,
+            },
         )
         return record
 
@@ -173,6 +196,11 @@ class JobQueue:
         model: str,
         provider: Optional[str],
         username: Optional[str],
+        original_prompt: Optional[str] = None,
+        sanitized_prompt: Optional[str] = None,
+        auto_sanitized: bool = False,
+        preflight_reason: Optional[str] = None,
+        preflight_scope: Optional[str] = None,
     ) -> None:
         provider_key = provider or model
         await self._queue.put(
@@ -185,6 +213,11 @@ class JobQueue:
                 model=model,
                 provider=provider_key,
                 username=username,
+                original_prompt=original_prompt or prompt,
+                sanitized_prompt=sanitized_prompt or prompt,
+                auto_sanitized=auto_sanitized,
+                preflight_reason=preflight_reason,
+                preflight_scope=preflight_scope,
             )
         )
 
@@ -200,6 +233,8 @@ class JobQueue:
                 model=job.model or self._config.default_video_model,
                 provider=job.model or self._default_provider,
                 username=job.username,
+                original_prompt=job.prompt,
+                sanitized_prompt=job.prompt,
             )
         if pending:
             log.info("Recovered %s pending jobs", len(pending))
@@ -264,6 +299,11 @@ class JobQueue:
                     model=pending.model,
                     provider=provider_key,
                     username=pending.username,
+                    original_prompt=pending.original_prompt,
+                    sanitized_prompt=pending.sanitized_prompt,
+                    auto_sanitized=pending.auto_sanitized,
+                    preflight_reason=pending.preflight_reason,
+                    preflight_scope=pending.preflight_scope,
                 )
                 return
             except Exception as exc:  # pragma: no cover - defensive network guard
@@ -291,6 +331,11 @@ class JobQueue:
                     model=pending.model,
                     provider=provider_key,
                     username=pending.username,
+                    original_prompt=pending.original_prompt,
+                    sanitized_prompt=pending.sanitized_prompt,
+                    auto_sanitized=pending.auto_sanitized,
+                    preflight_reason=pending.preflight_reason,
+                    preflight_scope=pending.preflight_scope,
                 )
                 return
             raw_inline = []
@@ -378,7 +423,33 @@ class JobQueue:
                     extra=done_extra,
                 )
             elif result.status in {"failed", "errored"}:
-                error_message = result.error or "Unknown error"
+                raw_error = result.error or "Unknown error"
+                response_payload: Optional[Dict[str, Any]] = None
+                if isinstance(result.data, dict):
+                    response_payload = result.data.get("response")
+                scope, _categories, summary = classify_safety_response(response_payload)
+                if scope == "unknown" and pending.preflight_scope:
+                    scope = pending.preflight_scope
+                error_json = render_error_json(summary)
+                policy_text = policy_message(scope)
+                if scope != "unknown":
+                    error_message = policy_text
+                elif raw_error.strip().upper() in {"STOP", "SAFETY"}:
+                    error_message = policy_message("unknown")
+                else:
+                    error_message = raw_error
+                if scope and scope != "unknown":
+                    job_extra["error_scope"] = scope
+                if summary:
+                    job_extra["error_summary"] = summary
+                if error_json:
+                    job_extra["error_json"] = error_json
+                if pending.preflight_reason:
+                    job_extra.setdefault("preflight_reason", pending.preflight_reason)
+                if pending.auto_sanitized:
+                    job_extra.setdefault("preflight_auto_sanitized", pending.auto_sanitized)
+                if pending.sanitized_prompt:
+                    job_extra.setdefault("sanitized_prompt", pending.sanitized_prompt)
                 gsheets_ok = True
                 try:
                     await self._db.update_job(
@@ -410,6 +481,12 @@ class JobQueue:
                         error_type="job_failed",
                         error_msg_short=error_message[:240],
                         refunded=refunded,
+                        preflight_blocked=False,
+                        preflight_reason=pending.preflight_reason or "",
+                        auto_sanitized=pending.auto_sanitized,
+                        sanitized_prompt=pending.sanitized_prompt or pending.prompt,
+                        error_scope=scope,
+                        error_json=error_json,
                     )
                 )
                 log_event(
@@ -428,7 +505,15 @@ class JobQueue:
                     error_msg_short=error_message,
                     gsheets_ok=gsheets_ok and sheet_ok,
                     refund_done=refunded,
-                    extra={"provider_message": error_message},
+                    extra={
+                        "provider_message": raw_error,
+                        "error_scope": scope,
+                        "error_json": error_json,
+                        "preflight_blocked": False,
+                        "preflight_reason": pending.preflight_reason,
+                        "preflight_scope": scope,
+                        "preflight_auto_sanitized": pending.auto_sanitized,
+                    },
                 )
                 log_event(
                     level="INFO",
@@ -456,6 +541,11 @@ class JobQueue:
                     model=pending.model,
                     provider=provider_key,
                     username=pending.username,
+                    original_prompt=pending.original_prompt,
+                    sanitized_prompt=pending.sanitized_prompt,
+                    auto_sanitized=pending.auto_sanitized,
+                    preflight_reason=pending.preflight_reason,
+                    preflight_scope=pending.preflight_scope,
                 )
                 return
         finally:
