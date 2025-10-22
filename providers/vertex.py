@@ -1,8 +1,10 @@
 """Clients for Google Vertex AI video and image generation."""
 from __future__ import annotations
 
+import base64
+import binascii
 import logging
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 from uuid import uuid4
 
 from config import Config
@@ -146,7 +148,7 @@ class VertexGenerativeClient(BaseProviderClient):
                 duration_ms=0,
             )
         data, status_code, duration_ms, meta = record
-        status, error, assets = self._extract_result(data)
+        status, error, assets, inline_assets = self._extract_result(data)
         if status != "completed" and not error:
             error = "Не удалось создать. Ошибка неизвестна"
         return ProviderJobStatus(
@@ -154,21 +156,27 @@ class VertexGenerativeClient(BaseProviderClient):
             status=status,
             error=error,
             assets=assets,
-            data={"response": data, "meta": meta},
+            data={
+                "response": data,
+                "meta": meta,
+                "inline_assets": inline_assets,
+            },
             status_code=status_code,
             duration_ms=duration_ms,
         )
 
-    def _extract_result(self, payload: Dict[str, Any]) -> Tuple[str, Optional[str], Dict[str, str]]:
+    def _extract_result(
+        self, payload: Dict[str, Any]
+    ) -> Tuple[str, Optional[str], Dict[str, str], List[Dict[str, Any]]]:
         if not isinstance(payload, dict):
-            return "failed", "Пустой ответ провайдера", {}
+            return "failed", "Пустой ответ провайдера", {}, []
         error = payload.get("error")
         if isinstance(error, dict):
             message = error.get("message") or error.get("status")
-            return "failed", f"{message}" if message else "Неизвестная ошибка", {}
+            return "failed", f"{message}" if message else "Неизвестная ошибка", {}, []
         candidates = payload.get("candidates")
         if not candidates:
-            return "failed", "Пустой ответ модели", {}
+            return "failed", "Пустой ответ модели", {}, []
         first = candidates[0] or {}
         content = first.get("content") if isinstance(first, dict) else {}
         parts = []
@@ -177,16 +185,22 @@ class VertexGenerativeClient(BaseProviderClient):
             if isinstance(raw_parts, list):
                 parts = [part for part in raw_parts if isinstance(part, dict)]
         assets: Dict[str, str] = {}
+        inline_assets: List[Dict[str, Any]] = []
         for part in parts:
-            self._collect_assets(part, assets)
+            self._collect_assets(part, assets, inline_assets)
         if assets:
-            return "completed", None, assets
+            return "completed", None, assets, inline_assets
         finish_reason = first.get("finishReason") if isinstance(first, dict) else None
         if isinstance(finish_reason, str) and finish_reason:
-            return "failed", finish_reason, {}
-        return "failed", "Модель не вернула результат", {}
+            return "failed", finish_reason, {}, []
+        return "failed", "Модель не вернула результат", {}, []
 
-    def _collect_assets(self, part: Dict[str, Any], assets: Dict[str, str]) -> None:
+    def _collect_assets(
+        self,
+        part: Dict[str, Any],
+        assets: Dict[str, str],
+        inline_assets: List[Dict[str, Any]],
+    ) -> None:
         media = part.get("media")
         if isinstance(media, dict):
             uri = media.get("uri") or media.get("downloadUri")
@@ -201,8 +215,34 @@ class VertexGenerativeClient(BaseProviderClient):
         if isinstance(inline, dict):
             data = inline.get("data")
             if data:
-                mime = inline.get("mimeType") or inline.get("mime_type") or "application/octet-stream"
-                assets[f"inline_{len(assets)}"] = f"data:{mime};base64,{data}"
+                mime = (
+                    inline.get("mimeType")
+                    or inline.get("mime_type")
+                    or "application/octet-stream"
+                )
+                key = f"inline_{len(inline_assets)}"
+                data_str = str(data)
+                inline_assets.append(
+                    {
+                        "kind": "inlineData",
+                        "mime": mime,
+                        "bytes": self._measure_inline_bytes(data_str),
+                        "data_uri": f"data:{mime};base64,{data_str}",
+                    }
+                )
+                assets[key] = key
+
+    @staticmethod
+    def _measure_inline_bytes(data: str) -> int:
+        payload = "".join(str(data).split())
+        try:
+            decoded = base64.b64decode(payload, validate=True)
+        except (binascii.Error, ValueError):
+            try:
+                decoded = base64.b64decode(payload)
+            except (binascii.Error, ValueError):
+                return 0
+        return len(decoded)
 
     def _build_enqueue_payload(
         self,

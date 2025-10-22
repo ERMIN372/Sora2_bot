@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import json
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Awaitable, Callable, Dict, Iterable, List, Optional
 
@@ -42,6 +42,7 @@ class GenerationJobRecord:
     cost_credits: Optional[int] = None
     username: Optional[str] = None
     corr_id: Optional[str] = None
+    extra: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -114,6 +115,7 @@ def _job_from_dict(data: Dict[str, Any]) -> GenerationJobRecord:
         cost_credits=cost_credits,
         username=str(data.get("username", "")) or None,
         corr_id=str(data.get("corr_id", "")) or None,
+        extra={},
     )
 
 

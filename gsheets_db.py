@@ -42,14 +42,14 @@ def _sanitise_cell_value(value: Any, *, column: Optional[str] = None) -> Any:
     if not text:
         return ""
 
-    if text.startswith("data:") and ";base64," in text:
-        header = text.split(",", 1)[0]
-        summary = f"[inline asset: {header} | original length {len(text)} chars]"
+    lowered = text.lower()
+    if lowered.startswith("data:image") or len(text) > 30000:
         log.warning(
-            "Replacing inline asset value for column %s with summary to stay under Google Sheets limits",
+            "Replacing inline asset value for column %s (length %d) with placeholder to stay under Google Sheets limits",
             column or "?",
+            len(text),
         )
-        return summary[:_MAX_CELL_LENGTH]
+        return "[inline asset truncated]"
 
     if len(text) <= _MAX_CELL_LENGTH:
         return text
