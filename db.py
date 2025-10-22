@@ -66,6 +66,24 @@ class ErrorLogRecord:
     error_json: Optional[str] = None
 
 
+@dataclass
+class ArchiveLogRecord:
+    ts: datetime
+    corr_id: str
+    archive_status: str
+    channel_id: Optional[int]
+    message_id: Optional[int]
+    content_type: str
+    model_name: Optional[str]
+    username: Optional[str]
+    caption_len: int
+    file_size: int
+    attempts: int
+    error_short: Optional[str]
+    user_id: Optional[int] = None
+    duration_seconds: Optional[int] = None
+
+
 def _parse_datetime(value: str) -> datetime:
     if not value:
         return datetime.utcfromtimestamp(0)
@@ -465,10 +483,41 @@ class Database:
             return False
         return True
 
+    async def archive_was_sent(self, corr_id: str) -> bool:
+        if not corr_id:
+            return False
+        try:
+            return await gsheets_db.archive_was_sent(corr_id)
+        except Exception:  # pragma: no cover - external dependency
+            log.warning("Failed to fetch archive status corr_id=%s", corr_id, exc_info=True)
+            return False
+
+    async def log_archive_record(self, record: ArchiveLogRecord) -> None:
+        try:
+            await gsheets_db.append_archive_log(
+                ts=record.ts.replace(microsecond=0).isoformat(),
+                corr_id=record.corr_id,
+                archive_status=record.archive_status,
+                channel_id=record.channel_id or "",
+                message_id=record.message_id or "",
+                content_type=record.content_type,
+                model_name=record.model_name or "",
+                username=record.username or "",
+                user_id=record.user_id or "",
+                caption_len=record.caption_len,
+                file_size=record.file_size,
+                duration_seconds=record.duration_seconds or "",
+                attempts=record.attempts,
+                error_short=record.error_short or "",
+            )
+        except Exception:  # pragma: no cover - external dependency
+            log.warning("Failed to append archive log corr_id=%s", record.corr_id, exc_info=True)
+
 
 __all__ = [
     "Database",
     "User",
     "GenerationJobRecord",
     "ErrorLogRecord",
+    "ArchiveLogRecord",
 ]

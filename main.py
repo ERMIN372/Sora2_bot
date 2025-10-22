@@ -13,6 +13,7 @@ from fastapi import FastAPI
 import uvicorn
 
 from app_server import YooKassaProcessor, create_app, poll_pending_payments
+from archive import ArchivePublisher
 from config import (
     CFG,
     Config,
@@ -53,6 +54,7 @@ class ApplicationState:
     background_tasks: List[asyncio.Task[Any]] = field(default_factory=list)
     uvicorn_task: Optional[asyncio.Task[Any]] = None
     uvicorn_server: Optional[uvicorn.Server] = None
+    archive_publisher: Optional[ArchivePublisher] = None
 
 
 def _parse_args() -> argparse.Namespace:
@@ -128,7 +130,15 @@ def _init_application(config: Config) -> ApplicationState:
         config=config,
         gate=gate,
     )
-    register_handlers(dp, db=db, config=config, job_queue=job_queue, gate=gate)
+    archive_publisher = ArchivePublisher(bot=bot, config=config, db=db)
+    register_handlers(
+        dp,
+        db=db,
+        config=config,
+        job_queue=job_queue,
+        gate=gate,
+        archive_publisher=archive_publisher,
+    )
 
     app, yookassa_processor = create_app(config=config, dp=dp, bot=bot, db=db)
 
@@ -141,6 +151,7 @@ def _init_application(config: Config) -> ApplicationState:
         gate=gate,
         app=app,
         yookassa_processor=yookassa_processor,
+        archive_publisher=archive_publisher,
     )
 
 

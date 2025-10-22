@@ -28,6 +28,7 @@ from aiogram.types import (
     ReplyKeyboardMarkup,
 )
 
+from archive import ArchivePayload, ArchivePublisher
 from config import Config
 from db import Database, ErrorLogRecord, GenerationJobRecord
 from generation_gate import GateDecision, GenerationRequestGate, normalize_prompt
@@ -1181,14 +1182,20 @@ def _format_job_message(job: GenerationJobRecord) -> str:
     return i18n.t("status.generic", status=job.status or i18n.t("errors.unknown"))
 
 
-async def _send_job_update(dp: Dispatcher, job: GenerationJobRecord) -> None:
+async def _send_job_update(
+    dp: Dispatcher, job: GenerationJobRecord, archive: Optional[ArchivePublisher] = None
+) -> None:
     try:
         reply_markup = _main_keyboard() if job.status in {"completed", "failed"} else None
         if job.status == "completed":
             inline_assets = _collect_inline_assets(job)
             if inline_assets:
                 responded = await _send_inline_assets(
-                    dp, job, inline_assets, reply_markup=reply_markup
+                    dp,
+                    job,
+                    inline_assets,
+                    archive,
+                    reply_markup=reply_markup,
                 )
                 if responded:
                     return
@@ -1196,7 +1203,11 @@ async def _send_job_update(dp: Dispatcher, job: GenerationJobRecord) -> None:
                 inline_image = _parse_inline_image(job.video_url)
                 if inline_image:
                     await _send_inline_image(
-                        dp, job, inline_image, reply_markup=reply_markup
+                        dp,
+                        job,
+                        inline_image,
+                        archive,
+                        reply_markup=reply_markup,
                     )
                     return
         await dp.bot.send_message(
@@ -1255,6 +1266,7 @@ async def _send_inline_image(
     dp: Dispatcher,
     job: GenerationJobRecord,
     inline_image: tuple[str, bytes],
+    archive: Optional[ArchivePublisher] = None,
     reply_markup: Optional[ReplyKeyboardMarkup | InlineKeyboardMarkup] = None,
 ) -> None:
     mime, payload = inline_image
@@ -1269,17 +1281,33 @@ async def _send_inline_image(
         caption=i18n.t("status.completed_photo"),
         reply_markup=reply_markup,
     )
+    if archive and mime.startswith("image/"):
+        archive.schedule(
+            ArchivePayload(
+                corr_id=job.corr_id or job.id,
+                prompt=job.prompt,
+                model_name=job.model,
+                username=job.username,
+                user_id=job.user_id,
+                content_type="image",
+                mime_type=mime,
+                file_bytes=payload,
+                file_size=len(payload),
+            )
+        )
 
 
 async def _send_inline_assets(
     dp: Dispatcher,
     job: GenerationJobRecord,
     assets: List[Dict[str, Any]],
+    archive: Optional[ArchivePublisher] = None,
     reply_markup: Optional[ReplyKeyboardMarkup | InlineKeyboardMarkup] = None,
 ) -> bool:
     responded = False
     sent_assets = False
     markup_sent = False
+    archived = False
     for index, asset in enumerate(assets):
         data_uri = asset.get("data_uri")
         if not isinstance(data_uri, str):
@@ -1338,6 +1366,29 @@ async def _send_inline_assets(
         markup_sent = True
         responded = True
         sent_assets = True
+        if (
+            archive
+            and not archived
+            and (mime.startswith("image/") or mime.startswith("video/"))
+        ):
+            content_type: Literal["image", "video"] = (
+                "video" if mime.startswith("video/") else "image"
+            )
+            archive.schedule(
+                ArchivePayload(
+                    corr_id=job.corr_id or job.id,
+                    prompt=job.prompt,
+                    model_name=job.model,
+                    username=job.username,
+                    user_id=job.user_id,
+                    content_type=content_type,
+                    mime_type=mime,
+                    file_bytes=payload,
+                    file_size=len(payload),
+                    duration_seconds=job.seconds if content_type == "video" else None,
+                )
+            )
+            archived = True
     return responded
 
 
@@ -2003,10 +2054,11 @@ def register_handlers(
     config: Config,
     job_queue: JobQueue,
     gate: GenerationRequestGate,
+    archive_publisher: ArchivePublisher,
 ) -> None:
     job_queue.register_notification_callback(
         name="telegram",
-        callback=lambda job: _send_job_update(dp, job),
+        callback=lambda job: _send_job_update(dp, job, archive_publisher),
     )
 
     dp.register_message_handler(

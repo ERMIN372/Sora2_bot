@@ -10,7 +10,7 @@ import logging
 import os
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Awaitable, Callable, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Awaitable, Callable, Dict, Iterable, List, Optional, Set, Tuple
 
 import gspread
 from google.oauth2.service_account import Credentials
@@ -139,6 +139,23 @@ _ERRORS_HEADERS = [
     "error_json",
 ]
 
+_ARCHIVE_HEADERS = [
+    "ts",
+    "corr_id",
+    "archive_status",
+    "channel_id",
+    "message_id",
+    "content_type",
+    "model_name",
+    "username",
+    "user_id",
+    "caption_len",
+    "file_size",
+    "duration_seconds",
+    "attempts",
+    "error_short",
+]
+
 _API_RETRY = dict(
     retry=retry_if_exception_type(gspread.exceptions.APIError),
     wait=wait_exponential(multiplier=0.5, max=8),
@@ -165,6 +182,9 @@ _USERS_STATE: Optional[_SheetState] = None
 _PAYMENTS_STATE: Optional[_SheetState] = None
 _JOBS_STATE: Optional[_SheetState] = None
 _ERRORS_STATE: Optional[_SheetState] = None
+_ARCHIVE_WORKSHEET: Optional[gspread.Worksheet] = None
+_ARCHIVE_LOCK: Lock = Lock()
+_ARCHIVE_SENT: Set[str] = set()
 
 
 async def init() -> None:
@@ -175,6 +195,7 @@ async def init() -> None:
     await _ensure_payments_state()
     await _ensure_jobs_state()
     await _ensure_errors_state()
+    await _ensure_archive_sheet()
 
 
 # ---------------------------------------------------------------------------
@@ -531,6 +552,25 @@ async def _ensure_errors_state() -> _SheetState:
             lock=Lock(),
         )
     return _ERRORS_STATE
+
+
+async def _ensure_archive_sheet() -> gspread.Worksheet:
+    global _ARCHIVE_WORKSHEET, _ARCHIVE_SENT
+    if _ARCHIVE_WORKSHEET is None:
+        title = os.getenv("GS_ARCHIVE_SHEET", "archive")
+        worksheet, _ = await _ensure_sheet(title, _ARCHIVE_HEADERS)
+        records = await _to_thread(worksheet.get_all_records, default_blank="")
+        sent: Set[str] = set()
+        for record in records:
+            status = str(record.get("archive_status", "")).strip().lower()
+            corr_id = str(record.get("corr_id", "")).strip()
+            if status == "sent" and corr_id:
+                sent.add(corr_id)
+        async with _ARCHIVE_LOCK:
+            if _ARCHIVE_WORKSHEET is None:
+                _ARCHIVE_WORKSHEET = worksheet
+                _ARCHIVE_SENT = sent
+    return _ARCHIVE_WORKSHEET
 
 
 async def list_worksheet_titles() -> List[str]:
@@ -1114,6 +1154,31 @@ async def append_error_record(**record: Any) -> None:
         state.next_row = row_index + 1
 
 
+async def append_archive_log(**record: Any) -> None:
+    worksheet = await _ensure_archive_sheet()
+    payload: Dict[str, Any] = {header: "" for header in _ARCHIVE_HEADERS}
+    for key, value in record.items():
+        if key in payload:
+            payload[key] = value
+    if not payload.get("ts"):
+        payload["ts"] = _now()
+    corr_id = str(payload.get("corr_id") or "").strip()
+    status = str(payload.get("archive_status") or "").strip().lower()
+    values = [payload.get(header, "") for header in _ARCHIVE_HEADERS]
+    async with _ARCHIVE_LOCK:
+        await _to_thread(_worksheet_append, worksheet, values)
+        if status == "sent" and corr_id:
+            _ARCHIVE_SENT.add(corr_id)
+
+
+async def archive_was_sent(corr_id: str) -> bool:
+    if not corr_id:
+        return False
+    await _ensure_archive_sheet()
+    async with _ARCHIVE_LOCK:
+        return corr_id in _ARCHIVE_SENT
+
+
 __all__ = [
     "init",
     "get_or_create_user",
@@ -1136,5 +1201,7 @@ __all__ = [
     "list_jobs_by_status",
     "count_jobs_by_status",
     "append_error_record",
+    "append_archive_log",
+    "archive_was_sent",
     "list_worksheet_titles",
 ]
