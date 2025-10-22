@@ -31,6 +31,9 @@ DEFAULT_PRODUCTS: Dict[str, Decimal] = {
     "sora_video": Decimal("5"),
 }
 
+VERTEX_MODEL_VEO31_PREVIEW = "veo-3.1-generate-preview"
+VERTEX_MODEL_GEMINI_IMAGE = "gemini-2.5-flash-image"
+
 
 @dataclass(frozen=True)
 class CreditPackage:
@@ -568,4 +571,6 @@ __all__ = [
     "RuntimeConfig",
     "CFG",
     "load_config",
+    "VERTEX_MODEL_VEO31_PREVIEW",
+    "VERTEX_MODEL_GEMINI_IMAGE",
 ]

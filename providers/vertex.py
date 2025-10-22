@@ -1,6 +1,8 @@
 """Clients for Google Vertex AI video and image generation."""
 from __future__ import annotations
 
+import base64
+import binascii
 import logging
 from typing import Any, Dict, Optional, Tuple
 from uuid import uuid4
@@ -158,6 +160,7 @@ class VertexGenerativeClient(BaseProviderClient):
             "prompt": prompt,
             "settings": settings or {},
             "payload": body,
+            "assets_meta": {},
         }
         self._pending[job_id] = (data, status_code, duration_ms, meta)
         size = (settings or {}).get("size")
@@ -192,7 +195,9 @@ class VertexGenerativeClient(BaseProviderClient):
                 duration_ms=0,
             )
         data, status_code, duration_ms, meta = record
-        status, error, assets = self._extract_result(data)
+        status, error, assets, assets_meta = self._extract_result(data)
+        if isinstance(meta, dict):
+            meta["assets_meta"] = assets_meta
         if status != "completed" and not error:
             error = "Не удалось создать. Ошибка неизвестна"
         return ProviderJobStatus(
@@ -200,21 +205,23 @@ class VertexGenerativeClient(BaseProviderClient):
             status=status,
             error=error,
             assets=assets,
-            data={"response": data, "meta": meta},
+            data={"response": data, "meta": meta, "assets_meta": assets_meta},
             status_code=status_code,
             duration_ms=duration_ms,
         )
 
-    def _extract_result(self, payload: Dict[str, Any]) -> Tuple[str, Optional[str], Dict[str, str]]:
+    def _extract_result(
+        self, payload: Dict[str, Any]
+    ) -> Tuple[str, Optional[str], Dict[str, str], Dict[str, Any]]:
         if not isinstance(payload, dict):
-            return "failed", "Пустой ответ провайдера", {}
+            return "failed", "Пустой ответ провайдера", {}, {}
         error = payload.get("error")
         if isinstance(error, dict):
             message = error.get("message") or error.get("status")
-            return "failed", f"{message}" if message else "Неизвестная ошибка", {}
+            return "failed", f"{message}" if message else "Неизвестная ошибка", {}, {}
         candidates = payload.get("candidates")
         if not candidates:
-            return "failed", "Пустой ответ модели", {}
+            return "failed", "Пустой ответ модели", {}, {}
         first = candidates[0] or {}
         content = first.get("content") if isinstance(first, dict) else {}
         parts = []
@@ -223,14 +230,15 @@ class VertexGenerativeClient(BaseProviderClient):
             if isinstance(raw_parts, list):
                 parts = [part for part in raw_parts if isinstance(part, dict)]
         assets: Dict[str, str] = {}
+        assets_meta: Dict[str, Any] = {}
         for part in parts:
             self._collect_assets(part, assets)
         if assets:
-            return "completed", None, assets
+            return "completed", None, assets, assets_meta
         finish_reason = first.get("finishReason") if isinstance(first, dict) else None
         if isinstance(finish_reason, str) and finish_reason:
-            return "failed", finish_reason, {}
-        return "failed", "Модель не вернула результат", {}
+            return "failed", finish_reason, {}, {}
+        return "failed", "Модель не вернула результат", {}, {}
 
     def _collect_assets(self, part: Dict[str, Any], assets: Dict[str, str]) -> None:
         media = part.get("media")
@@ -309,6 +317,100 @@ class VertexVideoClient(VertexGenerativeClient):
         config.setdefault("size", dimension)
         config.setdefault("duration", duration)
         return body
+
+
+class VertexVeoPreviewClient(VertexGenerativeClient):
+    """Generate Veo 3.1 inline preview videos using the predict endpoint."""
+
+    def _build_enqueue_payload(
+        self,
+        *,
+        prompt: str,
+        settings: Optional[Dict[str, Any]] = None,
+        payload: Optional[Dict[str, Any]] = None,
+        **_: Any,
+    ) -> Dict[str, Any]:
+        if payload is not None:
+            return payload
+        config = settings or {}
+        duration = int(config.get("duration_seconds") or config.get("duration") or 6)
+        if duration <= 0:
+            duration = 6
+        fps = int(config.get("fps") or 24)
+        if fps <= 0:
+            fps = 24
+        aspect_ratio = str(config.get("aspect_ratio") or "16:9")
+        generation_config = {
+            "duration_seconds": duration,
+            "fps": fps,
+            "aspect_ratio": aspect_ratio,
+        }
+        body = {
+            "instances": [
+                {
+                    "prompt": prompt,
+                    "generation_config": generation_config,
+                }
+            ]
+        }
+        config.setdefault("duration_seconds", duration)
+        config.setdefault("fps", fps)
+        config.setdefault("aspect_ratio", aspect_ratio)
+        return body
+
+    def _extract_result(
+        self, payload: Dict[str, Any]
+    ) -> Tuple[str, Optional[str], Dict[str, str], Dict[str, Any]]:
+        if not isinstance(payload, dict):
+            return "failed", "Пустой ответ провайдера", {}, {}
+        error = payload.get("error")
+        if isinstance(error, dict):
+            message = error.get("message") or error.get("status")
+            return "failed", message or "Неизвестная ошибка", {}, {}
+        predictions = payload.get("predictions")
+        if not isinstance(predictions, list) or not predictions:
+            return "failed", "Пустой ответ модели", {}, {}
+        assets: Dict[str, str] = {}
+        assets_meta: Dict[str, Any] = {}
+        for prediction in predictions:
+            if not isinstance(prediction, dict):
+                continue
+            encoded_raw = prediction.get("bytesBase64Encoded") or prediction.get("data")
+            if not encoded_raw:
+                continue
+            encoded = "".join(str(encoded_raw).split())
+            if not encoded:
+                continue
+            mime = (
+                prediction.get("mimeType")
+                or prediction.get("mime_type")
+                or "video/mp4"
+            )
+            key = f"inline_video_{len(assets)}"
+            assets[key] = f"data:{mime};base64,{encoded}"
+            meta: Dict[str, Any] = {"mime_type": mime, "source": "inline"}
+            duration_value = prediction.get("durationSeconds") or prediction.get(
+                "duration_seconds"
+            )
+            if isinstance(duration_value, (int, float)) and duration_value > 0:
+                meta["duration_seconds"] = float(duration_value)
+            fps_value = prediction.get("fps")
+            if isinstance(fps_value, (int, float)) and fps_value > 0:
+                meta["fps"] = float(fps_value)
+            try:
+                decoded = base64.b64decode(encoded, validate=True)
+            except (binascii.Error, ValueError):
+                decoded = None
+            if decoded is not None:
+                meta["size_bytes"] = len(decoded)
+            assets_meta[key] = meta
+        metadata = payload.get("metadata")
+        if isinstance(metadata, dict) and assets_meta:
+            for meta in assets_meta.values():
+                meta.setdefault("response_metadata", metadata)
+        if assets:
+            return "completed", None, assets, assets_meta
+        return "failed", "Модель не вернула результат", {}, {}
 
 
 class VertexImageClient(VertexGenerativeClient):
