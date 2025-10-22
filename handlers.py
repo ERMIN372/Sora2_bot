@@ -12,7 +12,8 @@ from dataclasses import dataclass, field
 import re
 import uuid
 from datetime import datetime
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, Dict, List, Literal, Optional, Tuple
+from urllib.parse import urlparse
 
 from aiogram import Bot, Dispatcher
 from aiogram.dispatcher import FSMContext
@@ -1189,27 +1190,42 @@ async def _send_job_update(
         reply_markup = _main_keyboard() if job.status in {"completed", "failed"} else None
         if job.status == "completed":
             inline_assets = _collect_inline_assets(job)
+            archived = False
             if inline_assets:
-                responded = await _send_inline_assets(
+                responded, inline_archived = await _send_inline_assets(
                     dp,
                     job,
                     inline_assets,
                     archive,
                     reply_markup=reply_markup,
                 )
+                archived = archived or inline_archived
                 if responded:
+                    if archive and not archived:
+                        payload = _build_remote_archive_payload(job)
+                        if payload:
+                            archive.schedule(payload)
                     return
             if job.video_url:
                 inline_image = _parse_inline_image(job.video_url)
                 if inline_image:
-                    await _send_inline_image(
+                    responded, image_archived = await _send_inline_image(
                         dp,
                         job,
                         inline_image,
                         archive,
                         reply_markup=reply_markup,
                     )
+                    archived = archived or image_archived
+                    if responded and archive and not archived:
+                        payload = _build_remote_archive_payload(job)
+                        if payload:
+                            archive.schedule(payload)
                     return
+            if archive and not archived:
+                payload = _build_remote_archive_payload(job)
+                if payload:
+                    archive.schedule(payload)
         await dp.bot.send_message(
             job.user_id,
             _format_job_message(job),
@@ -1268,7 +1284,7 @@ async def _send_inline_image(
     inline_image: tuple[str, bytes],
     archive: Optional[ArchivePublisher] = None,
     reply_markup: Optional[ReplyKeyboardMarkup | InlineKeyboardMarkup] = None,
-) -> None:
+) -> Tuple[bool, bool]:
     mime, payload = inline_image
     buffer = io.BytesIO(payload)
     suffix = mimetypes.guess_extension(mime) or ".jpg"
@@ -1281,6 +1297,7 @@ async def _send_inline_image(
         caption=i18n.t("status.completed_photo"),
         reply_markup=reply_markup,
     )
+    archived = False
     if archive and mime.startswith("image/"):
         archive.schedule(
             ArchivePayload(
@@ -1295,6 +1312,8 @@ async def _send_inline_image(
                 file_size=len(payload),
             )
         )
+        archived = True
+    return True, archived
 
 
 async def _send_inline_assets(
@@ -1303,7 +1322,7 @@ async def _send_inline_assets(
     assets: List[Dict[str, Any]],
     archive: Optional[ArchivePublisher] = None,
     reply_markup: Optional[ReplyKeyboardMarkup | InlineKeyboardMarkup] = None,
-) -> bool:
+) -> Tuple[bool, bool]:
     responded = False
     sent_assets = False
     markup_sent = False
@@ -1389,7 +1408,137 @@ async def _send_inline_assets(
                 )
             )
             archived = True
-    return responded
+    return responded, archived
+
+
+def _build_remote_archive_payload(job: GenerationJobRecord) -> Optional[ArchivePayload]:
+    url = (job.video_url or "").strip()
+    if not url:
+        return None
+    lowered = url.lower()
+    if lowered.startswith("[inline") or lowered.startswith("data:"):
+        return None
+    if not lowered.startswith("http://") and not lowered.startswith("https://"):
+        return None
+
+    extra = getattr(job, "extra", {}) or {}
+    meta = _select_remote_asset_meta(extra, url)
+
+    mime_hint = None
+    filename_hint = None
+    size_hint = None
+    duration_hint = None
+    if isinstance(meta, dict):
+        raw_mime = meta.get("mime") or meta.get("mime_type")
+        if isinstance(raw_mime, str) and raw_mime.strip():
+            mime_hint = raw_mime.strip()
+        raw_filename = meta.get("filename")
+        if isinstance(raw_filename, str) and raw_filename.strip():
+            filename_hint = raw_filename.strip()
+        size_hint = _coerce_int(meta.get("size_bytes") or meta.get("bytes"))
+        duration_hint = _coerce_int(meta.get("duration_seconds"))
+
+    content_type, resolved_mime = _infer_content_type(url, mime_hint, job)
+    filename = filename_hint or _guess_filename(url)
+    duration_seconds = None
+    if content_type == "video":
+        duration_seconds = job.seconds or duration_hint
+    file_size = size_hint if isinstance(size_hint, int) else None
+
+    return ArchivePayload(
+        corr_id=job.corr_id or job.id,
+        prompt=job.prompt,
+        model_name=job.model,
+        username=job.username,
+        user_id=job.user_id,
+        content_type=content_type,
+        mime_type=resolved_mime,
+        file_url=url,
+        file_size=file_size,
+        filename=filename,
+        duration_seconds=duration_seconds,
+    )
+
+
+def _select_remote_asset_meta(extra: Dict[str, Any], url: str) -> Optional[Dict[str, Any]]:
+    assets_meta = extra.get("assets_meta") if isinstance(extra, dict) else None
+    if not isinstance(assets_meta, list):
+        return None
+    normalized = url.strip()
+    fallback: Optional[Dict[str, Any]] = None
+    for entry in assets_meta:
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("inline"):
+            continue
+        entry_url = str(entry.get("url") or "").strip()
+        if not entry_url:
+            continue
+        if fallback is None:
+            fallback = entry
+        if entry_url == normalized:
+            return entry
+    return fallback
+
+
+def _coerce_int(value: Any) -> Optional[int]:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value if value >= 0 else None
+    if isinstance(value, float):
+        if value != value:  # NaN check
+            return None
+        candidate = int(round(value))
+        return candidate if candidate >= 0 else None
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        try:
+            candidate = int(float(text))
+        except ValueError:
+            return None
+        return candidate if candidate >= 0 else None
+    return None
+
+
+def _infer_content_type(
+    url: str, mime_hint: Optional[str], job: GenerationJobRecord
+) -> Tuple[Literal["image", "video"], Optional[str]]:
+    mime = (mime_hint or "").strip() or None
+    if mime:
+        lowered = mime.lower()
+        if lowered.startswith("image/"):
+            return "image", mime
+        if lowered.startswith("video/"):
+            return "video", mime
+    guessed, _ = mimetypes.guess_type(url)
+    if guessed:
+        lowered = guessed.lower()
+        if lowered.startswith("image/"):
+            return "image", guessed
+        if lowered.startswith("video/"):
+            return "video", guessed
+    path = urlparse(url).path.lower()
+    if path.endswith((".png", ".jpg", ".jpeg", ".webp", ".gif")):
+        return "image", guessed or mime or mimetypes.guess_type(path)[0]
+    if path.endswith((".mp4", ".mov", ".webm", ".mkv", ".avi", ".m4v")):
+        return "video", guessed or mime or mimetypes.guess_type(path)[0]
+    if job.seconds:
+        return "video", guessed or mime or "video/mp4"
+    return "image", guessed or mime or "image/png"
+
+
+def _guess_filename(url: str) -> Optional[str]:
+    parsed = urlparse(url)
+    path = parsed.path
+    if not path:
+        return None
+    candidate = path.rsplit("/", 1)[-1]
+    return candidate or None
 
 
 async def start_command(
