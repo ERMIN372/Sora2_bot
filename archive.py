@@ -86,6 +86,19 @@ class ArchivePublisher:
         if not payload.corr_id:
             log.debug("Skipping archive publish without corr_id")
             return
+        log.debug(
+            "Scheduling archive publish corr_id=%s type=%s source=%s size=%s",
+            payload.corr_id,
+            payload.content_type,
+            "bytes"
+            if payload.file_bytes is not None
+            else "path"
+            if payload.file_path
+            else "url"
+            if payload.file_url
+            else "unknown",
+            payload.file_size,
+        )
         asyncio.create_task(self._publish_safe(payload))
 
     async def _publish_safe(self, payload: ArchivePayload) -> None:
@@ -107,10 +120,15 @@ class ArchivePublisher:
                 return
             self._inflight.add(corr_id)
 
+        message = None
+        attempts = 0
+        final_status = "pending"
         try:
+            log.debug("Archive publish started corr_id=%s channel_id=%s", corr_id, self._channel_id)
             if corr_id in self._sent_cache or await self._db.archive_was_sent(corr_id):
                 self._sent_cache.add(corr_id)
                 log.debug("Archive already sent corr_id=%s", corr_id)
+                final_status = "skipped_already_sent"
                 await self._log_attempt(
                     payload,
                     archive_status="skipped",
@@ -120,10 +138,19 @@ class ArchivePublisher:
                 return
 
             size = payload.resolved_file_size()
+            log.debug(
+                "Archive payload resolved size corr_id=%s size=%s has_bytes=%s has_path=%s has_url=%s",
+                corr_id,
+                size,
+                payload.file_bytes is not None,
+                bool(payload.file_path),
+                bool(payload.file_url),
+            )
             if size is not None and size > _MAX_TELEGRAM_FILE_BYTES:
                 log.warning(
                     "Archive payload too large corr_id=%s size=%s", corr_id, size
                 )
+                final_status = "failed_too_large"
                 await self._log_attempt(
                     payload,
                     archive_status="failed",
@@ -132,7 +159,10 @@ class ArchivePublisher:
                 )
                 return
 
-            if not await self._ensure_admin_access():
+            can_publish = await self._ensure_admin_access()
+            log.debug("Archive admin access corr_id=%s can_publish=%s", corr_id, can_publish)
+            if not can_publish:
+                final_status = "failed_no_admin"
                 await self._log_attempt(
                     payload,
                     archive_status="failed",
@@ -142,22 +172,34 @@ class ArchivePublisher:
                 return
 
             caption, caption_len = self._build_caption(payload)
-            message = None
-            attempts = 0
             error_short: Optional[str] = None
+
+            log.debug(
+                "Archive publish sending corr_id=%s caption_len=%s attempts=%s",
+                corr_id,
+                caption_len,
+                _RETRY_ATTEMPTS,
+            )
 
             for attempt in range(1, _RETRY_ATTEMPTS + 1):
                 attempts = attempt
                 try:
+                    log.debug("Archive send attempt corr_id=%s attempt=%s", corr_id, attempt)
                     message = await self._send_media(payload, caption)
                 except RetryAfter as exc:
                     error_short = "429"
                     delay = exc.timeout or (_RETRY_BASE_DELAY * math.pow(2, attempt - 1))
+                    log.warning(
+                        "Archive publish rate limited corr_id=%s attempt=%s delay=%s", corr_id, attempt, delay
+                    )
                     await asyncio.sleep(delay)
                     continue
                 except (NetworkError, TelegramServerError, aiohttp.ClientError, asyncio.TimeoutError):
                     error_short = "timeout"
                     delay = _RETRY_BASE_DELAY * math.pow(2, attempt - 1)
+                    log.warning(
+                        "Archive publish network error corr_id=%s attempt=%s retry_in=%s", corr_id, attempt, delay
+                    )
                     await asyncio.sleep(delay)
                     continue
                 except (BadRequest, Unauthorized, ChatNotFound, CantTalkWithBot) as exc:
@@ -185,6 +227,7 @@ class ArchivePublisher:
 
             if message:
                 self._sent_cache.add(corr_id)
+                final_status = "sent"
                 await self._log_attempt(
                     payload,
                     archive_status="sent",
@@ -194,6 +237,7 @@ class ArchivePublisher:
                     error_short=error_short,
                 )
             else:
+                final_status = "failed"
                 await self._log_attempt(
                     payload,
                     archive_status="failed",
@@ -202,6 +246,9 @@ class ArchivePublisher:
                     error_short=error_short or "retry_exhausted",
                 )
         finally:
+            log.debug(
+                "Archive publish finished corr_id=%s status=%s attempts=%s", corr_id, final_status, attempts
+            )
             async with self._lock:
                 self._inflight.discard(corr_id)
 
@@ -212,6 +259,7 @@ class ArchivePublisher:
             if self._bot_id is None:
                 me = await self._bot.get_me()
                 self._bot_id = me.id
+                log.debug("Fetched bot identity for archive publishing bot_id=%s", self._bot_id)
             member = await self._bot.get_chat_member(self._channel_id, self._bot_id)
             status = getattr(member, "status", "")
             self._can_publish = status in {"administrator", "creator"}
@@ -237,6 +285,9 @@ class ArchivePublisher:
         data, filename = await self._prepare_input(payload)
         input_file = InputFile(data, filename=filename)
         if payload.content_type == "video":
+            log.debug(
+                "Sending archive video corr_id=%s filename=%s duration=%s", payload.corr_id, filename, payload.duration_seconds
+            )
             return await self._bot.send_video(
                 self._channel_id,
                 input_file,
@@ -244,6 +295,7 @@ class ArchivePublisher:
                 parse_mode="MarkdownV2",
                 duration=payload.duration_seconds,
             )
+        log.debug("Sending archive document corr_id=%s filename=%s", payload.corr_id, filename)
         return await self._bot.send_document(
             self._channel_id,
             input_file,
@@ -254,19 +306,33 @@ class ArchivePublisher:
     async def _prepare_input(self, payload: ArchivePayload) -> tuple[io.BytesIO, str]:
         filename = payload.filename or self._build_filename(payload)
         if payload.file_bytes is not None:
+            log.debug("Preparing archive payload from bytes corr_id=%s filename=%s", payload.corr_id, filename)
             buffer = io.BytesIO(payload.file_bytes)
             buffer.seek(0)
             return buffer, filename
         if payload.file_path:
+            log.debug(
+                "Preparing archive payload from path corr_id=%s path=%s filename=%s",
+                payload.corr_id,
+                payload.file_path,
+                filename,
+            )
             data = await asyncio.to_thread(self._read_file, payload.file_path)
             return io.BytesIO(data), filename
         if payload.file_url:
+            log.debug(
+                "Preparing archive payload from url corr_id=%s url=%s filename=%s",
+                payload.corr_id,
+                payload.file_url,
+                filename,
+            )
             data = await self._download(payload.file_url)
             return io.BytesIO(data), filename
         raise RuntimeError("Archive payload has no source data")
 
     async def _download(self, url: str) -> bytes:
         timeout = aiohttp.ClientTimeout(total=60)
+        log.debug("Downloading archive payload url=%s", url)
         async with aiohttp.ClientSession(timeout=timeout) as session:
             async with session.get(url) as response:
                 response.raise_for_status()
