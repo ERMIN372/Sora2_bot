@@ -167,6 +167,7 @@ class Config:
     yookassa_send_receipts: bool = False
     subscription_chat_id: Optional[str] = None
     support_chat_id: Optional[int] = None
+    archive_channel_id: Optional[int] = None
     yookassa_poll_interval: int = 60
     google_sheet_id: str = ""
     google_service_account: Dict[str, object] = field(default_factory=dict)
@@ -499,6 +500,7 @@ def load_config() -> Config:
         yookassa_send_receipts=_get_env_bool("YOOKASSA_SEND_RECEIPTS", Config.yookassa_send_receipts),
         subscription_chat_id=os.getenv("SUBSCRIPTION_CHAT_ID"),
         support_chat_id=_get_optional_int(os.getenv("SUPPORT_CHAT_ID")),
+        archive_channel_id=_get_optional_int(os.getenv("ARCHIVE_CHANNEL_ID")),
         yookassa_poll_interval=_get_env_int("YOOKASSA_POLL_INTERVAL", Config.yookassa_poll_interval),
         payments_read_only=_get_env_bool("PAYMENTS_READ_ONLY", Config.payments_read_only),
         terms_url=os.getenv("TERMS_URL", Config.terms_url),
