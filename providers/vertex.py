@@ -7,8 +7,24 @@ import logging
 from typing import Any, Dict, List, Optional, Tuple
 from uuid import uuid4
 
+from dataclasses import dataclass
+
 from google.auth.transport.requests import AuthorizedSession
 from google.oauth2.service_account import Credentials
+
+try:  # Optional google-genai client
+    from google.genai import Client as _GenAIClient
+    from google.genai import models as _genai_models
+    from google.genai import types as _genai_types
+except ImportError:  # pragma: no cover - optional dependency
+    _GenAIClient = None
+    _genai_models = None
+    _genai_types = None
+
+try:  # Optional legacy Vertex SDK
+    from vertexai.preview.generative_models import GenerativeModel as _VertexGenerativeModel
+except ImportError:  # pragma: no cover - optional dependency
+    _VertexGenerativeModel = None
 
 from config import Config
 
@@ -21,6 +37,26 @@ from .base import (
 from .google_auth import ServiceAccountTokenProvider
 
 log = logging.getLogger(__name__)
+
+
+@dataclass(slots=True)
+class _VeoSanitisedConfig:
+    config_fields: Dict[str, Any]
+    accepted_args: List[str]
+    rejected_args: List[str]
+    validation_errors: List[str]
+    user_messages: List[str]
+    payload_preview: Dict[str, Any]
+    reference_inline: Optional[Dict[str, Any]]
+
+
+@dataclass(slots=True)
+class _VeoRequestPlan:
+    client: str
+    body: Dict[str, Any]
+    accepted_args: List[str]
+    rejected_args: List[str]
+    payload_preview: Dict[str, Any]
 
 
 def list_models(config: Config) -> Tuple[bool, str]:
@@ -337,6 +373,19 @@ _VEO_RESOLUTION_ALIASES = {
 _VEO_TRUE_VALUES = {"1", "true", "yes", "on", "да"}
 _VEO_FALSE_VALUES = {"0", "false", "no", "off", "нет"}
 
+_GOOGLE_SCOPES = ["https://www.googleapis.com/auth/cloud-platform"]
+
+_VEO_MODEL_ALIASES = {
+    "veo-3.0-generate-001": "veo-3.0",
+    "veo-3.0": "veo-3.0",
+    "veo-3": "veo-3.0",
+    "veo3": "veo-3.0",
+    "veo-3.1-generate-preview": "veo-3.1",
+    "veo-3.1": "veo-3.1",
+    "veo3.1": "veo-3.1",
+    "veo31": "veo-3.1",
+}
+
 
 def _coerce_int(value: Any, *, field: str, positive: bool = True, errors: List[str]) -> Optional[int]:
     if value is None:
@@ -399,6 +448,156 @@ def _normalise_resolution(config: Dict[str, Any]) -> Optional[str]:
             return mapped
     return None
 
+
+def _detect_veo_client() -> str:
+    if _GenAIClient and _genai_models and _genai_types:
+        return "genai"
+    if _VertexGenerativeModel:
+        return "vertexai"
+    return "rest"
+
+
+def _normalise_veo_model(model: str) -> str:
+    if not isinstance(model, str):
+        return model
+    key = model.strip()
+    return _VEO_MODEL_ALIASES.get(key, key)
+
+
+def _prepare_veo_config(config: Dict[str, Any]) -> _VeoSanitisedConfig:
+    provided_keys = {
+        key for key in config.keys() if isinstance(key, str)
+    }
+    consumed_keys: set[str] = set()
+    config_fields: Dict[str, Any] = {}
+    accepted_args: List[str] = []
+    validation_errors: List[str] = []
+    user_messages: List[str] = []
+    payload_preview: Dict[str, Any] = {}
+
+    unsupported_map = {
+        "fps": "fps недоступен для Veo",
+        "width": "width/height не поддерживаются, выбери 16:9 или 9:16 и 720p/1080p",
+        "height": "width/height не поддерживаются, выбери 16:9 или 9:16 и 720p/1080p",
+        "parameters": "Поле parameters недоступно для Veo",
+        "generation_config": "Поле generation_config недоступно для Veo",
+        "generationConfig": "Поле generation_config недоступно для Veo",
+    }
+    for key, message in unsupported_map.items():
+        if key in config:
+            consumed_keys.add(key)
+            if message not in user_messages:
+                user_messages.append(message)
+
+    duration_value: Optional[int] = None
+    for key in ("durationSeconds", "duration_seconds", "duration"):
+        if key in config:
+            consumed_keys.add(key)
+            duration_value = _coerce_int(
+                config.get(key), field="duration", positive=True, errors=validation_errors
+            )
+            break
+    if duration_value is None:
+        duration_value = 6
+    if duration_value is not None:
+        if duration_value not in _VEO_ALLOWED_DURATIONS:
+            validation_errors.append(f"duration={duration_value}")
+        else:
+            config_fields["duration_seconds"] = duration_value
+            payload_preview["durationSeconds"] = duration_value
+            accepted_args.append("duration_seconds")
+
+    for key in ("aspectRatio", "aspect_ratio", "orientation", "size"):
+        if key in config:
+            consumed_keys.add(key)
+    aspect_ratio_value = _normalise_aspect_ratio(config)
+    if aspect_ratio_value:
+        if aspect_ratio_value not in _VEO_ALLOWED_ASPECT_RATIOS:
+            validation_errors.append(f"aspectRatio={aspect_ratio_value}")
+        else:
+            config_fields["aspect_ratio"] = aspect_ratio_value
+            payload_preview["aspectRatio"] = aspect_ratio_value
+            accepted_args.append("aspect_ratio")
+    else:
+        config_fields.setdefault("aspect_ratio", "16:9")
+        payload_preview.setdefault("aspectRatio", "16:9")
+        if "aspect_ratio" not in accepted_args:
+            accepted_args.append("aspect_ratio")
+
+    for key in ("resolution", "quality"):
+        if key in config:
+            consumed_keys.add(key)
+    resolution_value = _normalise_resolution(config)
+    if resolution_value:
+        if resolution_value not in _VEO_ALLOWED_RESOLUTIONS:
+            validation_errors.append(f"resolution={resolution_value}")
+        else:
+            config_fields["resolution"] = resolution_value
+            payload_preview["resolution"] = resolution_value
+            accepted_args.append("resolution")
+    else:
+        config_fields.setdefault("resolution", "720p")
+        payload_preview.setdefault("resolution", "720p")
+        if "resolution" not in accepted_args:
+            accepted_args.append("resolution")
+
+    generate_audio_value: Optional[bool] = None
+    for key in ("generateAudio", "generate_audio", "audio", "sound"):
+        if key in config:
+            consumed_keys.add(key)
+            generate_audio_value = _coerce_bool(config.get(key))
+            if generate_audio_value is None:
+                validation_errors.append("generateAudio=invalid")
+            break
+    if generate_audio_value is not None:
+        config_fields["generate_audio"] = generate_audio_value
+        payload_preview["generateAudio"] = generate_audio_value
+        accepted_args.append("generate_audio")
+
+    if "seed" in config:
+        consumed_keys.add("seed")
+        seed_value = _coerce_int(
+            config.get("seed"), field="seed", positive=False, errors=validation_errors
+        )
+        if seed_value is not None:
+            config_fields["seed"] = seed_value
+            payload_preview["seed"] = seed_value
+            accepted_args.append("seed")
+
+    sample_value: Optional[int] = None
+    for key in ("sampleCount", "sample_count", "samples"):
+        if key in config:
+            consumed_keys.add(key)
+            sample_value = _coerce_int(
+                config.get(key), field="sampleCount", positive=True, errors=validation_errors
+            )
+            break
+    if sample_value is not None and sample_value > 0:
+        config_fields["number_of_videos"] = sample_value
+        payload_preview["sampleCount"] = sample_value
+        accepted_args.append("number_of_videos")
+
+    reference_inline = config.get("reference_inline_data")
+    if isinstance(reference_inline, dict):
+        consumed_keys.add("reference_inline_data")
+        if reference_inline.get("data"):
+            payload_preview["hasReference"] = True
+        else:
+            reference_inline = None
+    else:
+        reference_inline = None
+
+    rejected_args = sorted(provided_keys - consumed_keys)
+
+    return _VeoSanitisedConfig(
+        config_fields=config_fields,
+        accepted_args=sorted(set(accepted_args)),
+        rejected_args=rejected_args,
+        validation_errors=sorted(set(validation_errors)),
+        user_messages=user_messages,
+        payload_preview=payload_preview,
+        reference_inline=reference_inline,
+    )
 
 def _build_veo_parameters(
     config: Dict[str, Any],
@@ -518,10 +717,160 @@ def _build_veo_parameters(
     return parameters, sorted(set(invalid_keys)), sorted(set(validation_errors)), has_reference_inline
 
 
+def veo_request(
+    *,
+    prompt: str,
+    settings: Optional[Dict[str, Any]],
+    model: str,
+    config: Config,
+    provider_name: str,
+) -> _VeoRequestPlan:
+    raw_settings = settings or {}
+    sanitised = _prepare_veo_config(raw_settings)
+    model_name = _normalise_veo_model(model)
+
+    if sanitised.user_messages:
+        raise ProviderAPIError(
+            provider=provider_name,
+            status_code=0,
+            message=sanitised.user_messages[0],
+            error_type="invalid_request",
+        )
+
+    if sanitised.validation_errors:
+        raise ProviderAPIError(
+            provider=provider_name,
+            status_code=0,
+            message=(
+                "Неверные параметры для Veo. Длительность поддерживается 4, 6 или 8 секунд; "
+                "соотношение сторон 16:9 или 9:16; разрешение 720p или 1080p."
+            ),
+            error_type="invalid_request",
+        )
+
+    selected_client = _detect_veo_client()
+
+    if selected_client == "genai" and _GenAIClient and _genai_types and _genai_models:
+        if not config.google_service_account:
+            raise ProviderAPIError(
+                provider=provider_name,
+                status_code=0,
+                message="Не настроен сервисный аккаунт Google для Veo",
+                error_type="config",
+            )
+        try:
+            credentials = Credentials.from_service_account_info(
+                config.google_service_account,
+                scopes=_GOOGLE_SCOPES,
+            )
+        except Exception as exc:  # pragma: no cover - auth failure
+            raise ProviderAPIError(
+                provider=provider_name,
+                status_code=0,
+                message="Не удалось создать учетные данные для Veo",
+                error_type="config",
+                provider_message=str(exc),
+            ) from exc
+
+        client = _GenAIClient(
+            vertexai=True,
+            project=config.gcp_project_id,
+            location=config.vertex_location,
+            credentials=credentials,
+        )
+
+        config_kwargs = dict(sanitised.config_fields)
+
+        reference_inline = sanitised.reference_inline
+        if reference_inline and _genai_types:
+            data = reference_inline.get("data")
+            if isinstance(data, str):
+                payload = "".join(data.split())
+                try:
+                    binary = base64.b64decode(payload, validate=True)
+                except (binascii.Error, ValueError):
+                    binary = None
+                if binary:
+                    image_kwargs = {"image_bytes": binary}
+                    mime = reference_inline.get("mime_type") or reference_inline.get("mimeType")
+                    if isinstance(mime, str) and mime:
+                        image_kwargs["mime_type"] = mime
+                    reference_image = _genai_types.VideoGenerationReferenceImage(
+                        image=_genai_types.Image(**image_kwargs)
+                    )
+                    config_kwargs.setdefault("reference_images", []).append(reference_image)
+
+        if config_kwargs:
+            config_obj = _genai_types.GenerateVideosConfig(**config_kwargs)
+        else:
+            config_obj = None
+
+        parameters = _genai_types._GenerateVideosParameters(
+            model=model_name,
+            prompt=prompt,
+            config=config_obj,
+        )
+        request_dict = _genai_models._GenerateVideosParameters_to_vertex(
+            client._api_client, parameters
+        )
+        request_dict.pop("_url", None)
+        body = request_dict
+
+    elif selected_client == "vertexai" and _VertexGenerativeModel:
+        instance = {
+            "prompt": prompt,
+        }
+        if sanitised.config_fields.get("duration_seconds") is not None:
+            instance["durationSeconds"] = sanitised.config_fields["duration_seconds"]
+        if sanitised.config_fields.get("aspect_ratio"):
+            instance["aspectRatio"] = sanitised.config_fields["aspect_ratio"]
+        if sanitised.config_fields.get("resolution"):
+            instance["resolution"] = sanitised.config_fields["resolution"]
+        if sanitised.config_fields.get("generate_audio") is not None:
+            instance["generateAudio"] = sanitised.config_fields["generate_audio"]
+        if sanitised.config_fields.get("seed") is not None:
+            instance["seed"] = sanitised.config_fields["seed"]
+        if sanitised.config_fields.get("number_of_videos"):
+            instance["sampleCount"] = sanitised.config_fields["number_of_videos"]
+        body = {"instances": [instance]}
+    else:
+        instance = {"prompt": prompt}
+        if sanitised.config_fields.get("duration_seconds") is not None:
+            instance["durationSeconds"] = sanitised.config_fields["duration_seconds"]
+        if sanitised.config_fields.get("aspect_ratio"):
+            instance["aspectRatio"] = sanitised.config_fields["aspect_ratio"]
+        if sanitised.config_fields.get("resolution"):
+            instance["resolution"] = sanitised.config_fields["resolution"]
+        if sanitised.config_fields.get("generate_audio") is not None:
+            instance["generateAudio"] = sanitised.config_fields["generate_audio"]
+        if sanitised.config_fields.get("seed") is not None:
+            instance["seed"] = sanitised.config_fields["seed"]
+        if sanitised.config_fields.get("number_of_videos"):
+            instance["sampleCount"] = sanitised.config_fields["number_of_videos"]
+        body = {"instances": [instance]}
+
+    log.info(
+        "vertex.veo.request selected_client=%s accepted_args=%s rejected_args=%s payload_preview=%s",
+        selected_client,
+        sanitised.accepted_args,
+        sanitised.rejected_args,
+        sanitised.payload_preview,
+    )
+
+    return _VeoRequestPlan(
+        client=selected_client,
+        body=body,
+        accepted_args=sanitised.accepted_args,
+        rejected_args=sanitised.rejected_args,
+        payload_preview=sanitised.payload_preview,
+    )
+
+
 class VertexVideoClient(VertexGenerativeClient):
     """Generate video clips using Veo models on Vertex AI."""
 
-    _ALLOWED_ROOT_KEYS = {"contents", "parameters"}
+    def _jobs_path(self) -> str:
+        return f"/{self._model}:predictLongRunning"
 
     def _build_enqueue_payload(
         self,
@@ -533,94 +882,79 @@ class VertexVideoClient(VertexGenerativeClient):
     ) -> Dict[str, Any]:
         if payload is not None:
             return payload
-        config = settings or {}
-        parameters, invalid_keys, validation_errors, has_reference = _build_veo_parameters(
-            config
+        plan = veo_request(
+            prompt=prompt,
+            settings=settings,
+            model=self._model,
+            config=self._config,
+            provider_name=self.provider_name,
         )
+        return plan.body
 
-        if invalid_keys:
-            log.warning(
-                "vertex.veo.invalid_params invalid_keys=%s settings_keys=%s",
-                invalid_keys,
-                sorted(config.keys()),
-            )
-            raise ProviderAPIError(
-                provider=self.provider_name,
-                status_code=0,
-                message=(
-                    "Неверные параметры для Veo. Длительность поддерживается 4, 6 или 8 секунд; "
-                    "соотношение сторон 16:9 или 9:16; разрешение 720p или 1080p."
-                ),
-                error_type="invalid_request",
-            )
-
-        if validation_errors:
-            log.warning(
-                "vertex.veo.validation_error errors=%s settings=%s",
-                validation_errors,
-                sorted(config.keys()),
-            )
-            raise ProviderAPIError(
-                provider=self.provider_name,
-                status_code=0,
-                message=(
-                    "Неверные параметры для Veo. Длительность поддерживается 4, 6 или 8 секунд; "
-                    "соотношение сторон 16:9 или 9:16; разрешение 720p или 1080p."
-                ),
-                error_type="invalid_request",
+    async def enqueue_job(
+        self,
+        *,
+        prompt: str,
+        settings: Optional[Dict[str, Any]] = None,
+        payload: Optional[Dict[str, Any]] = None,
+        idempotency_key: Optional[str] = None,
+        **kwargs: Any,
+    ) -> ProviderJobSubmission:
+        if payload is not None:
+            return await super().enqueue_job(
+                prompt=prompt,
+                settings=settings,
+                payload=payload,
+                idempotency_key=idempotency_key,
+                **kwargs,
             )
 
-        reference = config.get("reference_inline_data")
-        parts = [{"text": prompt}]
-        if has_reference:
-            inline = {
-                "mime_type": reference.get("mime_type", "image/jpeg"),
-                "data": reference.get("data"),
-            }
-            parts.append({"inline_data": inline})
-
-        body = {
-            "contents": [
-                {
-                    "role": "user",
-                    "parts": parts,
-                }
-            ],
-            "parameters": parameters,
-        }
-
-        extra_root_keys = sorted(set(body.keys()) - self._ALLOWED_ROOT_KEYS)
-        if extra_root_keys:
-            log.warning(
-                "vertex.veo.invalid_payload root_keys=%s payload_preview=%s",
-                extra_root_keys,
-                {"parameters": parameters},
-            )
-            raise ProviderAPIError(
-                provider=self.provider_name,
-                status_code=0,
-                message=(
-                    "Неверные параметры для Veo. Длительность поддерживается 4, 6 или 8 секунд; "
-                    "соотношение сторон 16:9 или 9:16; разрешение 720p или 1080p."
-                ),
-                error_type="invalid_request",
-            )
-
-        log.info(
-            "vertex.veo.payload_preview invalid_keys=%s parameters=%s has_reference=%s",
-            invalid_keys,
-            {
-                "durationSeconds": parameters.get("durationSeconds"),
-                "aspectRatio": parameters.get("aspectRatio"),
-                "resolution": parameters.get("resolution"),
-                "generateAudio": parameters.get("generateAudio"),
-                "seed": parameters.get("seed"),
-                "sampleCount": parameters.get("sampleCount"),
+        plan = veo_request(
+            prompt=prompt,
+            settings=settings,
+            model=self._model,
+            config=self._config,
+            provider_name=self.provider_name,
+        )
+        data, status_code, duration_ms = await self._request(
+            "POST",
+            self._jobs_path(),
+            json=plan.body,
+            idempotency_key=idempotency_key,
+        )
+        job_id = idempotency_key or str(uuid4())
+        meta = {
+            "prompt": prompt,
+            "settings": settings or {},
+            "payload": plan.body,
+            "assets_meta": {},
+            "veo": {
+                "selected_client": plan.client,
+                "accepted_args": plan.accepted_args,
+                "rejected_args": plan.rejected_args,
+                "payload_preview": plan.payload_preview,
             },
-            has_reference,
+        }
+        self._pending[job_id] = (data, status_code, duration_ms, meta)
+        size = (settings or {}).get("size")
+        duration = (settings or {}).get("duration")
+        log.info(
+            "vertex.call corr_id=%s provider=%s model=%s size=%s duration=%s status=%s latency_ms=%s client=%s",
+            idempotency_key or job_id,
+            self.provider_name,
+            self._model,
+            size or "",
+            duration or "",
+            status_code,
+            duration_ms,
+            plan.client,
         )
-
-        return body
+        return ProviderJobSubmission(
+            job_id=job_id,
+            status_code=status_code,
+            duration_ms=duration_ms,
+            data=data,
+        )
 
 
 class VertexVeoPreviewClient(VertexGenerativeClient):

@@ -78,7 +78,7 @@ def _init_application(config: Config) -> ApplicationState:
         veo3_client = VertexVideoClient(
             config=config,
             model="veo-3.0-generate-001",
-            method="generateContent",
+            method="predictLongRunning",
             provider_name="veo3",
         )
         veo31_client = VertexVeoPreviewClient(
