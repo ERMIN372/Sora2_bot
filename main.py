@@ -13,12 +13,24 @@ from fastapi import FastAPI
 import uvicorn
 
 from app_server import YooKassaProcessor, create_app, poll_pending_payments
-from config import CFG, Config, load_config
+from config import (
+    CFG,
+    Config,
+    VERTEX_MODEL_GEMINI_IMAGE,
+    VERTEX_MODEL_VEO31_PREVIEW,
+    load_config,
+)
 from db import Database
 from handlers import register_handlers
 from jobs import JobQueue
 from healthcheck import run_startup_healthcheck
-from providers import BaseProviderClient, SoraClient, VertexImageClient, VertexVideoClient
+from providers import (
+    BaseProviderClient,
+    SoraClient,
+    VertexImageClient,
+    VertexVeoPreviewClient,
+    VertexVideoClient,
+)
 import yookassa_client
 
 logging.basicConfig(level=logging.INFO)
@@ -64,15 +76,15 @@ def _init_application(config: Config) -> ApplicationState:
             method="generateContent",
             provider_name="veo3",
         )
-        veo31_client = VertexVideoClient(
+        veo31_client = VertexVeoPreviewClient(
             config=config,
-            model="veo-3.1-generate-preview",
-            method="generateContent",
+            model=VERTEX_MODEL_VEO31_PREVIEW,
+            method="predict",
             provider_name="veo3.1",
         )
         gemini_client = VertexImageClient(
             config=config,
-            model="gemini-2.5-flash-image",
+            model=VERTEX_MODEL_GEMINI_IMAGE,
             method="generateContent",
             provider_name="gemini-image",
         )
@@ -82,8 +94,9 @@ def _init_application(config: Config) -> ApplicationState:
                 "veo-3.0-generate-001": veo3_client,
                 "veo3.1": veo31_client,
                 "veo31": veo31_client,
-                "veo-3.1-generate-preview": veo31_client,
+                VERTEX_MODEL_VEO31_PREVIEW: veo31_client,
                 "gemini-image": gemini_client,
+                VERTEX_MODEL_GEMINI_IMAGE: gemini_client,
             }
         )
 

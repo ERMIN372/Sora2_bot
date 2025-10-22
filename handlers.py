@@ -51,10 +51,17 @@ SIZE_OPTIONS: Dict[str, str] = {
     "horizontal": "1280x720",
 }
 
+ASPECT_RATIO_OPTIONS: Dict[str, str] = {
+    "vertical": "9:16",
+    "horizontal": "16:9",
+}
+
 SIZE_LABEL_KEYS: Dict[str, str] = {
     "vertical": "chips.vertical",
     "horizontal": "chips.horizontal",
 }
+
+MAX_INLINE_VIDEO_BYTES = 9 * 1024 * 1024
 
 MAIN_MENU_BUTTONS = {
     i18n.t("buttons.generate_text"),
@@ -96,6 +103,7 @@ class OrderContext:
     image_file_id: Optional[str] = None
     created_at: float = field(default_factory=time.time)
     corr_id: Optional[str] = None
+    aspect_ratio: Optional[str] = None
 
     def key(self) -> str:
         parts = [
@@ -105,6 +113,7 @@ class OrderContext:
             self.image_file_id or "",
             self.size,
             self.model,
+            self.aspect_ratio or "",
         ]
         return "|".join(parts)
 
@@ -267,6 +276,7 @@ class UserSession:
     """Transient per-user settings and cached context."""
 
     last_size: str = SIZE_OPTIONS["horizontal"]
+    last_aspect_ratio: str = ASPECT_RATIO_OPTIONS["horizontal"]
     pending_order: Optional[OrderContext] = None
     awaiting_payment: bool = False
     last_launch_key: Optional[str] = None
@@ -455,6 +465,7 @@ def _create_order(
     image_file_id: Optional[str] = None,
 ) -> OrderContext:
     size = session.last_size if include_size else ""
+    aspect_ratio = session.last_aspect_ratio if include_size else None
     credits_cost = config.get_product_credits(product)
     if credits_cost <= 0:
         credits_cost = config.generation_cost_credits
@@ -469,6 +480,7 @@ def _create_order(
         credits_cost=credits_cost,
         model_label=model_label or _resolve_model_label(model, config),
         image_file_id=image_file_id,
+        aspect_ratio=aspect_ratio,
     )
 
 
@@ -822,6 +834,10 @@ async def _launch_order(
     provider_settings: Dict[str, Any] = {}
     if order.category == "video":
         provider_settings["duration"] = 6
+        provider_settings.setdefault("duration_seconds", 6)
+        provider_settings.setdefault("fps", 24)
+        if order.aspect_ratio:
+            provider_settings.setdefault("aspect_ratio", order.aspect_ratio)
     if order.image_file_id:
         inline_data = await build_inline_data_from_telegram_file(
             callback.message.bot, order.image_file_id
@@ -976,6 +992,11 @@ async def _launch_order(
 def _format_job_message(job: GenerationJobRecord) -> str:
     if job.status == "completed":
         if job.video_url:
+            video_payload = _parse_inline_video(job.video_url)
+            if video_payload:
+                if len(video_payload[1]) > MAX_INLINE_VIDEO_BYTES:
+                    return i18n.t("status.inline_video_too_large")
+                return i18n.t("status.completed_file")
             if _parse_inline_image(job.video_url):
                 return i18n.t("status.completed_file")
             return i18n.t("status.completed_url", url=job.video_url)
@@ -990,6 +1011,10 @@ def _format_job_message(job: GenerationJobRecord) -> str:
 async def _send_job_update(dp: Dispatcher, job: GenerationJobRecord) -> None:
     try:
         if job.status == "completed" and job.video_url:
+            inline_video = _parse_inline_video(job.video_url)
+            if inline_video:
+                await _send_inline_video(dp, job, inline_video)
+                return
             inline_image = _parse_inline_image(job.video_url)
             if inline_image:
                 await _send_inline_image(dp, job, inline_image)
@@ -1020,6 +1045,27 @@ def _parse_inline_image(data_uri: Optional[str]) -> Optional[tuple[str, bytes]]:
     return mime, payload
 
 
+def _parse_inline_video(data_uri: Optional[str]) -> Optional[tuple[str, bytes]]:
+    if not data_uri:
+        return None
+    uri = data_uri.strip()
+    if not uri.lower().startswith("data:video/"):
+        return None
+    try:
+        header, encoded = uri.split(",", 1)
+    except ValueError:
+        return None
+    if ";base64" not in header.lower():
+        return None
+    mime = header[5:].split(";", 1)[0] or "video/mp4"
+    normalized = "".join(encoded.split())
+    try:
+        payload = base64.b64decode(normalized, validate=True)
+    except (binascii.Error, ValueError):
+        return None
+    return mime, payload
+
+
 async def _send_inline_image(
     dp: Dispatcher, job: GenerationJobRecord, inline_image: tuple[str, bytes]
 ) -> None:
@@ -1029,6 +1075,27 @@ async def _send_inline_image(
     filename = f"result{suffix}"
     input_file = InputFile(buffer, filename=filename)
     await dp.bot.send_photo(
+        job.user_id,
+        input_file,
+        caption=i18n.t("status.completed_file"),
+    )
+
+
+async def _send_inline_video(
+    dp: Dispatcher, job: GenerationJobRecord, inline_video: tuple[str, bytes]
+) -> None:
+    mime, payload = inline_video
+    if len(payload) > MAX_INLINE_VIDEO_BYTES:
+        await dp.bot.send_message(
+            job.user_id,
+            i18n.t("status.inline_video_too_large"),
+        )
+        return
+    buffer = io.BytesIO(payload)
+    suffix = mimetypes.guess_extension(mime) or ".mp4"
+    filename = f"preview{suffix}"
+    input_file = InputFile(buffer, filename=filename)
+    await dp.bot.send_document(
         job.user_id,
         input_file,
         caption=i18n.t("status.completed_file"),
@@ -1360,6 +1427,9 @@ async def option_callback_handler(
         value = SIZE_OPTIONS.get(token)
         if value:
             session.last_size = value
+            aspect = ASPECT_RATIO_OPTIONS.get(token)
+            if aspect:
+                session.last_aspect_ratio = aspect
     await callback.answer()
     state_data = await state.get_data()
     if state_data.get("flow_type", "video") != "video":

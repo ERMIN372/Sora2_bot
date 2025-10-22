@@ -288,6 +288,14 @@ class JobQueue:
                     username=pending.username,
                 )
                 return
+            assets_meta = {}
+            if isinstance(result.data, dict):
+                raw_meta = result.data.get("assets_meta")
+                if isinstance(raw_meta, dict):
+                    assets_meta = raw_meta
+            extra_poll = {"status": result.status}
+            if assets_meta:
+                extra_poll["assets_meta"] = assets_meta
             log_event(
                 level="INFO",
                 event="poll",
@@ -300,7 +308,7 @@ class JobQueue:
                 size=pending.size,
                 status_code=result.status_code,
                 duration_ms=result.duration_ms,
-                extra={"status": result.status},
+                extra=extra_poll,
             )
             asset_url = next(iter(result.assets.values()), None)
             if result.status == "completed" and asset_url:
@@ -315,6 +323,9 @@ class JobQueue:
                 except Exception:
                     log.exception("Failed to update job %s as completed", pending.job_id)
                     gsheets_ok = False
+                extra_done = {"assets": list(result.assets.keys())}
+                if assets_meta:
+                    extra_done["assets_meta"] = assets_meta
                 log_event(
                     level="INFO",
                     event="done",
@@ -328,7 +339,7 @@ class JobQueue:
                     status_code=result.status_code,
                     duration_ms=result.duration_ms,
                     gsheets_ok=gsheets_ok,
-                    extra={"assets": list(result.assets.keys())},
+                    extra=extra_done,
                 )
             elif result.status in {"failed", "errored"}:
                 error_message = result.error or "Unknown error"
