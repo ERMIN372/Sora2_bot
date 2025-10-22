@@ -418,7 +418,7 @@ class ArchivePublisher:
             value = "-"
         text = value.replace("\\", "\\\\")
         pattern = re.compile(rf"([{re.escape(_MD_V2_SPECIAL_CHARS)}])")
-        text = pattern.sub(r"\\\\\1", text)
+        text = pattern.sub(r"\\\1", text)
         text = text.replace("\n", "\\n").replace("\r", "")
         return text
 
