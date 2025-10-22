@@ -4,12 +4,12 @@ from __future__ import annotations
 import asyncio
 import base64
 import binascii
+import inspect
 import logging
 import time
+from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 from uuid import uuid4
-
-from dataclasses import dataclass
 
 from google.auth.transport.requests import AuthorizedSession
 from google.oauth2.service_account import Credentials
@@ -44,7 +44,7 @@ log = logging.getLogger(__name__)
 @dataclass(slots=True)
 class _VeoSanitisedConfig:
     rest_parameters: Dict[str, Any]
-    genai_config: Dict[str, Any]
+    sdk_parameters: Dict[str, Any]
     accepted_args: List[str]
     rejected_args: List[str]
     validation_errors: List[str]
@@ -61,7 +61,7 @@ class _VeoRequestPlan:
     rejected_args: List[str]
     payload_preview: Dict[str, Any]
     model_name: str
-    genai_config: Dict[str, Any]
+    sdk_parameters: Dict[str, Any]
     reference_inline: Optional[Dict[str, Any]]
 
 
@@ -349,6 +349,18 @@ class VertexGenerativeClient(BaseProviderClient):
 _VEO_ALLOWED_DURATIONS = {4, 6, 8}
 _VEO_ALLOWED_ASPECT_RATIOS = {"16:9", "9:16"}
 _VEO_ALLOWED_RESOLUTIONS = {"720p", "1080p"}
+_VEO_ALLOWED_PARAMETER_KEYS = {
+    "aspectRatio",
+    "durationSeconds",
+    "resolution",
+    "sampleCount",
+    "seed",
+    "negativePrompt",
+    "personGeneration",
+}
+_VEO_INVALID_PARAMS_MESSAGE = (
+    "Неверные параметры для Veo: укажи 4, 6 или 8 секунд и 16:9 или 9:16"
+)
 
 _VEO_ASPECT_ALIASES = {
     "horizontal": "16:9",
@@ -421,6 +433,15 @@ def _coerce_bool(value: Any) -> Optional[bool]:
     return None
 
 
+def _camel_to_snake(value: str) -> str:
+    result: List[str] = []
+    for index, char in enumerate(value):
+        if char.isupper() and index > 0 and (not value[index - 1].isupper()):
+            result.append("_")
+        result.append(char.lower())
+    return "".join(result)
+
+
 def _detect_veo_client() -> str:
     if _GenAIClient and _genai_models and _genai_types:
         return "google-genai"
@@ -436,38 +457,56 @@ def _normalise_veo_model(model: str) -> str:
     return _VEO_MODEL_ALIASES.get(key, key)
 
 
+def _filter_google_genai_kwargs(parameters: Dict[str, Any]) -> Dict[str, Any]:
+    if not parameters or not _genai_types:
+        return {}
+    config_cls = getattr(_genai_types, "GenerateVideosConfig", None)
+    if config_cls is None:
+        return {}
+    try:
+        signature = inspect.signature(config_cls)
+    except (TypeError, ValueError):  # pragma: no cover - reflection guard
+        return {}
+
+    allowed_names = {
+        name
+        for name, param in signature.parameters.items()
+        if name not in {"self", "args", "kwargs"}
+        and param.kind
+        in (
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+            inspect.Parameter.KEYWORD_ONLY,
+            inspect.Parameter.VAR_KEYWORD,
+        )
+    }
+    if not allowed_names:
+        return {}
+
+    filtered: Dict[str, Any] = {}
+    for key, value in parameters.items():
+        if key in allowed_names:
+            filtered[key] = value
+            continue
+        snake_key = _camel_to_snake(key)
+        if snake_key in allowed_names:
+            filtered[snake_key] = value
+    return filtered
+
+
 def _prepare_veo_config(config: Dict[str, Any]) -> _VeoSanitisedConfig:
     provided_keys = {
         key for key in config.keys() if isinstance(key, str)
     }
     consumed_keys: set[str] = set()
     rest_parameters: Dict[str, Any] = {}
-    genai_config: Dict[str, Any] = {}
+    sdk_parameters: Dict[str, Any] = {}
     accepted_args: List[str] = []
     validation_errors: List[str] = []
     user_messages: List[str] = []
     payload_preview: Dict[str, Any] = {}
 
-    blocked_keys = {
-        "width": "Ширина и высота не задаются вручную, выбери aspectRatio 16:9 или 9:16",
-        "height": "Ширина и высота не задаются вручную, выбери aspectRatio 16:9 или 9:16",
-        "fps": "fps недоступен для Veo",
-        "generation_config": "generation_config недоступен для Veo",
-        "generationConfig": "generation_config недоступен для Veo",
-        "duration_seconds": "Используй durationSeconds со значением 4, 6 или 8",
-        "aspect_ratio": "Используй aspectRatio со значением 16:9 или 9:16",
-        "sample_count": "Используй sampleCount от 1 до 4",
-        "negative_prompt": "Используй negativePrompt в camelCase",
-        "person_generation": "Используй personGeneration в camelCase",
-        "parameters": "Поле parameters формируется автоматически",
-    }
-    for key, message in blocked_keys.items():
-        if key in provided_keys:
-            if message not in user_messages:
-                user_messages.append(message)
-
     duration_value: Optional[int] = None
-    for key in ("durationSeconds", "duration"):
+    for key in ("durationSeconds", "duration_seconds", "duration"):
         if key in config:
             consumed_keys.add(key)
             duration_value = _coerce_int(
@@ -480,7 +519,7 @@ def _prepare_veo_config(config: Dict[str, Any]) -> _VeoSanitisedConfig:
         validation_errors.append(f"duration={duration_value}")
     else:
         rest_parameters["durationSeconds"] = duration_value
-        genai_config["duration_seconds"] = duration_value
+        sdk_parameters["durationSeconds"] = duration_value
         payload_preview["durationSeconds"] = duration_value
         accepted_args.append("durationSeconds")
 
@@ -488,6 +527,12 @@ def _prepare_veo_config(config: Dict[str, Any]) -> _VeoSanitisedConfig:
     if "aspectRatio" in config:
         consumed_keys.add("aspectRatio")
         raw = config.get("aspectRatio")
+        if isinstance(raw, str) and raw.strip():
+            key = raw.strip()
+            aspect_ratio_value = _VEO_ASPECT_ALIASES.get(key.lower(), key)
+    elif "aspect_ratio" in config:
+        consumed_keys.add("aspect_ratio")
+        raw = config.get("aspect_ratio")
         if isinstance(raw, str) and raw.strip():
             key = raw.strip()
             aspect_ratio_value = _VEO_ASPECT_ALIASES.get(key.lower(), key)
@@ -513,7 +558,7 @@ def _prepare_veo_config(config: Dict[str, Any]) -> _VeoSanitisedConfig:
         validation_errors.append(f"aspectRatio={aspect_ratio_value}")
     else:
         rest_parameters["aspectRatio"] = aspect_ratio_value
-        genai_config["aspect_ratio"] = aspect_ratio_value
+        sdk_parameters["aspectRatio"] = aspect_ratio_value
         payload_preview["aspectRatio"] = aspect_ratio_value
         accepted_args.append("aspectRatio")
 
@@ -542,23 +587,29 @@ def _prepare_veo_config(config: Dict[str, Any]) -> _VeoSanitisedConfig:
         validation_errors.append(f"resolution={resolution_value}")
     else:
         rest_parameters["resolution"] = resolution_value
-        genai_config["resolution"] = resolution_value
+        sdk_parameters["resolution"] = resolution_value
         payload_preview["resolution"] = resolution_value
         accepted_args.append("resolution")
 
-    if "sampleCount" in config:
-        consumed_keys.add("sampleCount")
-        sample_value = _coerce_int(
-            config.get("sampleCount"), field="sampleCount", positive=True, errors=validation_errors
-        )
-        if sample_value is not None:
-            if not 1 <= sample_value <= 4:
-                validation_errors.append(f"sampleCount={sample_value}")
-            else:
-                rest_parameters["sampleCount"] = sample_value
-                genai_config["number_of_videos"] = sample_value
-                payload_preview["sampleCount"] = sample_value
-                accepted_args.append("sampleCount")
+    sample_value: Optional[int] = None
+    for key in ("sampleCount", "sample_count"):
+        if key in config:
+            consumed_keys.add(key)
+            sample_value = _coerce_int(
+                config.get(key),
+                field="sampleCount",
+                positive=True,
+                errors=validation_errors,
+            )
+            break
+    if sample_value is not None:
+        if not 1 <= sample_value <= 4:
+            validation_errors.append(f"sampleCount={sample_value}")
+        else:
+            rest_parameters["sampleCount"] = sample_value
+            sdk_parameters["sampleCount"] = sample_value
+            payload_preview["sampleCount"] = sample_value
+            accepted_args.append("sampleCount")
 
     if "seed" in config:
         consumed_keys.add("seed")
@@ -567,13 +618,18 @@ def _prepare_veo_config(config: Dict[str, Any]) -> _VeoSanitisedConfig:
         )
         if seed_value is not None:
             rest_parameters["seed"] = seed_value
-            genai_config["seed"] = seed_value
+            sdk_parameters["seed"] = seed_value
             payload_preview["seed"] = seed_value
             accepted_args.append("seed")
 
+    person_key = None
     if "personGeneration" in config:
-        consumed_keys.add("personGeneration")
-        raw_value = config.get("personGeneration")
+        person_key = "personGeneration"
+    elif "person_generation" in config:
+        person_key = "person_generation"
+    if person_key:
+        consumed_keys.add(person_key)
+        raw_value = config.get(person_key)
         value: Optional[str]
         if isinstance(raw_value, bool):
             value = "allow" if raw_value else "block"
@@ -585,17 +641,22 @@ def _prepare_veo_config(config: Dict[str, Any]) -> _VeoSanitisedConfig:
             value = None
         if value:
             rest_parameters["personGeneration"] = value
-            genai_config["person_generation"] = value
+            sdk_parameters["personGeneration"] = value
             payload_preview["personGeneration"] = value
             accepted_args.append("personGeneration")
 
+    negative_key = None
     if "negativePrompt" in config:
-        consumed_keys.add("negativePrompt")
-        raw_value = config.get("negativePrompt")
+        negative_key = "negativePrompt"
+    elif "negative_prompt" in config:
+        negative_key = "negative_prompt"
+    if negative_key:
+        consumed_keys.add(negative_key)
+        raw_value = config.get(negative_key)
         if isinstance(raw_value, str) and raw_value.strip():
             value = raw_value.strip()
             rest_parameters["negativePrompt"] = value
-            genai_config["negative_prompt"] = value
+            sdk_parameters["negativePrompt"] = value
             payload_preview["negativePrompt"] = value
             accepted_args.append("negativePrompt")
 
@@ -612,11 +673,24 @@ def _prepare_veo_config(config: Dict[str, Any]) -> _VeoSanitisedConfig:
     accepted_args = sorted(set(accepted_args))
     rejected_args = sorted(provided_keys - consumed_keys)
     validation_errors = sorted(set(validation_errors))
+    if rejected_args:
+        user_messages.append(_VEO_INVALID_PARAMS_MESSAGE)
     user_messages = list(dict.fromkeys(user_messages))
+
+    rest_parameters = {
+        key: value
+        for key, value in rest_parameters.items()
+        if key in _VEO_ALLOWED_PARAMETER_KEYS
+    }
+    sdk_parameters = {
+        key: value
+        for key, value in sdk_parameters.items()
+        if key in _VEO_ALLOWED_PARAMETER_KEYS
+    }
 
     return _VeoSanitisedConfig(
         rest_parameters=rest_parameters,
-        genai_config=genai_config,
+        sdk_parameters=sdk_parameters,
         accepted_args=accepted_args,
         rejected_args=rejected_args,
         validation_errors=validation_errors,
@@ -665,10 +739,7 @@ def veo_request(
         raise ProviderAPIError(
             provider=provider_name,
             status_code=0,
-            message=(
-                "Неверные параметры для Veo. Длительность поддерживается 4, 6 или 8 секунд; "
-                "соотношение сторон 16:9 или 9:16; разрешение 720p или 1080p."
-            ),
+            message=_VEO_INVALID_PARAMS_MESSAGE,
             error_type="invalid_request",
         )
 
@@ -689,7 +760,11 @@ def veo_request(
     if selected_client != "google-genai":
         body = {
             "instances": [{"prompt": prompt}],
-            "parameters": dict(sanitised.rest_parameters),
+            "parameters": {
+                key: value
+                for key, value in sanitised.rest_parameters.items()
+                if key in _VEO_ALLOWED_PARAMETER_KEYS
+            },
         }
 
     log.info(
@@ -707,7 +782,7 @@ def veo_request(
         rejected_args=sanitised.rejected_args,
         payload_preview=sanitised.payload_preview,
         model_name=model_name,
-        genai_config=dict(sanitised.genai_config),
+        sdk_parameters=dict(sanitised.sdk_parameters),
         reference_inline=sanitised.reference_inline,
     )
 
@@ -840,7 +915,7 @@ class VertexVideoClient(VertexGenerativeClient):
                 provider_message=str(exc),
             ) from exc
 
-        config_kwargs = dict(plan.genai_config)
+        config_kwargs = _filter_google_genai_kwargs(plan.sdk_parameters)
         reference_inline = plan.reference_inline
         if reference_inline and _genai_types:
             data = reference_inline.get("data")
@@ -932,10 +1007,7 @@ class VertexVeoPreviewClient(VertexGenerativeClient):
             raise ProviderAPIError(
                 provider=self.provider_name,
                 status_code=0,
-                message=(
-                    "Неверные параметры для Veo. Длительность поддерживается 4, 6 или 8 секунд; "
-                    "соотношение сторон 16:9 или 9:16; разрешение 720p или 1080p."
-                ),
+                message=_VEO_INVALID_PARAMS_MESSAGE,
                 error_type="invalid_request",
             )
 
@@ -952,10 +1024,7 @@ class VertexVeoPreviewClient(VertexGenerativeClient):
             raise ProviderAPIError(
                 provider=self.provider_name,
                 status_code=0,
-                message=(
-                    "Неверные параметры для Veo. Длительность поддерживается 4, 6 или 8 секунд; "
-                    "соотношение сторон 16:9 или 9:16; разрешение 720p или 1080p."
-                ),
+                message=_VEO_INVALID_PARAMS_MESSAGE,
                 error_type="invalid_request",
             )
 
@@ -969,10 +1038,7 @@ class VertexVeoPreviewClient(VertexGenerativeClient):
             raise ProviderAPIError(
                 provider=self.provider_name,
                 status_code=0,
-                message=(
-                    "Неверные параметры для Veo. Длительность поддерживается 4, 6 или 8 секунд; "
-                    "соотношение сторон 16:9 или 9:16; разрешение 720p или 1080p."
-                ),
+                message=_VEO_INVALID_PARAMS_MESSAGE,
                 error_type="invalid_request",
             )
 
