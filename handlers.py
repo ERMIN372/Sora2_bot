@@ -1171,7 +1171,7 @@ def _format_job_message(job: GenerationJobRecord) -> str:
             if job.video_url.startswith("[inline"):
                 return i18n.t("status.completed_file")
             if _parse_inline_image(job.video_url):
-                return i18n.t("status.completed_file")
+                return i18n.t("status.completed_photo")
             return i18n.t("status.completed_url", url=job.video_url)
         return i18n.t("status.completed_file")
     if job.status == "failed":
@@ -1187,22 +1187,16 @@ async def _send_job_update(dp: Dispatcher, job: GenerationJobRecord) -> None:
         if job.status == "completed":
             inline_assets = _collect_inline_assets(job)
             if inline_assets:
-                responded = await _send_inline_assets(dp, job, inline_assets)
+                responded = await _send_inline_assets(
+                    dp, job, inline_assets, reply_markup=reply_markup
+                )
                 if responded:
-                    await dp.bot.send_message(
-                        job.user_id,
-                        _format_job_message(job),
-                        reply_markup=reply_markup,
-                    )
                     return
             if job.video_url:
                 inline_image = _parse_inline_image(job.video_url)
                 if inline_image:
-                    await _send_inline_image(dp, job, inline_image)
-                    await dp.bot.send_message(
-                        job.user_id,
-                        _format_job_message(job),
-                        reply_markup=reply_markup,
+                    await _send_inline_image(
+                        dp, job, inline_image, reply_markup=reply_markup
                     )
                     return
         await dp.bot.send_message(
@@ -1258,25 +1252,34 @@ def _collect_inline_assets(job: GenerationJobRecord) -> List[Dict[str, Any]]:
 
 
 async def _send_inline_image(
-    dp: Dispatcher, job: GenerationJobRecord, inline_image: tuple[str, bytes]
+    dp: Dispatcher,
+    job: GenerationJobRecord,
+    inline_image: tuple[str, bytes],
+    reply_markup: Optional[ReplyKeyboardMarkup | InlineKeyboardMarkup] = None,
 ) -> None:
     mime, payload = inline_image
     buffer = io.BytesIO(payload)
     suffix = mimetypes.guess_extension(mime) or ".jpg"
     filename = f"result{suffix}"
+    buffer.seek(0)
     input_file = InputFile(buffer, filename=filename)
-    await dp.bot.send_photo(
+    await dp.bot.send_document(
         job.user_id,
         input_file,
-        caption=i18n.t("status.completed_file"),
+        caption=i18n.t("status.completed_photo"),
+        reply_markup=reply_markup,
     )
 
 
 async def _send_inline_assets(
-    dp: Dispatcher, job: GenerationJobRecord, assets: List[Dict[str, Any]]
+    dp: Dispatcher,
+    job: GenerationJobRecord,
+    assets: List[Dict[str, Any]],
+    reply_markup: Optional[ReplyKeyboardMarkup | InlineKeyboardMarkup] = None,
 ) -> bool:
     responded = False
     sent_assets = False
+    markup_sent = False
     for index, asset in enumerate(assets):
         data_uri = asset.get("data_uri")
         if not isinstance(data_uri, str):
@@ -1285,8 +1288,11 @@ async def _send_inline_assets(
         if not decoded:
             responded = True
             await dp.bot.send_message(
-                job.user_id, i18n.t("status.inline_decode_failed")
+                job.user_id,
+                i18n.t("status.inline_decode_failed"),
+                reply_markup=reply_markup if not markup_sent else None,
             )
+            markup_sent = True
             continue
         mime, payload = decoded
         size = len(payload)
@@ -1300,7 +1306,9 @@ async def _send_inline_assets(
                     size=size,
                     limit_mb=_INLINE_ASSET_MAX_BYTES // (1024 * 1024),
                 ),
+                reply_markup=reply_markup if not markup_sent else None,
             )
+            markup_sent = True
             continue
         buffer = io.BytesIO(payload)
         suffix = mimetypes.guess_extension(mime) or ".bin"
@@ -1309,13 +1317,25 @@ async def _send_inline_assets(
             base_name = "asset"
         filename = f"{base_name}_{index}{suffix}"
         input_file = InputFile(buffer, filename=filename)
-        caption = i18n.t("status.completed_file") if not sent_assets else None
+        caption_key = "status.completed_photo" if mime.startswith("image/") else "status.completed_file"
+        caption = i18n.t(caption_key) if not sent_assets else None
         if mime.startswith("image/"):
             buffer.seek(0)
-            await dp.bot.send_photo(job.user_id, input_file, caption=caption)
+            await dp.bot.send_document(
+                job.user_id,
+                input_file,
+                caption=caption,
+                reply_markup=reply_markup if not markup_sent else None,
+            )
         else:
             buffer.seek(0)
-            await dp.bot.send_document(job.user_id, input_file, caption=caption)
+            await dp.bot.send_document(
+                job.user_id,
+                input_file,
+                caption=caption,
+                reply_markup=reply_markup if not markup_sent else None,
+            )
+        markup_sent = True
         responded = True
         sent_assets = True
     return responded
