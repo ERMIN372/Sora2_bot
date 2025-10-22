@@ -4,6 +4,7 @@ from __future__ import annotations
 import base64
 import binascii
 import logging
+import math
 from typing import Any, Dict, List, Optional, Tuple
 from uuid import uuid4
 
@@ -355,6 +356,30 @@ class VertexVideoClient(VertexGenerativeClient):
 class VertexVeoPreviewClient(VertexGenerativeClient):
     """Generate Veo 3.1 inline preview videos using the predict endpoint."""
 
+    _GENERATION_CONFIG_ALLOWLIST = {
+        "width",
+        "height",
+        "aspect_ratio",
+        "duration_seconds",
+        "fps",
+        "seed",
+        "safety_settings",
+    }
+
+    _SIZE_PRESETS: Dict[str, Tuple[int, int, str]] = {
+        "1280x720": (1280, 720, "16:9"),
+        "720x1280": (720, 1280, "9:16"),
+    }
+
+    _SIZE_ALIASES: Dict[str, str] = {
+        "horizontal": "1280x720",
+        "горизонталь": "1280x720",
+        "vertical": "720x1280",
+        "вертикаль": "720x1280",
+    }
+
+    _ALLOWED_ROOT_KEYS = {"instances"}
+
     def _build_enqueue_payload(
         self,
         *,
@@ -366,18 +391,115 @@ class VertexVeoPreviewClient(VertexGenerativeClient):
         if payload is not None:
             return payload
         config = settings or {}
-        duration = int(config.get("duration_seconds") or config.get("duration") or 6)
-        if duration <= 0:
-            duration = 6
-        fps = int(config.get("fps") or 24)
-        if fps <= 0:
+        invalid_keys: List[str] = []
+        validation_errors: List[str] = []
+
+        raw_generation_config = (
+            config.get("generation_config")
+            if isinstance(config.get("generation_config"), dict)
+            else {}
+        )
+        for key in raw_generation_config:
+            if key not in self._GENERATION_CONFIG_ALLOWLIST:
+                invalid_keys.append(key)
+
+        size_value = str(config.get("size") or "").strip()
+        normalized_size = size_value.lower()
+        normalized_size = self._SIZE_ALIASES.get(normalized_size, normalized_size)
+        if not normalized_size:
+            normalized_size = "1280x720"
+        if normalized_size in self._SIZE_PRESETS:
+            width_default, height_default, aspect_default = self._SIZE_PRESETS[
+                normalized_size
+            ]
+            size_key = normalized_size
+        else:
+            width_default = height_default = 0
+            aspect_default = ""
+            if size_value:
+                validation_errors.append(f"size={size_value}")
+            size_key = "1280x720"
+
+        def _coerce_positive_int(value: Any, field: str) -> Optional[int]:
+            if value is None:
+                return None
+            try:
+                number = int(value)
+            except (TypeError, ValueError):
+                validation_errors.append(f"{field}=not_int")
+                return None
+            if number <= 0:
+                validation_errors.append(f"{field}=non_positive")
+                return None
+            return number
+
+        def _reduce_aspect_ratio(width: int, height: int) -> str:
+            divisor = math.gcd(width, height) or 1
+            return f"{width // divisor}:{height // divisor}"
+
+        width = _coerce_positive_int(
+            raw_generation_config.get("width", config.get("width", width_default)),
+            "width",
+        )
+        height = _coerce_positive_int(
+            raw_generation_config.get("height", config.get("height", height_default)),
+            "height",
+        )
+
+        duration_seconds = _coerce_positive_int(
+            raw_generation_config.get(
+                "duration_seconds",
+                config.get("duration_seconds", config.get("duration")),
+            ),
+            "duration",
+        )
+        if duration_seconds is None:
+            duration_seconds = 6
+
+        fps = _coerce_positive_int(
+            raw_generation_config.get(
+                "fps", config.get("fps", config.get("frame_rate"))
+            ),
+            "fps",
+        )
+        if fps is None:
             fps = 24
-        aspect_ratio = str(config.get("aspect_ratio") or "16:9")
-        generation_config = {
-            "duration_seconds": duration,
-            "fps": fps,
-            "aspect_ratio": aspect_ratio,
-        }
+
+        aspect_ratio = raw_generation_config.get(
+            "aspect_ratio", config.get("aspect_ratio", aspect_default)
+        )
+        if not isinstance(aspect_ratio, str) or not aspect_ratio:
+            aspect_ratio = ""
+        if width and height and not aspect_ratio:
+            aspect_ratio = _reduce_aspect_ratio(width, height)
+
+        seed = raw_generation_config.get("seed", config.get("seed"))
+        if seed is not None:
+            seed = _coerce_positive_int(seed, "seed")
+
+        safety_settings = raw_generation_config.get(
+            "safety_settings", config.get("safety_settings")
+        )
+        if safety_settings is not None and not isinstance(safety_settings, (list, dict)):
+            validation_errors.append("safety_settings=invalid_type")
+            safety_settings = None
+
+        generation_config: Dict[str, Any] = {}
+        if width:
+            generation_config["width"] = width
+        if height:
+            generation_config["height"] = height
+        if aspect_ratio:
+            generation_config["aspect_ratio"] = aspect_ratio
+        if duration_seconds:
+            generation_config["duration_seconds"] = duration_seconds
+        if fps:
+            generation_config["fps"] = fps
+        if seed:
+            generation_config["seed"] = seed
+        if safety_settings is not None:
+            generation_config["safety_settings"] = safety_settings
+
         body = {
             "instances": [
                 {
@@ -386,9 +508,63 @@ class VertexVeoPreviewClient(VertexGenerativeClient):
                 }
             ]
         }
-        config.setdefault("duration_seconds", duration)
+
+        payload_preview = {
+            "instances": [
+                {
+                    "prompt_preview": (prompt or "")[:120],
+                    "generation_config": generation_config,
+                }
+            ]
+        }
+
+        invalid_keys = sorted(set(invalid_keys))
+        validation_errors = sorted(set(validation_errors))
+
+        if invalid_keys or validation_errors:
+            log.warning(
+                "vertex.veo_preview.invalid_payload invalid_keys=%s validation_errors=%s payload_preview=%s",
+                invalid_keys,
+                validation_errors,
+                payload_preview,
+            )
+            raise ProviderAPIError(
+                provider=self.provider_name,
+                status_code=0,
+                message="Неверные параметры запроса. Проверь размер, длительность и модель.",
+                error_type="invalid_request",
+            )
+
+        extra_root_keys = sorted(set(body.keys()) - self._ALLOWED_ROOT_KEYS)
+        if extra_root_keys:
+            log.warning(
+                "vertex.veo_preview.invalid_payload invalid_keys=%s payload_preview=%s",
+                extra_root_keys,
+                payload_preview,
+            )
+            raise ProviderAPIError(
+                provider=self.provider_name,
+                status_code=0,
+                message="Неверные параметры запроса. Проверь размер, длительность и модель.",
+                error_type="invalid_request",
+            )
+
+        log.info(
+            "vertex.veo_preview.payload_preview invalid_keys=%s validation_errors=%s payload_preview=%s",
+            invalid_keys,
+            validation_errors,
+            payload_preview,
+        )
+
+        config.setdefault("size", size_key)
+        config.setdefault("duration_seconds", duration_seconds)
         config.setdefault("fps", fps)
-        config.setdefault("aspect_ratio", aspect_ratio)
+        if aspect_ratio:
+            config.setdefault("aspect_ratio", aspect_ratio)
+        if width:
+            config.setdefault("width", width)
+        if height:
+            config.setdefault("height", height)
         return body
 
     def _extract_result(
