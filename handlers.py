@@ -981,7 +981,6 @@ async def _launch_order(
     if order.category == "video":
         provider_settings["duration"] = 6
         provider_settings.setdefault("duration_seconds", 6)
-        provider_settings.setdefault("fps", 24)
         if order.aspect_ratio:
             provider_settings.setdefault("aspect_ratio", order.aspect_ratio)
     if order.image_file_id:
