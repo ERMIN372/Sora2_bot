@@ -43,6 +43,14 @@ from providers import ProviderAPIError
 from utils import build_inline_data_from_telegram_file
 import yookassa_client
 
+# Соотношения сторон, которые понимает провайдеры (Veo 3.x)
+ASPECT_RATIO_OPTIONS = {
+    "horizontal": "16:9",
+    "vertical": "9:16",
+}
+DEFAULT_ASPECT_RATIO = ASPECT_RATIO_OPTIONS["horizontal"]
+
+
 log = logging.getLogger(__name__)
 
 
@@ -274,7 +282,7 @@ class UserSession:
     """Transient per-user settings and cached context."""
 
     last_size: str = SIZE_OPTIONS["horizontal"]
-    last_aspect_ratio: str = ASPECT_RATIO_OPTIONS["horizontal"]
+    last_aspect_ratio: str = DEFAULT_ASPECT_RATIO
     pending_order: Optional[OrderContext] = None
     awaiting_payment: bool = False
     last_launch_key: Optional[str] = None
