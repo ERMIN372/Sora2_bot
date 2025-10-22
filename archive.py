@@ -19,7 +19,9 @@ ChatNotFound = aiogram_exceptions.ChatNotFound
 NetworkError = aiogram_exceptions.NetworkError
 RetryAfter = aiogram_exceptions.RetryAfter
 TelegramAPIError = aiogram_exceptions.TelegramAPIError
-TelegramServerError = aiogram_exceptions.TelegramServerError
+TelegramServerError = getattr(
+    aiogram_exceptions, "TelegramServerError", TelegramAPIError
+)
 Unauthorized = aiogram_exceptions.Unauthorized
 CantTalkWithBot = getattr(aiogram_exceptions, "CantTalkWithBot", TelegramAPIError)
 
