@@ -132,7 +132,7 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "video.models.prompt": "Выберите модель видеогенерации:",
         "video.models.sora": "sora 2",
         "video.models.veo3": "Veo 3",
-        "video.models.veo31": "Veo 3.1",
+        "video.models.veo31": "Veo 3.1 (Vertex)",
         "video.models.unavailable": "недоступно",
         "video.mode.prompt": "Как будем генерировать видео?",
         "video.mode.text": "По тексту",

@@ -7,7 +7,7 @@ from .base import (
     ProviderJobSubmission,
 )
 from .sora import SoraClient
-from .vertex import VertexImageClient, VertexVideoClient
+from .vertex import VertexImageClient, VertexVeoPreviewClient, VertexVideoClient
 
 __all__ = [
     "BaseProviderClient",
@@ -16,5 +16,6 @@ __all__ = [
     "ProviderJobSubmission",
     "VertexImageClient",
     "VertexVideoClient",
+    "VertexVeoPreviewClient",
     "SoraClient",
 ]
