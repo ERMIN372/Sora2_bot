@@ -39,6 +39,7 @@ from observability import (
     log_event,
     should_notify_support,
 )
+from moderation import policy_message, run_preflight
 from providers import ProviderAPIError
 from utils import build_inline_data_from_telegram_file
 import yookassa_client
@@ -769,6 +770,68 @@ async def _launch_order(
         return
     user_id = user.id
     now = time.time()
+
+    original_prompt = order.prompt
+    preflight = run_preflight(original_prompt)
+    corr_id = order.corr_id or str(uuid.uuid4())
+    order.corr_id = corr_id
+
+    if preflight.blocked:
+        explanation = preflight.user_message or policy_message(preflight.scope or "unknown")
+        log_event(
+            level="WARNING",
+            event="preflight_block",
+            corr_id=corr_id,
+            user_id=user_id,
+            username=user.username,
+            model=order.model,
+            provider=order.provider or order.model,
+            size=order.size,
+            error_type="preflight_blocked",
+            error_msg_short=_shorten(explanation),
+            prompt=original_prompt,
+            extra={
+                "preflight_blocked": True,
+                "preflight_reason": preflight.reason,
+                "preflight_scope": preflight.scope,
+            },
+        )
+        await db.log_error_record(
+            ErrorLogRecord(
+                ts=datetime.utcnow(),
+                user_id=user_id,
+                username=user.username,
+                corr_id=corr_id,
+                job_id="",
+                model=order.model,
+                size=order.size,
+                status_code=0,
+                error_type="preflight_blocked",
+                error_msg_short=_shorten(explanation),
+                refunded=False,
+                preflight_blocked=True,
+                preflight_reason=preflight.reason or "",
+                auto_sanitized=False,
+                sanitized_prompt=preflight.sanitized_prompt,
+                error_scope=preflight.scope or "unknown",
+                error_json="",
+            )
+        )
+        session.pending_order = None
+        await callback.message.answer(explanation)
+        return
+
+    if preflight.auto_sanitized:
+        order.prompt = preflight.sanitized_prompt
+        session.pending_order = order
+        await callback.message.answer(
+            preflight.user_message or policy_message(preflight.scope or "policy.brand")
+        )
+    else:
+        lower_prompt = original_prompt.lower()
+        if any(word in lower_prompt for word in ("логотип", "logo", "бренд")):
+            await callback.message.answer("Создание оригинальных логотипов разрешено — запускаю как есть.")
+
     key = order.key()
     await db.sync_user_profile(
         user_id,
@@ -780,8 +843,6 @@ async def _launch_order(
         await callback.message.answer(i18n.t("flow.duplicate"))
         return
 
-    corr_id = order.corr_id or str(uuid.uuid4())
-    order.corr_id = corr_id
     provider_key = order.provider or order.model
     credits_cost = order.credits_cost or config.generation_cost_credits
 
@@ -796,6 +857,12 @@ async def _launch_order(
         size=order.size,
         credits_cost=credits_cost,
         prompt=order.prompt,
+        extra={
+            "preflight_blocked": False,
+            "preflight_reason": preflight.reason,
+            "preflight_scope": preflight.scope,
+            "preflight_auto_sanitized": preflight.auto_sanitized,
+        },
     )
 
     if not await db.deduct_credit(user_id, credits_cost):
@@ -862,6 +929,11 @@ async def _launch_order(
             username=user.username,
             provider=provider_key,
             settings=provider_settings or None,
+            original_prompt=original_prompt,
+            sanitized_prompt=order.prompt,
+            auto_sanitized=preflight.auto_sanitized,
+            preflight_reason=preflight.reason,
+            preflight_scope=preflight.scope,
         )
     except ProviderAPIError as exc:
         message, short, notify_support, hint = _map_provider_error(exc)
@@ -884,6 +956,12 @@ async def _launch_order(
                 error_type=exc.error_type or "submit_failed",
                 error_msg_short=short,
                 refunded=refunded,
+                preflight_blocked=False,
+                preflight_reason=preflight.reason or "",
+                auto_sanitized=preflight.auto_sanitized,
+                sanitized_prompt=order.prompt,
+                error_scope=preflight.scope or hint,
+                error_json="",
             )
         )
         log_event(
@@ -903,7 +981,13 @@ async def _launch_order(
             prompt=order.prompt,
             gsheets_ok=sheet_ok,
             refund_done=refunded,
-            extra={"provider_message": exc.provider_message},
+            extra={
+                "provider_message": exc.provider_message,
+                "preflight_blocked": False,
+                "preflight_reason": preflight.reason,
+                "preflight_scope": preflight.scope,
+                "preflight_auto_sanitized": preflight.auto_sanitized,
+            },
         )
         log_event(
             level="INFO",
@@ -952,6 +1036,12 @@ async def _launch_order(
                 error_type="internal",
                 error_msg_short=short,
                 refunded=refunded,
+                preflight_blocked=False,
+                preflight_reason=preflight.reason or "",
+                auto_sanitized=preflight.auto_sanitized,
+                sanitized_prompt=order.prompt,
+                error_scope=preflight.scope or "unknown",
+                error_json="",
             )
         )
         log_event(
@@ -968,6 +1058,12 @@ async def _launch_order(
             prompt=order.prompt,
             gsheets_ok=sheet_ok,
             refund_done=refunded,
+            extra={
+                "preflight_blocked": False,
+                "preflight_reason": preflight.reason,
+                "preflight_scope": preflight.scope,
+                "preflight_auto_sanitized": preflight.auto_sanitized,
+            },
         )
         log_event(
             level="INFO",
