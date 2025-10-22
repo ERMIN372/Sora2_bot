@@ -333,6 +333,19 @@ class VertexVideoClient(VertexGenerativeClient):
                 "data": reference.get("data"),
             }
             parts.append({"inline_data": inline})
+        if dimension == "720x1280":
+            width, height, aspect_ratio = 720, 1280, "9:16"
+        else:
+            width, height, aspect_ratio = 1280, 720, "16:9"
+
+        generation_config: Dict[str, Any] = {
+            "width": width,
+            "height": height,
+            "aspect_ratio": aspect_ratio,
+            "duration_seconds": duration,
+            "fps": 24,
+        }
+
         body = {
             "contents": [
                 {
@@ -340,16 +353,13 @@ class VertexVideoClient(VertexGenerativeClient):
                     "parts": parts,
                 }
             ],
-            "generationConfig": {
-                "video": {
-                    "dimension": dimension,
-                    "duration_seconds": duration,
-                    "fps": 24,
-                }
-            },
+            "generationConfig": generation_config,
         }
         config.setdefault("size", dimension)
         config.setdefault("duration", duration)
+        config.setdefault("width", width)
+        config.setdefault("height", height)
+        config.setdefault("aspect_ratio", aspect_ratio)
         return body
 
 
