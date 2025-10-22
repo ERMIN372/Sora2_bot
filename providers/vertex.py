@@ -1080,9 +1080,6 @@ class VertexVeoPreviewClient(VertexGenerativeClient):
             )
             if isinstance(duration_value, (int, float)) and duration_value > 0:
                 meta["duration_seconds"] = float(duration_value)
-            fps_value = prediction.get("fps")
-            if isinstance(fps_value, (int, float)) and fps_value > 0:
-                meta["fps"] = float(fps_value)
             try:
                 decoded = base64.b64decode(encoded, validate=True)
             except (binascii.Error, ValueError):
