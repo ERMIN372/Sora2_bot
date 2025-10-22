@@ -1010,6 +1010,16 @@ async def _launch_order(
             idempotency_key=idempotency_key,
         )
     except ProviderAPIError as exc:
+        log.warning(
+            "Provider submission failed corr_id=%s provider=%s status=%s error_type=%s error_code=%s retryable=%s message=%s",
+            corr_id,
+            provider_key,
+            exc.status_code,
+            exc.error_type,
+            exc.error_code,
+            exc.retryable,
+            exc.provider_message or str(exc),
+        )
         message, short, notify_support, hint = _map_provider_error(exc)
         refunded = False
         try:

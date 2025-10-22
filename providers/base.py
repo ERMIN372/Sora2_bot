@@ -14,6 +14,54 @@ from config import Config
 
 log = logging.getLogger(__name__)
 
+_SENSITIVE_HEADERS = {
+    "authorization",
+    "proxy-authorization",
+    "x-api-key",
+    "api-key",
+    "x-goog-api-key",
+    "x-anthropic-api-key",
+}
+
+
+def _mask_secret(value: Any, visible: int = 6) -> str:
+    if value is None:
+        return ""
+    text = str(value)
+    if len(text) <= visible:
+        return "*" * len(text)
+    return f"{text[:visible]}{'*' * (len(text) - visible)}"
+
+
+def _sanitize_headers(headers: Dict[str, str]) -> Dict[str, str]:
+    safe: Dict[str, str] = {}
+    for key, value in headers.items():
+        if isinstance(value, str) and key.lower() in _SENSITIVE_HEADERS:
+            safe[key] = _mask_secret(value)
+        else:
+            safe[key] = value
+    return safe
+
+
+def _serialise_for_log(data: Any, *, limit: int = 512) -> str:
+    if data is None:
+        return ""
+    try:
+        serialised = json.dumps(data, ensure_ascii=False)
+    except (TypeError, ValueError):
+        serialised = str(data)
+    if len(serialised) > limit:
+        return f"{serialised[:limit]}…(+{len(serialised) - limit} chars)"
+    return serialised
+
+
+def _truncate(text: Optional[str], limit: int = 1024) -> str:
+    if not text:
+        return ""
+    if len(text) > limit:
+        return f"{text[:limit]}…(+{len(text) - limit} chars)"
+    return text
+
 
 @dataclass(slots=True)
 class ProviderRequestMeta:
@@ -169,10 +217,21 @@ class BaseProviderClient:
     async def download_asset(self, asset_url: str) -> bytes:
         session = await self._ensure_session()
         start = time.monotonic()
+        log.debug(
+            "Downloading provider asset provider=%s url=%s",
+            self._provider_name,
+            asset_url,
+        )
         try:
             async with session.get(asset_url) as response:
                 body = await response.read()
                 if response.status >= 400:
+                    log.warning(
+                        "Failed to download provider asset provider=%s url=%s status=%s",
+                        self._provider_name,
+                        asset_url,
+                        response.status,
+                    )
                     raise ProviderAPIError(
                         provider=self._provider_name,
                         status_code=response.status,
@@ -182,6 +241,12 @@ class BaseProviderClient:
                 return body
         except asyncio.TimeoutError as exc:
             duration_ms = int((time.monotonic() - start) * 1000)
+            log.warning(
+                "Provider asset download timed out provider=%s url=%s duration_ms=%s",
+                self._provider_name,
+                asset_url,
+                duration_ms,
+            )
             raise ProviderAPIError(
                 provider=self._provider_name,
                 status_code=0,
@@ -189,6 +254,14 @@ class BaseProviderClient:
                 error_type="timeout",
                 duration_ms=duration_ms,
             ) from exc
+        finally:
+            duration_ms = int((time.monotonic() - start) * 1000)
+            log.debug(
+                "Finished provider asset download provider=%s url=%s duration_ms=%s",
+                self._provider_name,
+                asset_url,
+                duration_ms,
+            )
 
     # ------------------------------------------------------------------
     # Hooks for subclasses
@@ -245,14 +318,41 @@ class BaseProviderClient:
         last_error: Optional[ProviderAPIError] = None
         while attempt <= self._config.request_retries:
             try:
+                log.debug(
+                    "Provider request attempt=%s provider=%s method=%s url=%s idempotency_key=%s",
+                    attempt + 1,
+                    self._provider_name,
+                    method,
+                    url,
+                    headers.get("Idempotency-Key"),
+                )
                 return await self._perform_request(
                     method, url, headers=headers, **kwargs
                 )
             except ProviderAPIError as exc:
                 last_error = exc
                 if not exc.retryable or attempt == self._config.request_retries:
+                    log.warning(
+                        "Provider request failed provider=%s method=%s url=%s status=%s error_type=%s error_code=%s message=%s",
+                        self._provider_name,
+                        method,
+                        url,
+                        exc.status_code,
+                        exc.error_type,
+                        exc.error_code,
+                        exc,
+                    )
                     raise
                 attempt += 1
+                log.warning(
+                    "Retrying provider request provider=%s method=%s url=%s attempt=%s/%s retryable=%s",
+                    self._provider_name,
+                    method,
+                    url,
+                    attempt + 1,
+                    self._config.request_retries + 1,
+                    exc.retryable,
+                )
                 await asyncio.sleep(delay)
                 delay *= self._config.retry_backoff
         assert last_error is not None  # pragma: no cover
@@ -268,18 +368,56 @@ class BaseProviderClient:
     ) -> Tuple[Dict[str, Any], int, int]:
         session = await self._ensure_session()
         start = time.monotonic()
+        json_payload = kwargs.get("json")
+        data_payload = kwargs.get("data")
+        params_payload = kwargs.get("params")
+        log.debug(
+            "Sending provider request provider=%s method=%s url=%s headers=%s params=%s json=%s data=%s",
+            self._provider_name,
+            method,
+            url,
+            _sanitize_headers(headers),
+            _serialise_for_log(params_payload),
+            _serialise_for_log(json_payload),
+            _serialise_for_log(data_payload),
+        )
         try:
             async with session.request(method, url, headers=headers, **kwargs) as response:
                 text = await response.text()
                 duration_ms = int((time.monotonic() - start) * 1000)
                 status = response.status
+                log.debug(
+                    "Provider response provider=%s method=%s url=%s status=%s duration_ms=%s body=%s",
+                    self._provider_name,
+                    method,
+                    url,
+                    status,
+                    duration_ms,
+                    _truncate(text),
+                )
                 if status >= 400:
+                    log.warning(
+                        "Provider responded with error provider=%s method=%s url=%s status=%s duration_ms=%s",
+                        self._provider_name,
+                        method,
+                        url,
+                        status,
+                        duration_ms,
+                    )
                     raise self._build_error(status, text, duration_ms)
                 if not text:
                     return {}, status, duration_ms
                 try:
                     data = json.loads(text)
                 except json.JSONDecodeError as exc:
+                    log.error(
+                        "Failed to decode provider response provider=%s method=%s url=%s status=%s body=%s",
+                        self._provider_name,
+                        method,
+                        url,
+                        status,
+                        _truncate(text),
+                    )
                     raise ProviderAPIError(
                         provider=self._provider_name,
                         status_code=status,
@@ -292,6 +430,13 @@ class BaseProviderClient:
                 return data, status, duration_ms
         except asyncio.TimeoutError as exc:
             duration_ms = int((time.monotonic() - start) * 1000)
+            log.warning(
+                "Provider request timed out provider=%s method=%s url=%s duration_ms=%s",
+                self._provider_name,
+                method,
+                url,
+                duration_ms,
+            )
             raise ProviderAPIError(
                 provider=self._provider_name,
                 status_code=0,
