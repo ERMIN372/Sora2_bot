@@ -186,6 +186,7 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "flow.not_enough": "Недостаточно кредитов. Выберите пакет ниже.",
         "status.running": "⚙️ Генерирую…",
         "status.completed_file": "✅ Готово. Отправляю ролик.",
+        "status.completed_photo": "✅ Готово. Отправляю фото.",
         "status.completed_url": "Готово: {url}",
         "status.inline_too_large": (
             "Файл от модели ({mime}, {size} байт) превышает лимит Telegram ({limit_mb} МБ)."
