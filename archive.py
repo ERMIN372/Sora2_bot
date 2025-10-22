@@ -192,6 +192,14 @@ class ArchivePublisher:
                     log.warning(
                         "Archive publish rate limited corr_id=%s attempt=%s delay=%s", corr_id, attempt, delay
                     )
+                    if attempt >= _RETRY_ATTEMPTS:
+                        log.warning(
+                            "Archive publish giving up after rate limit corr_id=%s attempts=%s",
+                            corr_id,
+                            attempt,
+                        )
+                        message = None
+                        break
                     await asyncio.sleep(delay)
                     continue
                 except (NetworkError, TelegramServerError, aiohttp.ClientError, asyncio.TimeoutError):
@@ -200,6 +208,14 @@ class ArchivePublisher:
                     log.warning(
                         "Archive publish network error corr_id=%s attempt=%s retry_in=%s", corr_id, attempt, delay
                     )
+                    if attempt >= _RETRY_ATTEMPTS:
+                        log.warning(
+                            "Archive publish giving up after network errors corr_id=%s attempts=%s",
+                            corr_id,
+                            attempt,
+                        )
+                        message = None
+                        break
                     await asyncio.sleep(delay)
                     continue
                 except (BadRequest, Unauthorized, ChatNotFound, CantTalkWithBot) as exc:
