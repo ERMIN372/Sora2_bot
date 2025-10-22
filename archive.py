@@ -12,16 +12,16 @@ from typing import Literal, Optional
 import aiohttp
 from aiogram import Bot
 from aiogram.types import InputFile
-from aiogram.utils.exceptions import (
-    BadRequest,
-    CantTalkWithBot,
-    ChatNotFound,
-    NetworkError,
-    RetryAfter,
-    TelegramAPIError,
-    TelegramServerError,
-    Unauthorized,
-)
+from aiogram.utils import exceptions as aiogram_exceptions
+
+BadRequest = aiogram_exceptions.BadRequest
+ChatNotFound = aiogram_exceptions.ChatNotFound
+NetworkError = aiogram_exceptions.NetworkError
+RetryAfter = aiogram_exceptions.RetryAfter
+TelegramAPIError = aiogram_exceptions.TelegramAPIError
+TelegramServerError = aiogram_exceptions.TelegramServerError
+Unauthorized = aiogram_exceptions.Unauthorized
+CantTalkWithBot = getattr(aiogram_exceptions, "CantTalkWithBot", TelegramAPIError)
 
 from config import Config
 from db import ArchiveLogRecord, Database
