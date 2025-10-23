@@ -97,6 +97,8 @@ _PRO_REQUEST_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
+_SUPPORTED_VEO_PREFIXES: Tuple[str, ...] = ("veo-3.0-", "veo-3.1-")
+
 
 class GenerationStates(StatesGroup):
     """Conversation states for collecting generation inputs."""
@@ -161,6 +163,12 @@ def _normalise_video_model_name(name: str) -> str:
     return value
 
 
+def _is_supported_video_model_name(name: str) -> bool:
+    normalised = _normalise_video_model_name(name)
+    lowered = normalised.lower()
+    return any(lowered.startswith(prefix) for prefix in _SUPPORTED_VEO_PREFIXES)
+
+
 def _make_model_option_key(name: str, used: Set[str]) -> str:
     slug = re.sub(r"[^a-z0-9]+", "_", name.lower())
     slug = slug.strip("_") or "veo"
@@ -179,12 +187,12 @@ def _video_model_options(config: Config) -> list[VideoModelOption]:
 
     names: list[str] = []
     default_name = _normalise_video_model_name(config.gemini_model_video)
-    if default_name:
+    if default_name and _is_supported_video_model_name(default_name):
         names.append(default_name)
 
     for candidate in list_veo_video_models(config):
         normalised = _normalise_video_model_name(candidate)
-        if normalised and normalised not in names:
+        if normalised and _is_supported_video_model_name(normalised) and normalised not in names:
             names.append(normalised)
 
     if not names:
@@ -192,7 +200,7 @@ def _video_model_options(config: Config) -> list[VideoModelOption]:
         return [
             VideoModelOption(
                 key="veo",
-                model=default_name or "veo-3",
+                model=default_name if _is_supported_video_model_name(default_name) else "veo-3.0-generate-001",
                 provider="veo",
                 label=fallback_label,
             )
@@ -1313,7 +1321,31 @@ async def _send_job_update(
             return
         if status == "failed":
             error_text = i18n.t("status.failed", error=job.error or i18n.t("errors.unknown"))
-            await STATUS_MESSAGES.mark_failed(bot=dp.bot, db=db, job=job, text=error_text)
+            await STATUS_MESSAGES.mark_failed(
+                bot=dp.bot, db=db, job=job, text=error_text, terminal_state="failed"
+            )
+            return
+        if status == "timeout":
+            timeout_text = i18n.t(
+                "status.failed", error=job.error or i18n.t("errors.unknown")
+            )
+            await STATUS_MESSAGES.mark_failed(
+                bot=dp.bot,
+                db=db,
+                job=job,
+                text=timeout_text,
+                terminal_state="timeout",
+            )
+            return
+        if status == "refunded":
+            refunded_text = job.error or i18n.t("status.delivery_generic")
+            await STATUS_MESSAGES.mark_failed(
+                bot=dp.bot,
+                db=db,
+                job=job,
+                text=refunded_text,
+                terminal_state="refunded",
+            )
             return
         if status != "completed":
             generic_text = i18n.t(
@@ -1376,6 +1408,7 @@ async def _send_job_update(
             job=job,
             text=summary_text,
         )
+        increment_metric("deliver_success_total")
         if archive:
             payload = _build_archive_payload_from_sent(job, sent_info)
             if payload:

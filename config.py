@@ -181,6 +181,10 @@ class Config:
     admin_ids: Tuple[int, ...] = ()
     bot_version: str = "dev"
     support_notify_interval: int = 600
+    veo_poll_interval_min_seconds: float = 2.0
+    veo_poll_interval_max_seconds: float = 5.0
+    veo_operation_timeout_seconds: float = 12 * 60.0
+    veo_operation_idle_timeout_seconds: float = 120.0
 
     @property
     def yookassa_enabled(self) -> bool:

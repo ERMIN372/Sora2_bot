@@ -6,9 +6,11 @@ import hashlib
 import json
 import logging
 import os
+import random
+import time
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Awaitable, Callable, Dict, List, Optional
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 
 from config import Config
 from db import Database, ErrorLogRecord, GenerationJobRecord
@@ -19,6 +21,240 @@ from generation_gate import GenerationRequestGate
 from providers import BaseProviderClient, ProviderAPIError, ProviderJobStatus, ProviderJobSubmission
 
 log = logging.getLogger(__name__)
+
+
+_REASON_MESSAGES: Dict[str, str] = {
+    "api_access_disabled": "Доступ к API отключён/ограничен. Исправим и вернёмся.",
+    "service_busy": "Сервис занят. Квота на исходе. Попробуйте позже.",
+    "invalid_request": "Запрос оформлен неподдерживаемо для выбранной модели.",
+    "provider_error": "Сервис ответил с ошибкой. Мы уже всё перезапустили.",
+    "provider_timeout": "Провайдер не закончил вовремя. Мы вернули кредиты.",
+}
+
+_PROGRESS_KEYS: Tuple[str, ...] = (
+    "progress_percent",
+    "progressPercent",
+    "progress_pct",
+    "progressPct",
+    "progress",
+)
+
+_UPDATE_KEYS: Tuple[str, ...] = (
+    "update_time",
+    "updateTime",
+    "latest_update_time",
+    "latestUpdateTime",
+    "update_time_seconds",
+    "last_update_time",
+    "lastUpdateTime",
+)
+
+
+@dataclass(slots=True)
+class _FailureReason:
+    reason: str
+    user_message: str
+    provider_error_code: Optional[str]
+    provider_error_message: Optional[str]
+
+
+@dataclass(slots=True)
+class _OperationTracker:
+    job_id: str
+    corr_id: str
+    provider: str
+    started_at: float
+    deadline_at: float
+    last_progress_at: float
+    last_progress: Optional[float] = None
+    last_update_token: Optional[str] = None
+
+    def touch(
+        self,
+        *,
+        progress: Optional[float],
+        update_token: Optional[str],
+        now: float,
+    ) -> None:
+        changed = False
+        if progress is not None and progress != self.last_progress:
+            self.last_progress = progress
+            changed = True
+        if update_token:
+            token = str(update_token)
+            if token and token != self.last_update_token:
+                self.last_update_token = token
+                changed = True
+        if changed:
+            self.last_progress_at = now
+
+    def deadline_exceeded(self, now: float) -> bool:
+        return now >= self.deadline_at
+
+    def idle_exceeded(self, now: float, timeout: float) -> bool:
+        if timeout <= 0:
+            return False
+        return (now - self.last_progress_at) >= timeout
+
+    def snapshot(self) -> Dict[str, Any]:
+        return {
+            "started_at": self.started_at,
+            "deadline_at": self.deadline_at,
+            "last_progress_at": self.last_progress_at,
+            "last_progress": self.last_progress,
+            "last_update_token": self.last_update_token,
+        }
+
+
+def _coerce_float(value: Any) -> Optional[float]:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _extract_progress_markers(data: Dict[str, Any]) -> Tuple[Optional[float], Optional[str]]:
+    if not isinstance(data, dict):
+        return None, None
+    progress: Optional[float] = None
+    update_token: Optional[str] = None
+    stack: list[Any] = [data]
+    while stack and (progress is None or update_token is None):
+        node = stack.pop()
+        if isinstance(node, dict):
+            for key, value in node.items():
+                if progress is None and key in _PROGRESS_KEYS:
+                    progress = _coerce_float(value)
+                if update_token is None and key in _UPDATE_KEYS:
+                    if isinstance(value, (str, int, float)):
+                        text = str(value).strip()
+                        if text:
+                            update_token = text
+                if progress is not None and update_token is not None:
+                    break
+            if progress is not None and update_token is not None:
+                break
+            for value in node.values():
+                if isinstance(value, (dict, list, tuple)):
+                    stack.append(value)
+        elif isinstance(node, (list, tuple)):
+            for item in node:
+                if isinstance(item, (dict, list, tuple)):
+                    stack.append(item)
+    return progress, update_token
+
+
+def _find_error_payload(data: Any) -> Optional[Dict[str, Any]]:
+    if data is None:
+        return None
+    stack: list[Any] = [data]
+    while stack:
+        node = stack.pop()
+        if isinstance(node, dict):
+            candidate = node.get("error")
+            if isinstance(candidate, dict):
+                return candidate
+            for value in node.values():
+                if isinstance(value, (dict, list, tuple)):
+                    stack.append(value)
+        elif isinstance(node, (list, tuple)):
+            for item in node:
+                if isinstance(item, (dict, list, tuple)):
+                    stack.append(item)
+    return None
+
+
+def _normalise_error_code(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        try:
+            return str(int(value))
+        except (TypeError, ValueError):  # pragma: no cover - defensive
+            return str(value)
+    text = str(value).strip()
+    if not text:
+        return None
+    return text.upper()
+
+
+def _map_error_reason(
+    status_code: Optional[int],
+    codes: Tuple[str, ...],
+    *,
+    provider_timeout: bool = False,
+) -> str:
+    if provider_timeout:
+        return "provider_timeout"
+    upper_codes = {code.upper() for code in codes if code}
+    numeric_codes = set()
+    for code in upper_codes:
+        if code.isdigit():
+            try:
+                numeric_codes.add(int(code))
+            except ValueError:  # pragma: no cover - defensive
+                continue
+    http_status = status_code
+    if http_status is None and numeric_codes:
+        http_status = next(iter(numeric_codes))
+    if upper_codes.intersection({"PERMISSION_DENIED", "SERVICE_DISABLED"}) or http_status == 403:
+        return "api_access_disabled"
+    if any("RESOURCE_EXHAUSTED" in code or "QUOTA" in code for code in upper_codes) or http_status == 429:
+        return "service_busy"
+    if upper_codes.intersection({"INVALID_ARGUMENT", "FAILED_PRECONDITION"}) or http_status in {400, 422}:
+        return "invalid_request"
+    if upper_codes.intersection({"INTERNAL", "UNAVAILABLE"}) or (
+        http_status is not None and http_status >= 500
+    ):
+        return "provider_error"
+    return "provider_error"
+
+
+def _build_failure_reason(
+    *,
+    status_code: Optional[int],
+    error_payload: Optional[Dict[str, Any]],
+    fallback_message: str,
+    provider_timeout: bool = False,
+) -> _FailureReason:
+    codes: list[str] = []
+    provider_error_code: Optional[str] = None
+    provider_error_message: Optional[str] = None
+    if isinstance(error_payload, dict):
+        for key in ("status", "code", "reason", "error_code"):
+            normalised = _normalise_error_code(error_payload.get(key))
+            if normalised:
+                codes.append(normalised)
+                if provider_error_code is None:
+                    provider_error_code = normalised
+        raw_message = error_payload.get("message")
+        if isinstance(raw_message, (dict, list)):
+            try:
+                provider_error_message = json.dumps(raw_message, ensure_ascii=False)
+            except Exception:  # pragma: no cover - defensive serialisation
+                provider_error_message = str(raw_message)
+        elif raw_message:
+            provider_error_message = str(raw_message)
+    if provider_error_code is None and status_code is not None:
+        provider_error_code = str(status_code)
+    if provider_timeout and not provider_error_code:
+        provider_error_code = "provider_timeout"
+    if provider_error_message is None:
+        provider_error_message = fallback_message or ""
+    if provider_timeout and not provider_error_message:
+        provider_error_message = "operation timed out"
+    reason_code = _map_error_reason(status_code, tuple(codes), provider_timeout=provider_timeout)
+    user_message = _REASON_MESSAGES.get(reason_code) or fallback_message or _REASON_MESSAGES[
+        "provider_error"
+    ]
+    return _FailureReason(
+        reason=reason_code,
+        user_message=user_message,
+        provider_error_code=provider_error_code,
+        provider_error_message=provider_error_message or None,
+    )
 
 
 def _prompt_preview(prompt: str, limit: int = 120) -> str:
@@ -73,6 +309,7 @@ class JobQueue:
             process_id=f"pid={os.getpid()}",  # pragma: no cover - runtime value
             logger=log,
         )
+        self._operation_trackers: Dict[str, _OperationTracker] = {}
 
     def register_notification_callback(
         self, *, name: str, callback: Callable[[GenerationJobRecord], Awaitable[None]]
@@ -100,6 +337,170 @@ class JobQueue:
         raise RuntimeError(
             "Requested generation provider is not configured and no default provider is available"
         )
+
+    def _poll_interval_seconds(self) -> float:
+        try:
+            low_value = float(self._config.veo_poll_interval_min_seconds)
+        except (TypeError, ValueError):  # pragma: no cover - defensive
+            low_value = 2.0
+        try:
+            high_value = float(self._config.veo_poll_interval_max_seconds)
+        except (TypeError, ValueError):  # pragma: no cover - defensive
+            high_value = 5.0
+        low = max(low_value, 0.5)
+        high = max(high_value, low)
+        return random.uniform(low, high)
+
+    def _ensure_operation_tracker(
+        self,
+        *,
+        pending: PendingJob,
+        provider_key: str,
+        now: float,
+    ) -> _OperationTracker:
+        tracker = self._operation_trackers.get(pending.job_id)
+        try:
+            timeout_value = float(self._config.veo_operation_timeout_seconds)
+        except (TypeError, ValueError):  # pragma: no cover - defensive
+            timeout_value = 12 * 60.0
+        if timeout_value <= 0:
+            timeout_value = 12 * 60.0
+        if tracker is None:
+            tracker = _OperationTracker(
+                job_id=pending.job_id,
+                corr_id=pending.corr_id,
+                provider=provider_key,
+                started_at=now,
+                deadline_at=now + timeout_value,
+                last_progress_at=now,
+            )
+            self._operation_trackers[pending.job_id] = tracker
+        else:
+            tracker.corr_id = pending.corr_id
+            tracker.provider = provider_key
+        return tracker
+
+    def _reset_operation_tracker(self, job_id: str) -> None:
+        self._operation_trackers.pop(job_id, None)
+
+    async def _handle_operation_timeout(
+        self,
+        *,
+        pending: PendingJob,
+        provider_key: str,
+        key_mask: str,
+        result: ProviderJobStatus,
+        provider_data: Dict[str, Any],
+        tracker: _OperationTracker,
+        job_extra: Dict[str, Any],
+        timeout_kind: str,
+    ) -> None:
+        self._reset_operation_tracker(pending.job_id)
+        raw_error = result.error or ""
+        error_payload = _find_error_payload(provider_data)
+        failure_reason = _build_failure_reason(
+            status_code=result.status_code,
+            error_payload=error_payload,
+            fallback_message=raw_error,
+            provider_timeout=True,
+        )
+        reason_code = failure_reason.reason
+        reason_message = failure_reason.user_message
+        provider_error_code = failure_reason.provider_error_code
+        provider_error_message = failure_reason.provider_error_message
+        job_extra.setdefault("reason", reason_code)
+        job_extra.setdefault("reason_message", reason_message)
+        if provider_error_code:
+            job_extra.setdefault("provider_error_code", provider_error_code)
+        if provider_error_message:
+            job_extra.setdefault("provider_error_message", provider_error_message)
+        job_extra.setdefault("timeout_kind", timeout_kind)
+        job_extra.setdefault("operation_tracker", tracker.snapshot())
+        if isinstance(error_payload, dict):
+            job_extra.setdefault("provider_error", error_payload)
+        if provider_data and "provider_data" not in job_extra:
+            job_extra["provider_data"] = provider_data
+        try:
+            await self._db.update_job(pending.job_id, "timeout", error=reason_message)
+        except Exception:
+            log.exception("Failed to update job %s as timeout", pending.job_id)
+        refunded = False
+        try:
+            await self._db.add_credits(pending.user_id, self._config.generation_cost_credits)
+            refunded = True
+            increment_metric("refunds_total")
+            increment_metric("refund_total")
+        except Exception:
+            log.exception("Refunding credits failed for timeout job %s", pending.job_id)
+        error_record = ErrorLogRecord(
+            ts=datetime.utcnow(),
+            user_id=pending.user_id,
+            username=pending.username,
+            corr_id=pending.corr_id,
+            job_id=pending.job_id,
+            model=pending.model,
+            size=pending.size,
+            status_code=result.status_code,
+            error_type="job_timeout",
+            error_msg_short=reason_message[:240],
+            refunded=refunded,
+            preflight_blocked=False,
+            preflight_reason=pending.preflight_reason or "",
+            auto_sanitized=pending.auto_sanitized,
+            sanitized_prompt=pending.sanitized_prompt or pending.prompt,
+            error_scope="unknown",
+            error_json="",
+            job_status="timeout",
+            reason=reason_code,
+            provider_error_code=provider_error_code,
+            provider_error_message=provider_error_message,
+        )
+        sheet_ok = await self._db.log_error_record(error_record)
+        log_event(
+            level="ERROR",
+            event="error",
+            corr_id=pending.corr_id,
+            job_id=pending.job_id,
+            user_id=pending.user_id,
+            username=pending.username,
+            model=pending.model,
+            provider=provider_key,
+            size=pending.size,
+            status_code=result.status_code,
+            duration_ms=result.duration_ms,
+            error_type="job_timeout",
+            error_msg_short=reason_message,
+            gsheets_ok=sheet_ok,
+            refund_done=refunded,
+            extra={
+                "provider_message": raw_error,
+                "reason": reason_code,
+                "reason_message": reason_message,
+                "provider_error_code": provider_error_code,
+                "provider_error_message": provider_error_message,
+                "timeout_kind": timeout_kind,
+                "operation_tracker": tracker.snapshot(),
+                "gemini_key_mask": key_mask or None,
+            },
+        )
+        log_event(
+            level="INFO",
+            event="refund",
+            corr_id=pending.corr_id,
+            job_id=pending.job_id,
+            user_id=pending.user_id,
+            username=pending.username,
+            model=pending.model,
+            provider=provider_key,
+            size=pending.size,
+            credits_cost=self._config.generation_cost_credits,
+            refund_done=refunded,
+            extra={"gemini_key_mask": key_mask or None, "reason": reason_code},
+        )
+        increment_metric("veo_running_timeout_total")
+        increment_metric("veo_failed_total", tags={"reason": reason_code})
+        await self._release_gate(pending, reason="provider_timeout", status="timeout")
+
 
     async def start(self) -> None:
         if self._workers:
@@ -349,9 +750,14 @@ class JobQueue:
         assets_meta: List[Dict[str, Any]] = []
         job_extra: Dict[str, Any] = {}
         asset_label: Optional[str] = None
+        tracker: Optional[_OperationTracker] = None
         try:
             client, provider_key = self._resolve_provider(pending.provider)
-            if provider_key.startswith(("veo", "gemini")):
+            provider_name = getattr(client, "provider_name", provider_key or "")
+            is_veo_provider = provider_name.startswith("veo")
+            if provider_key.startswith(("veo", "gemini")) or provider_name.startswith(
+                ("veo", "gemini")
+            ):
                 key_mask = self._gemini_key_mask
             else:
                 key_mask = ""
@@ -392,7 +798,7 @@ class JobQueue:
                     duration_ms=exc.duration_ms,
                     extra=error_extra,
                 )
-                await asyncio.sleep(3)
+                await asyncio.sleep(self._poll_interval_seconds())
                 await self.enqueue(
                     job_id=pending.job_id,
                     user_id=pending.user_id,
@@ -425,7 +831,7 @@ class JobQueue:
                     error_msg_short=str(exc),
                     extra={"gemini_key_mask": key_mask or None},
                 )
-                await asyncio.sleep(3)
+                await asyncio.sleep(self._poll_interval_seconds())
                 await self.enqueue(
                     job_id=pending.job_id,
                     user_id=pending.user_id,
@@ -564,7 +970,62 @@ class JobQueue:
                 else:
                     asset_label_display = None
 
+            if provider_data and "provider_data" not in job_extra:
+                job_extra["provider_data"] = provider_data
+            progress_value: Optional[float] = None
+            progress_token: Optional[str] = None
+            if is_veo_provider:
+                now_monotonic = time.monotonic()
+                tracker = self._ensure_operation_tracker(
+                    pending=pending, provider_key=provider_key, now=now_monotonic
+                )
+                progress_value, progress_token = _extract_progress_markers(provider_data)
+                if progress_value is not None:
+                    job_extra["progress_percent"] = progress_value
+                if progress_token:
+                    job_extra["progress_update_time"] = progress_token
+                tracker.touch(
+                    progress=progress_value,
+                    update_token=progress_token,
+                    now=now_monotonic,
+                )
+                try:
+                    idle_timeout_value = float(self._config.veo_operation_idle_timeout_seconds)
+                except (TypeError, ValueError):  # pragma: no cover - defensive
+                    idle_timeout_value = 120.0
+                if idle_timeout_value < 0:
+                    idle_timeout_value = 0.0
+                if tracker.deadline_exceeded(now_monotonic):
+                    await self._handle_operation_timeout(
+                        pending=pending,
+                        provider_key=provider_key,
+                        key_mask=key_mask,
+                        result=result,
+                        provider_data=provider_data,
+                        tracker=tracker,
+                        job_extra=job_extra,
+                        timeout_kind="deadline",
+                    )
+                    return
+                if idle_timeout_value and tracker.idle_exceeded(now_monotonic, idle_timeout_value):
+                    await self._handle_operation_timeout(
+                        pending=pending,
+                        provider_key=provider_key,
+                        key_mask=key_mask,
+                        result=result,
+                        provider_data=provider_data,
+                        tracker=tracker,
+                        job_extra=job_extra,
+                        timeout_kind="idle",
+                    )
+                    return
             poll_extra: Dict[str, Any] = {"status": result.status, "gemini_key_mask": key_mask or None}
+            if progress_value is not None:
+                poll_extra["progress_percent"] = progress_value
+                job_extra["progress_percent"] = progress_value
+            if progress_token:
+                poll_extra["progress_update_time"] = progress_token
+                job_extra["progress_update_time"] = progress_token
             if assets_meta:
                 poll_extra["assets_meta"] = assets_meta
             if recovery_attempted:
@@ -586,6 +1047,7 @@ class JobQueue:
                 extra=poll_extra,
             )
             if result.status == "completed":
+                self._reset_operation_tracker(pending.job_id)
                 if not inline_assets and not asset_value:
                     if no_media_confirmed:
                         await self._handle_no_media_assets(
@@ -602,7 +1064,7 @@ class JobQueue:
                         pending.corr_id,
                         provider_key,
                     )
-                    await asyncio.sleep(3)
+                    await asyncio.sleep(self._poll_interval_seconds())
                     await self.enqueue(
                         job_id=pending.job_id,
                         user_id=pending.user_id,
@@ -669,6 +1131,7 @@ class JobQueue:
                 )
                 await self._release_gate(pending, reason="success", status="completed")
             elif result.status in {"failed", "errored", "stopped"}:
+                self._reset_operation_tracker(pending.job_id)
                 log.warning(
                     "Job failed job_id=%s corr_id=%s provider=%s status=%s error=%s",
                     pending.job_id,
@@ -677,21 +1140,31 @@ class JobQueue:
                     result.status,
                     result.error,
                 )
-                raw_error = result.error or "Unknown error"
+                raw_error_text = (result.error or "").strip()
+                if not raw_error_text:
+                    raw_error_text = "Unknown error"
+                error_payload = _find_error_payload(provider_data)
+                failure_reason = _build_failure_reason(
+                    status_code=result.status_code,
+                    error_payload=error_payload,
+                    fallback_message=raw_error_text,
+                )
+                reason_code = failure_reason.reason
+                provider_error_code = failure_reason.provider_error_code
+                provider_error_message = failure_reason.provider_error_message
                 response_payload: Optional[Dict[str, Any]] = None
-                if isinstance(result.data, dict):
-                    response_payload = result.data.get("response")
+                if isinstance(provider_data, dict):
+                    response_payload = provider_data.get("response")
                 scope, categories, summary = classify_safety_response(response_payload)
                 if scope == "unknown" and pending.preflight_scope:
                     scope = pending.preflight_scope
                 error_json = render_error_json(summary)
                 policy_text = policy_message(scope)
+                error_message = failure_reason.user_message or raw_error_text
                 if scope != "unknown":
                     error_message = policy_text
-                elif raw_error.strip().upper() in {"STOP", "SAFETY"}:
+                elif raw_error_text.strip().upper() in {"STOP", "SAFETY"}:
                     error_message = policy_message("unknown")
-                else:
-                    error_message = raw_error
                 if scope and scope != "unknown":
                     job_extra["error_scope"] = scope
                 if summary:
@@ -706,6 +1179,14 @@ class JobQueue:
                     job_extra.setdefault("sanitized_prompt", pending.sanitized_prompt)
                 if categories:
                     job_extra.setdefault("safety_categories", categories)
+                job_extra.setdefault("reason", reason_code)
+                job_extra["reason_message"] = error_message
+                if provider_error_code:
+                    job_extra.setdefault("provider_error_code", provider_error_code)
+                if provider_error_message:
+                    job_extra.setdefault("provider_error_message", provider_error_message)
+                if isinstance(error_payload, dict):
+                    job_extra.setdefault("provider_error", error_payload)
                 gsheets_ok = True
                 try:
                     await self._db.update_job(
@@ -723,29 +1204,33 @@ class JobQueue:
                     )
                     refunded = True
                     increment_metric("refunds_total")
+                    increment_metric("refund_total")
                 except Exception:
                     log.exception("Refunding credits failed for job %s", pending.job_id)
-                sheet_ok = await self._db.log_error_record(
-                    ErrorLogRecord(
-                        ts=datetime.utcnow(),
-                        user_id=pending.user_id,
-                        username=pending.username,
-                        corr_id=pending.corr_id,
-                        job_id=pending.job_id,
-                        model=pending.model,
-                        size=pending.size,
-                        status_code=result.status_code,
-                        error_type="job_failed",
-                        error_msg_short=error_message[:240],
-                        refunded=refunded,
-                        preflight_blocked=False,
-                        preflight_reason=pending.preflight_reason or "",
-                        auto_sanitized=pending.auto_sanitized,
-                        sanitized_prompt=pending.sanitized_prompt or pending.prompt,
-                        error_scope=scope,
-                        error_json=error_json,
-                    )
+                error_record = ErrorLogRecord(
+                    ts=datetime.utcnow(),
+                    user_id=pending.user_id,
+                    username=pending.username,
+                    corr_id=pending.corr_id,
+                    job_id=pending.job_id,
+                    model=pending.model,
+                    size=pending.size,
+                    status_code=result.status_code,
+                    error_type="job_failed",
+                    error_msg_short=error_message[:240],
+                    refunded=refunded,
+                    preflight_blocked=False,
+                    preflight_reason=pending.preflight_reason or "",
+                    auto_sanitized=pending.auto_sanitized,
+                    sanitized_prompt=pending.sanitized_prompt or pending.prompt,
+                    error_scope=scope,
+                    error_json=error_json,
+                    job_status="failed",
+                    reason=reason_code,
+                    provider_error_code=provider_error_code,
+                    provider_error_message=provider_error_message,
                 )
+                sheet_ok = await self._db.log_error_record(error_record)
                 log_event(
                     level="ERROR",
                     event="error",
@@ -763,7 +1248,7 @@ class JobQueue:
                     gsheets_ok=gsheets_ok and sheet_ok,
                     refund_done=refunded,
                     extra={
-                        "provider_message": raw_error,
+                        "provider_message": raw_error_text,
                         "error_scope": scope,
                         "error_json": error_json,
                         "safety_categories": categories,
@@ -772,6 +1257,10 @@ class JobQueue:
                         "preflight_scope": scope,
                         "preflight_auto_sanitized": pending.auto_sanitized,
                         "gemini_key_mask": key_mask or None,
+                        "reason": reason_code,
+                        "reason_message": error_message,
+                        "provider_error_code": provider_error_code,
+                        "provider_error_message": provider_error_message,
                     },
                 )
                 log_event(
@@ -786,12 +1275,13 @@ class JobQueue:
                     size=pending.size,
                     credits_cost=self._config.generation_cost_credits,
                     refund_done=refunded,
-                    extra={"gemini_key_mask": key_mask or None},
+                    extra={"gemini_key_mask": key_mask or None, "reason": reason_code},
                 )
+                increment_metric("veo_failed_total", tags={"reason": reason_code})
                 await self._release_gate(
                     pending,
                     reason="job_failed",
-                    status=result.status,
+                    status="failed",
                 )
             else:
                 # Job still running - requeue for later polling
@@ -803,7 +1293,7 @@ class JobQueue:
                     result.status,
                 )
                 await self._db.update_job(pending.job_id, result.status)
-                await asyncio.sleep(3)
+                await asyncio.sleep(self._poll_interval_seconds())
                 await self.enqueue(
                     job_id=pending.job_id,
                     user_id=pending.user_id,
@@ -855,6 +1345,7 @@ class JobQueue:
         provider_data: Dict[str, Any],
         result: ProviderJobStatus,
     ) -> None:
+        self._reset_operation_tracker(pending.job_id)
         message = "Провайдер завершил операцию без доступных видеофайлов"
         increment_metric("veo_completed_without_assets")
         log.warning(
@@ -872,6 +1363,7 @@ class JobQueue:
             await self._db.add_credits(pending.user_id, self._config.generation_cost_credits)
             refunded = True
             increment_metric("refunds_total")
+            increment_metric("refund_total")
         except Exception:
             log.exception("Refunding credits failed for no-media job %s", pending.job_id)
 
@@ -901,6 +1393,10 @@ class JobQueue:
             sanitized_prompt=pending.sanitized_prompt or pending.prompt,
             error_scope="unknown",
             error_json="",
+            job_status="failed",
+            reason="no_media_assets",
+            provider_error_code=None,
+            provider_error_message=None,
         )
         sheet_ok = await self._db.log_error_record(error_record)
 
@@ -922,6 +1418,7 @@ class JobQueue:
             refund_done=refunded,
             extra={
                 "reason": "no_media_assets_after_completed",
+                "failure_reason": "no_media_assets",
                 "gemini_key_mask": key_mask or None,
                 "operation_snippet": operation_snippet,
                 "assets_recovery_attempted": provider_data.get("assets_recovery_attempted"),
@@ -940,7 +1437,7 @@ class JobQueue:
             size=pending.size,
             credits_cost=self._config.generation_cost_credits,
             refund_done=refunded,
-            extra={"gemini_key_mask": key_mask or None},
+            extra={"gemini_key_mask": key_mask or None, "reason": "no_media_assets"},
         )
         await self._release_gate(pending, reason="no_media", status="failed")
 

@@ -141,6 +141,10 @@ _ERRORS_HEADERS = [
     "sanitized_prompt",
     "error_scope",
     "error_json",
+    "job_status",
+    "reason",
+    "provider_error_code",
+    "provider_error_message",
 ]
 
 _ARCHIVE_HEADERS = [

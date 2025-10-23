@@ -74,15 +74,35 @@ def _prompt_details(prompt: Optional[str]) -> Dict[str, Any]:
     return {"prompt_hash": digest}
 
 
-def increment_metric(name: str, value: float = 1.0) -> None:
+def _tagged_metric_name(name: str, tags: Optional[Dict[str, Any]]) -> str:
+    if not tags:
+        return name
+    parts = []
+    for key in sorted(tags):
+        value = tags[key]
+        if value is None:
+            continue
+        parts.append(f"{key}={value}")
+    if not parts:
+        return name
+    return f"{name}{{{','.join(parts)}}}"
+
+
+def increment_metric(
+    name: str,
+    value: float = 1.0,
+    *,
+    tags: Optional[Dict[str, Any]] = None,
+) -> None:
     if not name:
         return
-    current = _METRICS.get(name, 0.0)
+    metric_key = _tagged_metric_name(name, tags)
+    current = _METRICS.get(metric_key, 0.0)
     try:
         increment = float(value)
     except (TypeError, ValueError):  # pragma: no cover - defensive conversion
         increment = 0.0
-    _METRICS[name] = current + increment
+    _METRICS[metric_key] = current + increment
 
 
 def record_timing_metric(name: str, value: float) -> None:
