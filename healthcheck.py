@@ -34,7 +34,9 @@ async def _probe_gemini_models(config: Config) -> Tuple[bool, str]:
     checked: List[str] = []
     for model_name in model_names:
         try:
-            response = await asyncio.to_thread(client.models.get, name=model_name)
+            response = await asyncio.to_thread(
+                client.models.get, model=model_name
+            )
         except _genai_errors.APIError as exc:  # pragma: no cover - external API
             detail = f"{getattr(exc, 'code', 0)}:{getattr(exc, 'status', '')}".strip(":")
             log.warning(
@@ -47,6 +49,23 @@ async def _probe_gemini_models(config: Config) -> Tuple[bool, str]:
         else:
             display = getattr(response, "name", None) or model_name
             checked.append(display)
+
+    try:
+        image_response = await asyncio.to_thread(client.models.generate_images, "ping")
+    except _genai_errors.APIError as exc:  # pragma: no cover - external API
+        detail = f"{getattr(exc, 'code', 0)}:{getattr(exc, 'status', '')}".strip(":")
+        log.warning("Gemini image ping failed error=%s", exc, exc_info=True)
+        return False, detail or str(exc)
+    except Exception as exc:  # pragma: no cover - network guard
+        log.warning("Gemini image ping failed", exc_info=True)
+        return False, str(exc)
+    else:
+        if not isinstance(image_response, (bytes, bytearray)):
+            log.warning(
+                "Gemini image ping produced invalid payload type=%s", type(image_response)
+            )
+            return False, "invalid image payload"
+        checked.append("generate_images")
     detail = ", ".join(dict.fromkeys(checked)) if checked else "ok"
     log.info("Gemini models: ok %s", detail)
     return True, detail
