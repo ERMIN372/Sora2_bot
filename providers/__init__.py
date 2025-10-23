@@ -6,16 +6,15 @@ from .base import (
     ProviderJobStatus,
     ProviderJobSubmission,
 )
+from .gemini import GeminiImageClient, GeminiTextClient
 from .sora import SoraClient
-from .vertex import VertexImageClient, VertexVeoPreviewClient, VertexVideoClient
 
 __all__ = [
     "BaseProviderClient",
     "ProviderAPIError",
     "ProviderJobStatus",
     "ProviderJobSubmission",
-    "VertexImageClient",
-    "VertexVideoClient",
-    "VertexVeoPreviewClient",
+    "GeminiImageClient",
+    "GeminiTextClient",
     "SoraClient",
 ]

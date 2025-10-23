@@ -15,25 +15,13 @@ import uvicorn
 
 from app_server import YooKassaProcessor, create_app, poll_pending_payments
 from archive import ArchivePublisher
-from config import (
-    CFG,
-    Config,
-    VERTEX_MODEL_GEMINI_IMAGE,
-    VERTEX_MODEL_VEO31_PREVIEW,
-    load_config,
-)
+from config import CFG, Config, load_config
 from db import Database
 from generation_gate import GenerationRequestGate
 from handlers import register_handlers
 from jobs import JobQueue
 from healthcheck import run_startup_healthcheck
-from providers import (
-    BaseProviderClient,
-    SoraClient,
-    VertexImageClient,
-    VertexVeoPreviewClient,
-    VertexVideoClient,
-)
+from providers import BaseProviderClient, GeminiImageClient, SoraClient
 import yookassa_client
 
 _LOG_LEVEL_NAME = os.getenv("LOG_LEVEL", "INFO").upper()
@@ -87,37 +75,6 @@ def _init_application(config: Config) -> ApplicationState:
     gate = GenerationRequestGate()
     providers: Dict[str, BaseProviderClient] = {}
 
-    if config.vertex_enabled:
-        veo3_client = VertexVideoClient(
-            config=config,
-            model="veo-3.0-generate-001",
-            method="predictLongRunning",
-            provider_name="veo3",
-        )
-        veo31_client = VertexVeoPreviewClient(
-            config=config,
-            model=VERTEX_MODEL_VEO31_PREVIEW,
-            method="predict",
-            provider_name="veo3.1",
-        )
-        gemini_client = VertexImageClient(
-            config=config,
-            model=VERTEX_MODEL_GEMINI_IMAGE,
-            method="generateContent",
-            provider_name="gemini-image",
-        )
-        providers.update(
-            {
-                "veo3": veo3_client,
-                "veo-3.0-generate-001": veo3_client,
-                "veo3.1": veo31_client,
-                "veo31": veo31_client,
-                VERTEX_MODEL_VEO31_PREVIEW: veo31_client,
-                "gemini-image": gemini_client,
-                VERTEX_MODEL_GEMINI_IMAGE: gemini_client,
-            }
-        )
-
     if config.sora_enabled:
         sora_client = SoraClient(config=config)
         providers.update(
@@ -128,14 +85,24 @@ def _init_application(config: Config) -> ApplicationState:
             }
         )
 
+    if config.gemini_enabled:
+        gemini_client = GeminiImageClient(config=config)
+        providers.update(
+            {
+                "gemini-image": gemini_client,
+                "gemini": gemini_client,
+                config.gemini_model_image: gemini_client,
+            }
+        )
+
     default_provider = config.default_video_model
     if default_provider not in providers:
-        if config.vertex_enabled and "veo3" in providers:
-            default_provider = "veo3"
-        elif config.sora_enabled and config.sora_model in providers:
+        if config.sora_enabled and config.sora_model in providers:
             default_provider = config.sora_model
-        else:
+        elif providers:
             default_provider = next(iter(providers))
+        else:
+            default_provider = ""
     job_queue = JobQueue(
         db=db,
         providers=providers,

@@ -64,7 +64,7 @@ __all__ = ["async_retry", "run_cancellable", "build_inline_data_from_telegram_fi
 async def build_inline_data_from_telegram_file(
     bot: Bot, file_id: str
 ) -> Optional[dict[str, str]]:
-    """Download *file_id* and return Vertex inline_data payload."""
+    """Download *file_id* and return Gemini inline_data payload."""
 
     try:
         telegram_file = await bot.get_file(file_id)

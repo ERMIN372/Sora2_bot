@@ -215,12 +215,14 @@ def run_preflight(prompt: str) -> PreflightResult:
 _SAFETY_CATEGORY_MAP: Dict[str, PolicyScope] = {
     "HARM_CATEGORY_SEXUAL": "policy.nsfw",
     "HARM_CATEGORY_SEXUAL_AND_NUDITY": "policy.nsfw",
+    "HARM_CATEGORY_SEXUALLY_EXPLICIT": "policy.nsfw",
     "HARM_CATEGORY_HATE_SPEECH": "policy.hate",
     "HARM_CATEGORY_HARASSMENT": "policy.hate",
     "HARM_CATEGORY_VIOLENCE": "policy.violence",
     "HARM_CATEGORY_DANGEROUS": "policy.illegal",
     "HARM_CATEGORY_DANGEROUS_CONTENT": "policy.illegal",
     "HARM_CATEGORY_SELF_HARM": "policy.violence",
+    "HARM_CATEGORY_CIVIC_INTEGRITY": "policy.illegal",
 }
 
 
@@ -236,7 +238,7 @@ def _collect_safety_categories(ratings: Iterable[Dict[str, object]]) -> List[str
 def classify_safety_response(
     payload: Optional[Dict[str, object]],
 ) -> Tuple[PolicyScope, List[str], Dict[str, object]]:
-    """Inspect Vertex/Gemini safety payload and return policy scope information."""
+    """Inspect Gemini safety payload and return policy scope information."""
 
     if not isinstance(payload, dict):
         return "unknown", [], {}

@@ -1,6 +1,7 @@
 """Startup health check utilities."""
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import time
@@ -8,24 +9,33 @@ from typing import Any, Dict, List, Tuple
 
 import aiohttp
 import gsheets_db
+from google.genai import Client as _GenAIClient, errors as _genai_errors
 
 from config import Config
-from providers.vertex import list_models
 from observability import HealthCheckResult, record_healthcheck
 
 log = logging.getLogger(__name__)
 
 
-async def _probe_vertex_models(config: Config) -> Tuple[bool, str]:
-    if not config.vertex_enabled:
+async def _probe_gemini_models(config: Config) -> Tuple[bool, str]:
+    if not config.gemini_enabled:
         return True, "disabled"
-    if not config.google_service_account or not config.gcp_project_id:
-        return False, "missing credentials"
-    ok, detail = list_models(config)
-    if not ok:
-        detail = detail[:160]
-    log.info("Vertex models: %s, %s", "ok" if ok else "error", detail)
-    return ok, detail
+    if not config.gemini_api_key:
+        return False, "missing api key"
+    client = _GenAIClient(api_key=config.gemini_api_key)
+    model_name = config.gemini_model_image or config.gemini_model_text
+    try:
+        response = await asyncio.to_thread(client.models.get, model_name)
+    except _genai_errors.APIError as exc:  # pragma: no cover - external API
+        detail = f"{getattr(exc, 'code', 0)}:{getattr(exc, 'status', '')}".strip(":")
+        log.warning("Gemini models probe failed: %s", exc, exc_info=True)
+        return False, detail or str(exc)
+    except Exception as exc:  # pragma: no cover - network guard
+        log.warning("Gemini models probe failed", exc_info=True)
+        return False, str(exc)
+    display = getattr(response, "name", None) or model_name
+    log.info("Gemini models: ok %s", display)
+    return True, display
 
 
 async def _probe_sora_models(config: Config) -> Tuple[bool, str]:
@@ -77,15 +87,13 @@ async def run_startup_healthcheck(*, config: Config, mode: str) -> HealthCheckRe
             errors.append(f"{label}: {detail if detail else 'failed'}")
         checks.append(entry)
 
-    add_check("VERTEX_ENABLED", config.vertex_enabled, str(config.vertex_enabled).lower())
-    if config.vertex_enabled:
-        add_check("GOOGLE_SERVICE_ACCOUNT", bool(config.google_service_account))
-        add_check("GCP_PROJECT_ID", bool(config.gcp_project_id))
-        add_check("VERTEX_LOCATION", bool(config.vertex_location), config.vertex_location)
+    add_check("GEMINI_ENABLED", config.gemini_enabled, str(config.gemini_enabled).lower())
+    if config.gemini_enabled:
+        add_check("GEMINI_MODEL_TEXT", bool(config.gemini_model_text), config.gemini_model_text)
+        add_check("GEMINI_MODEL_IMAGE", bool(config.gemini_model_image), config.gemini_model_image)
     else:
-        add_check("GOOGLE_SERVICE_ACCOUNT", True, "disabled")
-        add_check("GCP_PROJECT_ID", True, "disabled")
-        add_check("VERTEX_LOCATION", True, "disabled")
+        add_check("GEMINI_MODEL_TEXT", True, "disabled")
+        add_check("GEMINI_MODEL_IMAGE", True, "disabled")
     add_check("SORA_ENABLED", config.sora_enabled, str(config.sora_enabled).lower())
     if config.sora_enabled:
         add_check("SORA_API_KEY", bool(config.sora_api_key))
@@ -111,8 +119,8 @@ async def run_startup_healthcheck(*, config: Config, mode: str) -> HealthCheckRe
     else:
         add_check("YooKassa", True, "отключено")
 
-    vertex_ok, vertex_detail = await _probe_vertex_models(config)
-    add_check("Vertex models", vertex_ok, vertex_detail)
+    gemini_ok, gemini_detail = await _probe_gemini_models(config)
+    add_check("Gemini models", gemini_ok, gemini_detail)
 
     sora_ok, sora_detail = await _probe_sora_models(config)
     add_check("Sora models", sora_ok, sora_detail)
