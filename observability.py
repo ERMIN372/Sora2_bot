@@ -8,7 +8,7 @@ from collections import deque
 from dataclasses import dataclass, field
 from hashlib import sha256
 from html import escape
-from typing import Any, Deque, Dict, List, Optional
+from typing import Any, Deque, Dict, List, Optional, Tuple
 
 log = logging.getLogger("bot.observability")
 
@@ -63,6 +63,8 @@ _EVENTS = _EventStore()
 _LAST_ERROR: Optional[ErrorSnapshot] = None
 _LAST_HEALTH: Optional[HealthCheckResult] = None
 _SUPPORT_NOTIFICATIONS: Dict[str, float] = {}
+_METRICS: Dict[str, float] = {}
+_METRIC_TIMINGS: Dict[str, Tuple[float, int]] = {}
 
 
 def _prompt_details(prompt: Optional[str]) -> Dict[str, Any]:
@@ -70,6 +72,36 @@ def _prompt_details(prompt: Optional[str]) -> Dict[str, Any]:
         return {}
     digest = sha256(prompt.encode("utf-8")).hexdigest()
     return {"prompt_hash": digest}
+
+
+def increment_metric(name: str, value: float = 1.0) -> None:
+    if not name:
+        return
+    current = _METRICS.get(name, 0.0)
+    try:
+        increment = float(value)
+    except (TypeError, ValueError):  # pragma: no cover - defensive conversion
+        increment = 0.0
+    _METRICS[name] = current + increment
+
+
+def record_timing_metric(name: str, value: float) -> None:
+    if not name:
+        return
+    try:
+        timing = float(value)
+    except (TypeError, ValueError):  # pragma: no cover - defensive conversion
+        return
+    total, count = _METRIC_TIMINGS.get(name, (0.0, 0))
+    _METRIC_TIMINGS[name] = (total + timing, count + 1)
+
+
+def metrics_snapshot() -> Dict[str, float]:
+    snapshot = dict(_METRICS)
+    for metric, (total, count) in _METRIC_TIMINGS.items():
+        if count:
+            snapshot[f"{metric}_avg"] = total / count
+    return snapshot
 
 
 def log_event(
@@ -172,10 +204,13 @@ def should_notify_support(key: str, interval_seconds: int) -> bool:
 __all__ = [
     "ErrorSnapshot",
     "HealthCheckResult",
+    "increment_metric",
     "get_job_history",
     "get_last_error",
     "get_last_healthcheck",
+    "metrics_snapshot",
     "log_event",
+    "record_timing_metric",
     "record_healthcheck",
     "should_notify_support",
 ]

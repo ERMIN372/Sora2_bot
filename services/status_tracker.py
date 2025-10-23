@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, Deque, Dict, Optional, Sequence
 from aiogram import Bot
 from aiogram.utils import exceptions as tg_exceptions
 
-from observability import log_event
+from observability import increment_metric, log_event
 
 if TYPE_CHECKING:  # pragma: no cover
     from db import Database, GenerationJobRecord
@@ -45,6 +45,8 @@ class _StatusState:
     next_edit_at: float = 0.0
     next_action_at: float = 0.0
     delete_task: Optional[asyncio.Task[None]] = None
+    terminal_state: Optional[str] = None
+    closed: bool = False
 
 
 class StatusMessageManager:
@@ -132,7 +134,7 @@ class StatusMessageManager:
         job: "GenerationJobRecord",
     ) -> None:
         state = await self.ensure_started(bot=bot, db=db, job=job)
-        if not state.active:
+        if not state.active or state.closed:
             return
         await self._maybe_send_action(bot, state)
         await self._maybe_rotate(bot, db, job, state)
@@ -159,11 +161,15 @@ class StatusMessageManager:
         schedule_deletion: bool = True,
     ) -> None:
         state = await self.ensure_started(bot=bot, db=db, job=job)
-        state.active = False
-        self._active_by_user[state.user_id].discard(job.id)
-        await self._edit_text(bot, db, job, state, text, force=True)
-        if schedule_deletion:
-            self._schedule_deletion(bot, state)
+        await self._finalise_state(
+            bot=bot,
+            db=db,
+            job=job,
+            state=state,
+            text=text,
+            terminal_state="delivered",
+            schedule_deletion=schedule_deletion,
+        )
 
     async def mark_failed(
         self,
@@ -172,11 +178,19 @@ class StatusMessageManager:
         db: "Database",
         job: "GenerationJobRecord",
         text: str,
+        terminal_state: str = "failed",
+        schedule_deletion: bool = False,
     ) -> None:
         state = await self.ensure_started(bot=bot, db=db, job=job)
-        state.active = False
-        self._active_by_user[state.user_id].discard(job.id)
-        await self._edit_text(bot, db, job, state, text, force=True)
+        await self._finalise_state(
+            bot=bot,
+            db=db,
+            job=job,
+            state=state,
+            text=text,
+            terminal_state=terminal_state,
+            schedule_deletion=schedule_deletion,
+        )
 
     def cancel(self, job_id: str) -> None:
         state = self._states.pop(job_id, None)
@@ -199,6 +213,8 @@ class StatusMessageManager:
         now = time.monotonic()
         if now < state.next_edit_at:
             return
+        if state.closed:
+            return
         phrase = self._phrases[state.phrase_index % len(self._phrases)]
         state.phrase_index = (state.phrase_index + 1) % len(self._phrases)
         await self._edit_text(bot, db, job, state, phrase)
@@ -206,6 +222,8 @@ class StatusMessageManager:
     async def _maybe_send_action(self, bot: Bot, state: _StatusState) -> None:
         now = time.monotonic()
         if now < state.next_action_at:
+            return
+        if state.closed:
             return
         action = _ACTION_BY_CONTENT.get(state.content_type, "upload_video")
         try:
@@ -224,6 +242,9 @@ class StatusMessageManager:
         *,
         force: bool = False,
     ) -> None:
+        if state.closed and not force:
+            increment_metric("status_edits_after_terminal")
+            return
         if not force and text == state.last_text:
             return
         try:
@@ -248,6 +269,30 @@ class StatusMessageManager:
         finally:
             now = time.monotonic()
             state.next_edit_at = now + self._jitter(self._edit_interval)
+
+    async def _finalise_state(
+        self,
+        *,
+        bot: Bot,
+        db: "Database",
+        job: "GenerationJobRecord",
+        state: _StatusState,
+        text: str,
+        terminal_state: str,
+        schedule_deletion: bool,
+    ) -> None:
+        state.active = False
+        state.closed = True
+        state.terminal_state = terminal_state
+        self._active_by_user[state.user_id].discard(job.id)
+        await self._edit_text(bot, db, job, state, text, force=True)
+        state.next_edit_at = float("inf")
+        state.next_action_at = float("inf")
+        if schedule_deletion:
+            self._schedule_deletion(bot, state)
+        elif state.delete_task:
+            state.delete_task.cancel()
+            state.delete_task = None
 
     def _schedule_deletion(self, bot: Bot, state: _StatusState) -> None:
         if state.delete_task is not None:
