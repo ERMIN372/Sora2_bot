@@ -7,7 +7,7 @@ from .base import (
     ProviderJobSubmission,
 )
 from .gemini import GeminiImageClient, GeminiTextClient
-from .sora import SoraClient
+from .veo_video import VeoVideoClient
 
 __all__ = [
     "BaseProviderClient",
@@ -16,5 +16,5 @@ __all__ = [
     "ProviderJobSubmission",
     "GeminiImageClient",
     "GeminiTextClient",
-    "SoraClient",
+    "VeoVideoClient",
 ]

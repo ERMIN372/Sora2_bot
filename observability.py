@@ -10,7 +10,7 @@ from hashlib import sha256
 from html import escape
 from typing import Any, Deque, Dict, List, Optional
 
-log = logging.getLogger("sora.observability")
+log = logging.getLogger("bot.observability")
 
 
 @dataclass(slots=True)
@@ -81,7 +81,7 @@ def log_event(
     job_id: Optional[str] = None,
     user_id: Optional[int] = None,
     username: Optional[str] = None,
-    provider: str = "sora",
+    provider: str = "veo",
     model: Optional[str] = None,
     size: Optional[str] = None,
     credits_cost: Optional[int] = None,

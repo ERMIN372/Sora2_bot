@@ -1,4 +1,4 @@
-"""Application configuration utilities for the Sora Telegram bot."""
+"""Application configuration utilities for the video generation bot."""
 from __future__ import annotations
 
 import logging
@@ -135,14 +135,11 @@ class Config:
     """Configuration values loaded from the environment."""
 
     bot_token: str
-    sora_enabled: bool = False
-    sora_api_key: str = ""
-    sora_api_base: str = "https://api.sora.ai/v1"
-    sora_model: str = "sora-2"
     gemini_api_key: str = ""
     gemini_model_text: str = "gemini-2.0-flash"
     gemini_model_image: str = "gemini-2.5-flash-image"
-    default_video_model: str = "sora-2"
+    gemini_model_video: str = "veo-2.0-generate-001"
+    default_video_model: str = "veo-2.0-generate-001"
     database_path: str = "./bot.db"
     jobs_concurrency: int = 2
     max_jobs_per_user: int = 3
@@ -201,6 +198,12 @@ class Config:
         """Return ``True`` if Gemini API key is configured."""
 
         return bool(self.gemini_api_key)
+
+    @property
+    def gemini_video_enabled(self) -> bool:
+        """Return ``True`` if Gemini video generation can be used."""
+
+        return self.gemini_enabled and bool(self.gemini_model_video)
 
     @property
     def allowed_package_ids(self) -> Tuple[str, ...]:
@@ -361,7 +364,6 @@ def load_config() -> Config:
             "TELEGRAM_BOT_TOKEN environment variable is required (BOT_TOKEN is accepted for backwards compatibility)"
         )
 
-    sora_enabled = _get_env_bool("SORA_ENABLED", Config.sora_enabled)
     raw_gemini_api_key = (
         os.getenv("GOOGLE_API_KEY")
         or os.getenv("GEMINI_API_KEY")
@@ -380,44 +382,17 @@ def load_config() -> Config:
         os.getenv("GEMINI_MODEL_IMAGE", Config.gemini_model_image).strip()
         or Config.gemini_model_image
     )
+    gemini_model_video = (
+        os.getenv("GEMINI_MODEL_VIDEO", Config.gemini_model_video).strip()
+        or Config.gemini_model_video
+    )
     gemini_enabled = bool(gemini_api_key)
+    if not gemini_enabled:
+        log.warning("Gemini API key is not configured; generation features will be disabled")
 
-    if not gemini_enabled and not sora_enabled:
-        log.warning(
-            "No generation providers are configured; video and image generation will be disabled"
-        )
-
-    sora_api_key = (os.getenv("SORA_API_KEY") or "").strip()
-    sora_api_base = os.getenv("SORA_API_BASE", Config.sora_api_base).strip() or Config.sora_api_base
-    raw_sora_model = os.getenv("SORA_MODEL", Config.sora_model)
-    sora_model = (raw_sora_model or Config.sora_model).strip() or Config.sora_model
-    normalized_sora = sora_model.replace("_", "-").lower()
-    if normalized_sora in {"sora", "sora-2", "sora2"}:
-        sora_model = "sora-2"
-
-    if sora_enabled and not sora_api_key:
-        raise RuntimeError("SORA_API_KEY environment variable is required when SORA_ENABLED=true")
-
-    def _normalize_default_model(value: Optional[str]) -> Optional[str]:
-        if not value:
-            return None
-        normalized = value.replace("_", "-").strip().lower()
-        if normalized in {"sora", "sora2", "sora-2"}:
-            return sora_model
-        return normalized or None
-
-    default_video_model = _normalize_default_model(os.getenv("DEFAULT_VIDEO_MODEL"))
+    default_video_model = (os.getenv("DEFAULT_VIDEO_MODEL") or "").strip()
     if not default_video_model:
-        default_video_model = sora_model if sora_enabled else ""
-
-    available_defaults: List[str] = []
-    if sora_enabled:
-        available_defaults.append(sora_model)
-
-    if default_video_model not in available_defaults and available_defaults:
-        default_video_model = available_defaults[0]
-    elif not available_defaults and not default_video_model:
-        default_video_model = ""
+        default_video_model = gemini_model_video if gemini_enabled else ""
     database_path = os.getenv("DATABASE_PATH", Config.database_path)
     google_sheet_id = os.getenv("GOOGLE_SHEET_ID")
     if not google_sheet_id:
@@ -431,8 +406,7 @@ def load_config() -> Config:
 
     prefixes = [
         "GEMINI_COST_RUB_",
-        "SORA2_COST_RUB_",
-        "SORA_COST_RUB_",
+        "VEO_COST_RUB_",
     ]
     pricing = PricingConfig(
         credit_price_rub=_get_env_decimal("CREDIT_PRICE_RUB", DEFAULT_CREDIT_PRICE_RUB),
@@ -444,13 +418,10 @@ def load_config() -> Config:
 
     return Config(
         bot_token=bot_token,
-        sora_enabled=sora_enabled,
-        sora_api_key=sora_api_key,
-        sora_api_base=sora_api_base,
-        sora_model=sora_model,
         gemini_api_key=gemini_api_key,
         gemini_model_text=gemini_model_text,
         gemini_model_image=gemini_model_image,
+        gemini_model_video=gemini_model_video,
         default_video_model=default_video_model,
         database_path=database_path,
         google_sheet_id=google_sheet_id,

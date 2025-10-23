@@ -1,4 +1,4 @@
-"""Aiogram handlers for the Sora Telegram bot."""
+"""Aiogram handlers for the video generation bot."""
 from __future__ import annotations
 
 import asyncio
@@ -47,7 +47,7 @@ from providers import ProviderAPIError
 from utils import build_inline_data_from_telegram_file
 import yookassa_client
 
-# Соотношения сторон, которые понимает Sora
+# Поддерживаемые соотношения сторон
 ASPECT_RATIO_OPTIONS = {
     "horizontal": "16:9",
     "vertical": "9:16",
@@ -82,7 +82,7 @@ MAIN_MENU_BUTTONS = {
 }
 
 _PRO_REQUEST_PATTERN = re.compile(
-    r"\b(?:sora(?:[-\s]?2)?[-\s]*pro|sora2pro|model\s*[:=]?\s*pro|pro-?версия|pro version)\b",
+    r"\b(?:veo(?:[-\s]?2)?[-\s]*pro|veo2pro|model\s*[:=]?\s*pro|pro-?версия|pro version)\b",
     re.IGNORECASE,
 )
 
@@ -145,13 +145,13 @@ class VideoModelOption:
 
 def _video_model_options(config: Config) -> list[VideoModelOption]:
     options: list[VideoModelOption] = []
-    if config.sora_enabled:
+    if config.gemini_video_enabled:
         options.append(
             VideoModelOption(
-                key="sora",
-                model=config.sora_model,
-                provider="sora",
-                label=i18n.t("video.models.sora"),
+                key="veo",
+                model=config.gemini_model_video,
+                provider="veo",
+                label=i18n.t("video.models.veo"),
             )
         )
     return options
@@ -165,8 +165,8 @@ def _find_video_model_option(config: Config, key: str) -> Optional[VideoModelOpt
 
 
 def _resolve_model_label(model: str, config: Config) -> str:
-    if model in {config.sora_model, "sora", "sora2", "sora-2"}:
-        return i18n.t("video.models.sora")
+    if model in {config.gemini_model_video, "veo", "veo2", "gemini-video"}:
+        return i18n.t("video.models.veo")
     if model in {config.gemini_model_image, "gemini-image", "gemini"}:
         return i18n.t("image.model.gemini")
     return model
@@ -246,7 +246,7 @@ async def _notify_support(
     if not should_notify_support(key, config.support_notify_interval):
         return
     lines = [
-        "⚠️ Критическая ошибка Sora",
+        "⚠️ Критическая ошибка генерации",
         f"event: {event}",
         f"corr_id: {corr_id}",
         f"user_id: {user_id}",
@@ -496,10 +496,10 @@ def _detect_pro_request(text: Optional[str]) -> bool:
 
 
 _MODEL_DIRECTIVE_PATTERN = re.compile(
-    r"model\s*(?:[:=]\s*)?(?:sora(?:[-\s]?2)?[-\s]*pro|sora2pro|pro)",
+    r"model\s*(?:[:=]\s*)?(?:veo(?:[-\s]?2)?[-\s]*pro|veo2pro|pro)",
     re.IGNORECASE,
 )
-_MODEL_NAME_PATTERN = re.compile(r"sora(?:[-\s]?2)?[-\s]*pro", re.IGNORECASE)
+_MODEL_NAME_PATTERN = re.compile(r"veo(?:[-\s]?2)?[-\s]*pro", re.IGNORECASE)
 
 
 def _strip_pro_directives(text: str) -> str:
@@ -2036,7 +2036,7 @@ async def payment_callback_handler(
         last_name=user.last_name,
     )
 
-    description = f"Sora2 {package.credits_int} credits"
+    description = f"Video generation {package.credits_int} credits"
     try:
         payment = await asyncio.to_thread(
             yookassa_client.create_payment,

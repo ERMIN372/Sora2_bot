@@ -1,4 +1,4 @@
-"""Background job queue for Sora video generation."""
+"""Background job queue for video generation."""
 from __future__ import annotations
 
 import asyncio
@@ -429,6 +429,65 @@ class JobQueue:
                 else:
                     entry.update({"inline": False, "url": value})
                 assets_meta.append(entry)
+            provider_payload: Optional[Dict[str, Any]] = None
+            provider_data: Optional[Dict[str, Any]] = None
+            if isinstance(result.data, dict):
+                provider_data = result.data
+                raw_payload = provider_data.get("payload")
+                if isinstance(raw_payload, dict):
+                    provider_payload = raw_payload
+                    job_extra["payload"] = provider_payload
+            if provider_payload:
+                data_uri = provider_payload.get("data_uri")
+                if isinstance(data_uri, str):
+                    already_inline = any(
+                        isinstance(asset.get("data_uri"), str)
+                        and asset.get("data_uri") == data_uri
+                        for asset in inline_assets
+                    )
+                    if not already_inline:
+                        mime = provider_payload.get("mime") or "application/octet-stream"
+                        inline_entry = {
+                            "kind": provider_payload.get("type") or "video",
+                            "mime": mime,
+                            "bytes": provider_payload.get("bytes"),
+                            "data_uri": data_uri,
+                            "filename": provider_payload.get("filename") or "result.bin",
+                        }
+                        inline_assets.append(inline_entry)
+                        key = f"inline_{len(inline_assets) - 1}"
+                        inline_asset_map[key] = inline_entry
+                        assets_meta.append(
+                            {
+                                "key": key,
+                                "inline": True,
+                                "mime": mime,
+                                "bytes": provider_payload.get("bytes"),
+                            }
+                        )
+                uri = provider_payload.get("uri")
+                if isinstance(uri, str):
+                    matched = False
+                    for entry in assets_meta:
+                        if entry.get("url") == uri:
+                            matched = True
+                            if provider_payload.get("mime"):
+                                entry.setdefault("mime", provider_payload.get("mime"))
+                            if provider_payload.get("bytes"):
+                                entry.setdefault("bytes", provider_payload.get("bytes"))
+                            entry.setdefault("type", provider_payload.get("type"))
+                            break
+                    if not matched:
+                        assets_meta.append(
+                            {
+                                "key": "payload",
+                                "inline": False,
+                                "url": uri,
+                                "mime": provider_payload.get("mime"),
+                                "bytes": provider_payload.get("bytes"),
+                                "type": provider_payload.get("type"),
+                            }
+                        )
             if inline_assets:
                 first_inline = inline_assets[0]
                 mime = first_inline.get("mime") or "application/octet-stream"
@@ -439,8 +498,8 @@ class JobQueue:
                 asset_label = next(iter(result.assets.values()), None)
             if assets_meta:
                 job_extra["assets_meta"] = assets_meta
-            if result.data and isinstance(result.data, dict):
-                job_extra.setdefault("provider_data", result.data)
+            if provider_data:
+                job_extra.setdefault("provider_data", provider_data)
             log_event(
                 level="INFO",
                 event="poll",

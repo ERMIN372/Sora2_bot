@@ -1,4 +1,4 @@
-"""Google Sheets-backed data access layer for the Sora bot."""
+"""Google Sheets-backed data access layer for the video generation bot."""
 from __future__ import annotations
 
 import asyncio

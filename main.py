@@ -1,4 +1,4 @@
-"""Entrypoint for the Sora Telegram bot."""
+"""Entrypoint for the video generation Telegram bot."""
 from __future__ import annotations
 
 import argparse
@@ -21,7 +21,7 @@ from generation_gate import GenerationRequestGate
 from handlers import register_handlers
 from jobs import JobQueue
 from healthcheck import run_startup_healthcheck
-from providers import BaseProviderClient, GeminiImageClient, SoraClient
+from providers import BaseProviderClient, GeminiImageClient, VeoVideoClient
 import yookassa_client
 
 _LOG_LEVEL_NAME = os.getenv("LOG_LEVEL", "INFO").upper()
@@ -59,7 +59,7 @@ class ApplicationState:
 
 
 def _parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Sora Telegram bot runner")
+    parser = argparse.ArgumentParser(description="Video generation bot runner")
     parser.add_argument(
         "--mode",
         choices=("polling", "webhook"),
@@ -75,16 +75,6 @@ def _init_application(config: Config) -> ApplicationState:
     gate = GenerationRequestGate()
     providers: Dict[str, BaseProviderClient] = {}
 
-    if config.sora_enabled:
-        sora_client = SoraClient(config=config)
-        providers.update(
-            {
-                "sora": sora_client,
-                "sora2": sora_client,
-                config.sora_model: sora_client,
-            }
-        )
-
     if config.gemini_enabled:
         gemini_client = GeminiImageClient(config=config)
         providers.update(
@@ -94,12 +84,19 @@ def _init_application(config: Config) -> ApplicationState:
                 config.gemini_model_image: gemini_client,
             }
         )
+    if config.gemini_video_enabled:
+        veo_client = VeoVideoClient(config=config)
+        providers.update(
+            {
+                "veo": veo_client,
+                "gemini-video": veo_client,
+                config.gemini_model_video: veo_client,
+            }
+        )
 
     default_provider = config.default_video_model
     if default_provider not in providers:
-        if config.sora_enabled and config.sora_model in providers:
-            default_provider = config.sora_model
-        elif providers:
+        if providers:
             default_provider = next(iter(providers))
         else:
             default_provider = ""
