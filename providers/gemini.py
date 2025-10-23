@@ -136,7 +136,6 @@ def _normalise_setting_key(name: str) -> str:
     normalised = re.sub(r"(?<!^)(?=[A-Z])", "_", normalised)
     normalised = normalised.lower()
     normalised = normalised.replace("_j_s_o_n_", "_json_")
-    normalised = normalised.replace("_g_c_s_", "_gcs_")
     normalised = normalised.replace("_u_r_i_", "_uri_")
     normalised = re.sub(r"__+", "_", normalised)
     return normalised.strip("_")
@@ -504,7 +503,6 @@ class GeminiGenerativeClient(BaseProviderClient):
         if isinstance(candidates, list):
             counters: Dict[str, int] = {
                 "text": 0,
-                "file": 0,
                 "function_call": 0,
                 "function_response": 0,
                 "code_execution": 0,
@@ -527,7 +525,6 @@ class GeminiGenerativeClient(BaseProviderClient):
                     if not isinstance(part, dict):
                         continue
                     inline_data = part.get("inline_data") or part.get("inlineData")
-                    file_data = part.get("file_data") or part.get("fileData")
                     text_value = part.get("text")
                     function_call = part.get("function_call") or part.get("functionCall")
                     function_response = part.get("function_response") or part.get("functionResponse")
@@ -563,17 +560,6 @@ class GeminiGenerativeClient(BaseProviderClient):
                             key,
                             {"inline": False, "kind": "text", "length": len(text_value)},
                         )
-                    elif file_data:
-                        uri = (
-                            file_data.get("file_uri")
-                            or file_data.get("uri")
-                            or file_data.get("fileUri")
-                        )
-                        if uri:
-                            key = f"file_{counters['file']}"
-                            counters["file"] += 1
-                            assets[key] = uri
-                            asset_meta[key] = {"inline": False, "kind": "file", "uri": uri}
                     elif function_call:
                         key = f"function_call_{counters['function_call']}"
                         counters["function_call"] += 1
@@ -786,12 +772,6 @@ class GeminiImageClient(GeminiGenerativeClient):
                     "mime": inline_entry.get("mime"),
                     "bytes": inline_entry.get("bytes"),
                 }
-            else:
-                gcs_uri = image_obj.get("gcs_uri") or image_obj.get("gcsUri")
-                if gcs_uri:
-                    assets[key] = gcs_uri
-                    asset_meta[key] = {"inline": False, "kind": "image_uri", "uri": gcs_uri}
-
         if not inline_assets and filtered_reasons and not assets:
             status = "failed"
             error = "; ".join(filtered_reasons)
