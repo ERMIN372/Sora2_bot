@@ -987,6 +987,71 @@ async def _launch_order(
             preflight_scope=preflight.scope,
             idempotency_key=idempotency_key,
         )
+    except RuntimeError as exc:
+        log.warning(
+            "Job submission failed corr_id=%s provider=%s error=%s",
+            corr_id,
+            provider_key,
+            exc,
+        )
+        refunded = False
+        try:
+            await db.add_credits(user_id, credits_cost)
+            refunded = True
+        except Exception:  # pragma: no cover - external dependency
+            log.exception("Failed to refund credits after configuration error")
+        await _release_lock("submit_failed", "provider_unavailable")
+        sheet_ok = await db.log_error_record(
+            ErrorLogRecord(
+                ts=datetime.utcnow(),
+                user_id=user_id,
+                username=user.username,
+                corr_id=corr_id,
+                job_id="",
+                model=order.model,
+                size=order.size,
+                status_code=0,
+                error_type="provider_unavailable",
+                error_msg_short=_shorten(str(exc)),
+                refunded=refunded,
+                preflight_blocked=False,
+                preflight_reason=preflight.reason or "",
+                auto_sanitized=preflight.auto_sanitized,
+                sanitized_prompt=order.prompt,
+                error_scope=preflight.scope or "provider_unavailable",
+                error_json="",
+            )
+        )
+        await callback.message.answer(i18n.t("errors.video_models_unavailable"))
+        log_event(
+            level="ERROR",
+            event="error",
+            corr_id=corr_id,
+            user_id=user_id,
+            username=user.username,
+            model=order.model,
+            provider=provider_key,
+            size=order.size,
+            credits_cost=credits_cost,
+            error_type="provider_unavailable",
+            error_msg_short=_shorten(str(exc)),
+            prompt=order.prompt,
+            gsheets_ok=sheet_ok,
+            refund_done=refunded,
+        )
+        log_event(
+            level="INFO",
+            event="refund",
+            corr_id=corr_id,
+            user_id=user_id,
+            username=user.username,
+            model=order.model,
+            provider=provider_key,
+            size=order.size,
+            credits_cost=credits_cost,
+            refund_done=refunded,
+        )
+        return
     except ProviderAPIError as exc:
         log.warning(
             "Provider submission failed corr_id=%s provider=%s status=%s error_type=%s error_code=%s retryable=%s message=%s",
