@@ -639,6 +639,14 @@ class GeminiTextClient(GeminiGenerativeClient):
 class GeminiImageClient(GeminiGenerativeClient):
     """Generate images using Gemini."""
 
+    def __init__(self, *, config: Config) -> None:
+        super().__init__(
+            config=config,
+            api_key=config.gemini_api_key,
+            model=config.gemini_model_image,
+            provider_name="gemini-image",
+        )
+
     def _build_images_config(
         self,
         settings: Dict[str, Any],
