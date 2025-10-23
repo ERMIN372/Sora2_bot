@@ -138,8 +138,8 @@ class Config:
     gemini_api_key: str = ""
     gemini_model_text: str = "gemini-2.0-flash"
     gemini_model_image: str = "gemini-2.5-flash-image"
-    gemini_model_video: str = "veo-2.0-generate-001"
-    default_video_model: str = "veo-2.0-generate-001"
+    gemini_model_video: str = "veo-3.0-generate-001"
+    default_video_model: str = "veo-3.0-generate-001"
     database_path: str = "./bot.db"
     jobs_concurrency: int = 2
     max_jobs_per_user: int = 3

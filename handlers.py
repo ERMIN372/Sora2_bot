@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 import re
 import uuid
 from datetime import datetime
-from typing import Any, Dict, List, Literal, Optional, Tuple
+from typing import Any, Dict, List, Literal, Optional, Set, Tuple
 from urllib.parse import urlparse
 
 from aiogram import Bot, Dispatcher
@@ -44,6 +44,7 @@ from observability import (
 )
 from moderation import policy_message, run_preflight
 from providers import ProviderAPIError
+from services.gemini_catalog import list_veo_video_models
 from utils import build_inline_data_from_telegram_file
 import yookassa_client
 
@@ -143,15 +144,60 @@ class VideoModelOption:
     label: str
 
 
+def _normalise_video_model_name(name: str) -> str:
+    value = (name or "").strip()
+    if "/" in value:
+        value = value.rsplit("/", 1)[-1]
+    return value
+
+
+def _make_model_option_key(name: str, used: Set[str]) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "_", name.lower())
+    slug = slug.strip("_") or "veo"
+    key = slug
+    counter = 2
+    while key in used:
+        key = f"{slug}_{counter}"
+        counter += 1
+    used.add(key)
+    return key
+
+
 def _video_model_options(config: Config) -> list[VideoModelOption]:
-    options: list[VideoModelOption] = []
-    if config.gemini_video_enabled:
-        options.append(
+    if not config.gemini_video_enabled:
+        return []
+
+    names: list[str] = []
+    default_name = _normalise_video_model_name(config.gemini_model_video)
+    if default_name:
+        names.append(default_name)
+
+    for candidate in list_veo_video_models(config):
+        normalised = _normalise_video_model_name(candidate)
+        if normalised and normalised not in names:
+            names.append(normalised)
+
+    if not names:
+        fallback_label = i18n.t("video.models.veo")
+        return [
             VideoModelOption(
                 key="veo",
-                model=config.gemini_model_video,
+                model=default_name or "veo-3",
                 provider="veo",
-                label=i18n.t("video.models.veo"),
+                label=fallback_label,
+            )
+        ]
+
+    used_keys: Set[str] = set()
+    options: list[VideoModelOption] = []
+    for model_name in names:
+        key = _make_model_option_key(model_name, used_keys)
+        options.append(
+            VideoModelOption(
+                key=key,
+                model=model_name,
+                provider="veo",
+                label=model_name,
             )
         )
     return options
@@ -165,6 +211,11 @@ def _find_video_model_option(config: Config, key: str) -> Optional[VideoModelOpt
 
 
 def _resolve_model_label(model: str, config: Config) -> str:
+    for option in _video_model_options(config):
+        if option.model == model or option.label == model:
+            return option.label
+        if _normalise_video_model_name(option.model) == _normalise_video_model_name(model):
+            return option.label
     if model in {config.gemini_model_video, "veo", "veo2", "gemini-video"}:
         return i18n.t("video.models.veo")
     if model in {config.gemini_model_image, "gemini-image", "gemini"}:

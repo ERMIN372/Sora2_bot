@@ -61,23 +61,6 @@ def _infer_aspect_ratio(size: Optional[str]) -> Optional[str]:
     return f"{ratio.numerator}:{ratio.denominator}"
 
 
-def _infer_resolution(size: Optional[str]) -> Optional[str]:
-    if not size or "x" not in size:
-        return None
-    try:
-        width_str, height_str = size.lower().split("x", 1)
-        width = int(width_str)
-        height = int(height_str)
-    except ValueError:  # pragma: no cover - defensive
-        return None
-    longest = max(width, height)
-    if longest >= 1080:
-        return "1080p"
-    if longest >= 720:
-        return "720p"
-    return None
-
-
 def _decode_reference_image(data: Dict[str, Any]) -> Optional[_genai_types.Image]:
     raw = data.get("data") or data.get("base64")
     if not isinstance(raw, str):
@@ -314,10 +297,6 @@ class VeoVideoClient(BaseProviderClient):
             if inferred:
                 config_data.setdefault("aspect_ratio", inferred)
                 summary.setdefault("aspect_ratio", inferred)
-            resolution = _infer_resolution(size)
-            if resolution:
-                config_data.setdefault("resolution", resolution)
-                summary.setdefault("resolution", resolution)
 
         duration = _coerce_int(settings.get("duration_seconds") or settings.get("duration"))
         if duration:
@@ -341,7 +320,6 @@ class VeoVideoClient(BaseProviderClient):
 
         for key in (
             "aspect_ratio",
-            "resolution",
             "negative_prompt",
             "person_generation",
             "output_gcs_uri",
