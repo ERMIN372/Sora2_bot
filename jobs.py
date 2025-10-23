@@ -69,18 +69,34 @@ class JobQueue:
         self._notification_callbacks[name] = callback
 
     def _resolve_provider(self, provider_key: Optional[str]) -> tuple[BaseProviderClient, str]:
+        if not self._providers:
+            raise RuntimeError(
+                "No generation providers are configured; ensure at least one provider is enabled"
+            )
+
         key = provider_key or self._default_provider
-        client = self._providers.get(key)
-        if client is None:
-            log.warning("Unknown provider %s, falling back to %s", provider_key, self._default_provider)
-            key = self._default_provider
-            client = self._providers[key]
-        return client, key
+        if key and (client := self._providers.get(key)) is not None:
+            return client, key
+
+        if self._default_provider and self._default_provider in self._providers:
+            log.warning(
+                "Unknown provider %s, falling back to %s",
+                provider_key,
+                self._default_provider,
+            )
+            return self._providers[self._default_provider], self._default_provider
+
+        raise RuntimeError(
+            "Requested generation provider is not configured and no default provider is available"
+        )
 
     async def start(self) -> None:
         if self._workers:
             return
         self._stopped.clear()
+        if not self._providers:
+            log.warning("No generation providers configured; job queue workers will not start")
+            return
         for _ in range(self._config.jobs_concurrency):
             task = asyncio.create_task(self._worker())
             self._workers.append(task)

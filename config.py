@@ -374,7 +374,9 @@ def load_config() -> Config:
     gemini_enabled = bool(gemini_api_key)
 
     if not gemini_enabled and not sora_enabled:
-        raise RuntimeError("At least one provider must be enabled (Gemini or Sora)")
+        log.warning(
+            "No generation providers are configured; video and image generation will be disabled"
+        )
 
     sora_api_key = (os.getenv("SORA_API_KEY") or "").strip()
     sora_api_base = os.getenv("SORA_API_BASE", Config.sora_api_base).strip() or Config.sora_api_base
