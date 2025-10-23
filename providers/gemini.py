@@ -4,9 +4,12 @@ from __future__ import annotations
 import asyncio
 import base64
 import binascii
+import json
 import logging
+import re
 import time
-from typing import Any, Dict, List, Optional, Tuple
+from fractions import Fraction
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 from uuid import uuid4
 
 from google.genai import Client as _GenAIClient, errors as _genai_errors, types as _genai_types
@@ -37,55 +40,163 @@ def _default_safety_settings() -> List[_genai_types.SafetySetting]:
 
 
 def _build_http_options(config: Config) -> _HttpOptions:
-    timeout: Optional[float | Tuple[float, float]] = None
-    if config.request_connect_timeout or config.request_read_timeout:
-        timeout = (
-            float(config.request_connect_timeout),
-            float(config.request_read_timeout),
-        )
-    elif config.request_timeout:
-        timeout = float(config.request_timeout)
-    return _HttpOptions(timeout=timeout)
+    timeout_seconds: Optional[float] = None
+    candidates: List[float] = []
+    for value in (
+        config.request_timeout,
+        config.request_read_timeout,
+        config.request_connect_timeout,
+    ):
+        if value:
+            try:
+                candidates.append(float(value))
+            except (TypeError, ValueError):
+                continue
+    if candidates:
+        timeout_seconds = max(candidates)
+    timeout_ms = int(timeout_seconds * 1000) if timeout_seconds else None
+    return _HttpOptions(timeout=timeout_ms)
 
 
 def _normalise_inline_blob(data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    """Convert inline_data payload to a normalised metadata structure."""
+    """Convert inline or image payload to a normalised metadata structure."""
 
     if not isinstance(data, dict):
         return None
+
     mime = (
         data.get("mime_type")
         or data.get("mimeType")
         or data.get("mime")
+        or data.get("content_type")
         or "application/octet-stream"
     )
-    raw = data.get("data")
-    encoded: Optional[str] = None
+
+    raw = (
+        data.get("data")
+        or data.get("image_bytes")
+        or data.get("imageBytes")
+        or data.get("inlineData")
+        or data.get("inline_data")
+        or data.get("base64")
+    )
+
     binary: Optional[bytes] = None
     if isinstance(raw, (bytes, bytearray)):
         binary = bytes(raw)
     elif isinstance(raw, str):
         stripped = raw.strip()
-        try:
-            binary = base64.b64decode(stripped, validate=True)
-        except (binascii.Error, ValueError):
-            binary = stripped.encode("utf-8")
-    if not binary:
+        if stripped.startswith("data:"):
+            header, _, payload = stripped.partition(",")
+            if header.startswith("data:"):
+                mime = header[5:].split(";", 1)[0] or mime
+            if payload:
+                try:
+                    binary = base64.b64decode(payload, validate=True)
+                except (binascii.Error, ValueError):
+                    binary = payload.encode("utf-8")
+        else:
+            try:
+                binary = base64.b64decode(stripped, validate=True)
+            except (binascii.Error, ValueError):
+                binary = stripped.encode("utf-8")
+
+    if binary is None:
+        extra = data.get("data_bytes") or data.get("bytes")
+        if isinstance(extra, (bytes, bytearray)):
+            binary = bytes(extra)
+
+    if binary is None:
         return None
+
     encoded = base64.b64encode(binary).decode("ascii")
-    meta: Dict[str, Any] = {
+    data_url = f"data:{mime};base64,{encoded}"
+    return {
         "inline": True,
-        "kind": "inline",
+        "kind": data.get("kind") or "inline",
         "mime": mime,
         "bytes": len(binary),
         "base64": encoded,
-        "data_url": f"data:{mime};base64,{encoded}",
+        "data_url": data_url,
+        "data_uri": data_url,
     }
-    return meta
+
+
+def _serialise_json(value: Any) -> str:
+    try:
+        return json.dumps(value, ensure_ascii=False)
+    except (TypeError, ValueError):
+        return str(value)
+
+
+def _normalise_setting_key(name: str) -> str:
+    if not name:
+        return ""
+    normalised = re.sub(r"[\s-]+", "_", name)
+    normalised = re.sub(r"(?<!^)(?=[A-Z])", "_", normalised)
+    normalised = normalised.lower()
+    normalised = normalised.replace("_j_s_o_n_", "_json_")
+    normalised = normalised.replace("_g_c_s_", "_gcs_")
+    normalised = normalised.replace("_u_r_i_", "_uri_")
+    normalised = re.sub(r"__+", "_", normalised)
+    return normalised.strip("_")
+
+
+def _ensure_iterable(value: Any) -> Iterable[Any]:
+    if value is None:
+        return ()
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return value
+    return (value,)
+
+
+def _convert_setting_list(value: Any, model_cls: Any) -> Optional[List[Any]]:
+    if value is None:
+        return None
+    converted: List[Any] = []
+    for item in _ensure_iterable(value):
+        if isinstance(item, model_cls):
+            converted.append(item)
+        elif isinstance(item, dict):
+            try:
+                converted.append(model_cls.model_validate(item))
+            except Exception as exc:  # pragma: no cover - defensive parsing
+                log.warning("Failed to parse %s: %s", model_cls.__name__, exc, exc_info=True)
+        else:
+            converted.append(item)
+    return converted
+
+
+def _maybe_model_validate(value: Any, model_cls: Any) -> Any:
+    if value is None:
+        return None
+    if isinstance(value, model_cls):
+        return value
+    if isinstance(value, dict):
+        try:
+            return model_cls.model_validate(value)
+        except Exception as exc:  # pragma: no cover - defensive parsing
+            log.warning("Failed to parse %s: %s", model_cls.__name__, exc, exc_info=True)
+    return value
+
+
+def _infer_aspect_ratio(size: Optional[str]) -> Optional[str]:
+    if not size or "x" not in size.lower():
+        return None
+    try:
+        width_str, height_str = size.lower().split("x", 1)
+        width = int(width_str)
+        height = int(height_str)
+        if width <= 0 or height <= 0:
+            return None
+    except (ValueError, ZeroDivisionError):
+        return None
+    ratio = Fraction(width, height).limit_denominator(48)
+    return f"{ratio.numerator}:{ratio.denominator}"
 
 
 class GeminiGenerativeClient(BaseProviderClient):
-    """Base client for synchronous Gemini generate_content calls."""
+    """Base client for synchronous Gemini API calls."""
 
     def __init__(
         self,
@@ -104,8 +215,9 @@ class GeminiGenerativeClient(BaseProviderClient):
         )
         http_options = _build_http_options(config)
         self._client = _GenAIClient(api_key=api_key, http_options=http_options)
+        parsed_safety = _convert_setting_list(safety_settings, _genai_types.SafetySetting)
+        self._safety_settings = parsed_safety or _default_safety_settings()
         self._model = model
-        self._safety_settings = safety_settings or _default_safety_settings()
         self._pending: Dict[str, Tuple[Dict[str, Any], int, int, Dict[str, Any]]] = {}
 
     def _build_contents(
@@ -117,7 +229,7 @@ class GeminiGenerativeClient(BaseProviderClient):
         parts: List[Dict[str, Any]] = [{"text": prompt}]
         if settings:
             reference = settings.get("reference_inline_data")
-            if isinstance(reference, dict) and reference.get("data"):
+            if isinstance(reference, dict):
                 inline_meta = _normalise_inline_blob(reference)
                 if inline_meta and inline_meta.get("base64"):
                     raw_bytes = base64.b64decode(inline_meta["base64"], validate=False)
@@ -134,24 +246,73 @@ class GeminiGenerativeClient(BaseProviderClient):
     def _build_generation_config(
         self, settings: Optional[Dict[str, Any]]
     ) -> _genai_types.GenerateContentConfig:
-        kwargs: Dict[str, Any] = {"safetySettings": list(self._safety_settings)}
+        kwargs: Dict[str, Any] = {"safety_settings": list(self._safety_settings)}
         if not settings:
             return _genai_types.GenerateContentConfig(**kwargs)
-        mapping = {
-            "temperature": "temperature",
-            "top_p": "topP",
-            "topP": "topP",
-            "top_k": "topK",
-            "topK": "topK",
-            "max_output_tokens": "maxOutputTokens",
-            "maxOutputTokens": "maxOutputTokens",
-            "candidate_count": "candidateCount",
-            "candidateCount": "candidateCount",
-        }
-        for key, target in mapping.items():
-            if key in settings and settings[key] is not None:
-                kwargs[target] = settings[key]
+
+        allowed_fields = set(_genai_types.GenerateContentConfig.model_fields.keys())
+        skip_fields = {"http_options", "should_return_http_response"}
+        for raw_key, value in settings.items():
+            if value is None:
+                continue
+            key = _normalise_setting_key(raw_key)
+            if key in {"reference_inline_data", "image_file_id", "size"}:
+                continue
+            if key in skip_fields or key not in allowed_fields:
+                continue
+            if key == "safety_settings":
+                parsed = _convert_setting_list(value, _genai_types.SafetySetting)
+                if parsed is not None:
+                    kwargs["safety_settings"] = parsed
+                continue
+            if key == "tools":
+                parsed = _convert_setting_list(value, _genai_types.Tool)
+                if parsed is not None:
+                    kwargs["tools"] = parsed
+                continue
+            if key == "tool_config":
+                parsed = _maybe_model_validate(value, _genai_types.ToolConfig)
+                if parsed is not None:
+                    kwargs["tool_config"] = parsed
+                continue
+            if key == "response_schema":
+                parsed = _maybe_model_validate(value, _genai_types.Schema)
+                if parsed is not None:
+                    kwargs["response_schema"] = parsed
+                continue
+            if key == "image_config":
+                kwargs["image_config"] = value
+                continue
+            if key in {"stop_sequences", "response_modalities"} and isinstance(value, tuple):
+                kwargs[key] = list(value)
+                continue
+            kwargs[key] = value
+
         return _genai_types.GenerateContentConfig(**kwargs)
+
+    def _prepare_generate_call(
+        self,
+        *,
+        prompt: str,
+        settings: Dict[str, Any],
+        payload: Dict[str, Any],
+    ) -> Tuple[Any, Dict[str, Any], Dict[str, Any]]:
+        contents = payload.get("contents")
+        config = payload.get("config")
+        if contents is None:
+            contents = self._build_contents(prompt=prompt, settings=settings)
+        if not isinstance(config, _genai_types.GenerateContentConfig):
+            config = self._build_generation_config(settings)
+        request_kwargs = {
+            "model": self._model,
+            "contents": contents,
+            "config": config,
+        }
+        request_meta = {
+            "mode": "generate_content",
+            "config": config.model_dump(mode="json") if hasattr(config, "model_dump") else config,
+        }
+        return self._client.models.generate_content, request_kwargs, request_meta
 
     def _map_error(
         self,
@@ -162,15 +323,28 @@ class GeminiGenerativeClient(BaseProviderClient):
         if isinstance(exc, _genai_errors.APIError):
             status_code = int(getattr(exc, "code", 0) or 0)
             message = getattr(exc, "message", "Gemini API error") or "Gemini API error"
-            retryable = status_code in {408, 429, 500, 502, 503, 504}
+            retryable = status_code in {408, 409, 429, 500, 502, 503, 504}
+            provider_message = getattr(exc, "details", None)
+            if not provider_message and hasattr(exc, "response"):
+                provider_message = getattr(exc.response, "text", None)
             return ProviderAPIError(
                 provider=self.provider_name,
                 status_code=status_code,
                 message=message,
                 error_type="api",
                 error_code=str(getattr(exc, "status", "")) or None,
-                provider_message=str(getattr(exc, "details", message)),
+                provider_message=str(provider_message or message),
                 retryable=retryable,
+                duration_ms=duration_ms,
+            )
+        if isinstance(exc, ValueError):
+            return ProviderAPIError(
+                provider=self.provider_name,
+                status_code=400,
+                message=str(exc) or "Invalid Gemini request",
+                error_type="validation",
+                provider_message=str(exc),
+                retryable=False,
                 duration_ms=duration_ms,
             )
         return ProviderAPIError(
@@ -199,40 +373,41 @@ class GeminiGenerativeClient(BaseProviderClient):
                 message="Gemini API key is not configured",
                 error_type="auth",
             )
-        body_contents = payload.get("contents") if isinstance(payload, dict) else None
-        body_config = payload.get("config") if isinstance(payload, dict) else None
-        if body_contents is None:
-            body_contents = self._build_contents(prompt=prompt, settings=settings)
-        if body_config is None:
-            body_config = self._build_generation_config(settings)
+
+        request_settings = dict(settings or {})
+        payload_dict = dict(payload or {})
+
         attempt = 0
         delay = self._config.retry_backoff
         last_error: Optional[ProviderAPIError] = None
         while attempt <= self._config.request_retries:
+            generator, request_kwargs, request_meta = self._prepare_generate_call(
+                prompt=prompt,
+                settings=request_settings,
+                payload=payload_dict,
+            )
             start = time.monotonic()
             try:
-                response = await asyncio.to_thread(
-                    self._client.models.generate_content,
-                    model=self._model,
-                    contents=body_contents,
-                    config=body_config,
-                )
+                response = await asyncio.to_thread(generator, **request_kwargs)
                 duration_ms = int((time.monotonic() - start) * 1000)
                 payload_json = response.model_dump(mode="json")
                 job_id = idempotency_key or str(uuid4())
                 meta = {
                     "prompt": prompt,
-                    "settings": settings or {},
+                    "settings": request_settings or {},
                     "payload": payload_json,
                     "assets_meta": {},
+                    "request": request_meta,
+                    "request_mode": request_meta.get("mode"),
                 }
                 self._pending[job_id] = (payload_json, 200, duration_ms, meta)
-                size = (settings or {}).get("size")
+                size = request_settings.get("size")
                 log.info(
-                    "gemini.call corr_id=%s provider=%s model=%s size=%s status=%s latency_ms=%s",
+                    "gemini.call corr_id=%s provider=%s model=%s mode=%s size=%s status=%s latency_ms=%s",
                     idempotency_key or job_id,
                     self.provider_name,
                     self._model,
+                    request_meta.get("mode") or "generate_content",
                     size or "",
                     200,
                     duration_ms,
@@ -276,13 +451,21 @@ class GeminiGenerativeClient(BaseProviderClient):
                 duration_ms=0,
             )
         payload, status_code, duration_ms, meta = record
-        status, error, assets, inline_assets = self._extract_result(payload)
-        if meta.get("assets_meta") is None:
-            meta["assets_meta"] = {}
-        for idx, asset in enumerate(inline_assets):
-            meta["assets_meta"][f"inline_{idx}"] = asset
+        status, error, assets, inline_assets, asset_meta = self._extract_result(payload)
+        inline_assets_copy = [dict(asset) for asset in inline_assets]
+        assets_meta = meta.get("assets_meta")
+        if not isinstance(assets_meta, dict):
+            assets_meta = {}
+            meta["assets_meta"] = assets_meta
+        for idx, asset in enumerate(inline_assets_copy):
+            key = asset.get("key") or f"inline_{idx}"
+            asset["key"] = key
+            assets_meta[key] = {**asset, "inline": True}
+        for key, info in asset_meta.items():
+            assets_meta[key] = info
         if status != "completed" and not error:
             error = "Модель не вернула результат"
+        meta.setdefault("request_mode", meta.get("request_mode") or meta.get("request", {}).get("mode"))
         return ProviderJobStatus(
             job_id=job_id,
             status=status,
@@ -291,7 +474,7 @@ class GeminiGenerativeClient(BaseProviderClient):
             data={
                 "response": payload,
                 "meta": meta,
-                "inline_assets": inline_assets,
+                "inline_assets": inline_assets_copy,
             },
             status_code=status_code,
             duration_ms=duration_ms,
@@ -299,23 +482,34 @@ class GeminiGenerativeClient(BaseProviderClient):
 
     def _extract_result(
         self, payload: Dict[str, Any]
-    ) -> Tuple[str, Optional[str], Dict[str, str], List[Dict[str, Any]]]:
+    ) -> Tuple[str, Optional[str], Dict[str, str], List[Dict[str, Any]], Dict[str, Dict[str, Any]]]:
         if not isinstance(payload, dict):
-            return "failed", "Invalid response", {}, []
+            return "failed", "Invalid response", {}, [], {}
         assets: Dict[str, str] = {}
         inline_assets: List[Dict[str, Any]] = []
+        asset_meta: Dict[str, Dict[str, Any]] = {}
         error: Optional[str] = None
         status = "completed"
 
-        prompt_feedback = payload.get("promptFeedback") or payload.get("prompt_feedback")
+        prompt_feedback = payload.get("prompt_feedback") or payload.get("promptFeedback")
         if isinstance(prompt_feedback, dict):
-            block_reason = prompt_feedback.get("blockReason") or prompt_feedback.get("block_reason")
-            if block_reason:
+            block_reason = prompt_feedback.get("block_reason") or prompt_feedback.get("blockReason")
+            block_message = prompt_feedback.get("block_reason_message") or prompt_feedback.get("blockReasonMessage")
+            if block_reason or block_message:
                 status = "failed"
-                error = str(block_reason)
+                parts = [str(part) for part in (block_reason, block_message) if part]
+                error = " ".join(parts) if parts else str(block_reason)
 
         candidates = payload.get("candidates")
         if isinstance(candidates, list):
+            counters: Dict[str, int] = {
+                "text": 0,
+                "file": 0,
+                "function_call": 0,
+                "function_response": 0,
+                "code_execution": 0,
+                "part": 0,
+            }
             for candidate in candidates:
                 if not isinstance(candidate, dict):
                     continue
@@ -324,7 +518,7 @@ class GeminiGenerativeClient(BaseProviderClient):
                     status = "failed"
                     error = str(finish_reason)
                 content = candidate.get("content")
-                parts: List[Any] = []
+                parts: Sequence[Any] = []
                 if isinstance(content, dict):
                     parts = content.get("parts") or []
                 elif isinstance(content, list):
@@ -333,24 +527,101 @@ class GeminiGenerativeClient(BaseProviderClient):
                     if not isinstance(part, dict):
                         continue
                     inline_data = part.get("inline_data") or part.get("inlineData")
+                    file_data = part.get("file_data") or part.get("fileData")
                     text_value = part.get("text")
+                    function_call = part.get("function_call") or part.get("functionCall")
+                    function_response = part.get("function_response") or part.get("functionResponse")
+                    code_result = part.get("code_execution_result") or part.get("codeExecutionResult")
+
                     if inline_data:
                         meta = _normalise_inline_blob(inline_data)
                         if meta:
                             key = f"inline_{len(inline_assets)}"
-                            inline_assets.append(meta)
-                            data_url = meta.get("data_url")
-                            if data_url:
-                                assets[key] = data_url
+                            inline_entry = {
+                                "key": key,
+                                "kind": meta.get("kind", "inline"),
+                                "mime": meta.get("mime"),
+                                "bytes": meta.get("bytes"),
+                                "data_uri": meta.get("data_uri"),
+                                "data_url": meta.get("data_url"),
+                            }
+                            inline_assets.append(inline_entry)
+                            data_uri = inline_entry.get("data_uri") or inline_entry.get("data_url")
+                            if data_uri:
+                                assets[key] = data_uri
+                            asset_meta[key] = {
+                                "inline": True,
+                                "kind": inline_entry.get("kind"),
+                                "mime": inline_entry.get("mime"),
+                                "bytes": inline_entry.get("bytes"),
+                            }
                     elif isinstance(text_value, str) and text_value.strip():
-                        key = f"text_{len(assets)}"
+                        key = f"text_{counters['text']}"
+                        counters["text"] += 1
                         assets[key] = text_value
+                        asset_meta.setdefault(
+                            key,
+                            {"inline": False, "kind": "text", "length": len(text_value)},
+                        )
+                    elif file_data:
+                        uri = (
+                            file_data.get("file_uri")
+                            or file_data.get("uri")
+                            or file_data.get("fileUri")
+                        )
+                        if uri:
+                            key = f"file_{counters['file']}"
+                            counters["file"] += 1
+                            assets[key] = uri
+                            asset_meta[key] = {"inline": False, "kind": "file", "uri": uri}
+                    elif function_call:
+                        key = f"function_call_{counters['function_call']}"
+                        counters["function_call"] += 1
+                        assets[key] = _serialise_json(function_call)
+                        asset_meta[key] = {
+                            "inline": False,
+                            "kind": "function_call",
+                            "payload": function_call,
+                        }
+                    elif function_response:
+                        key = f"function_response_{counters['function_response']}"
+                        counters["function_response"] += 1
+                        assets[key] = _serialise_json(function_response)
+                        asset_meta[key] = {
+                            "inline": False,
+                            "kind": "function_response",
+                            "payload": function_response,
+                        }
+                    elif code_result:
+                        key = f"code_execution_{counters['code_execution']}"
+                        counters["code_execution"] += 1
+                        assets[key] = _serialise_json(code_result)
+                        asset_meta[key] = {
+                            "inline": False,
+                            "kind": "code_execution_result",
+                            "payload": code_result,
+                        }
+                    else:
+                        cleaned = {
+                            key: value
+                            for key, value in part.items()
+                            if value not in (None, "", [], {})
+                        }
+                        if cleaned:
+                            key = f"part_{counters['part']}"
+                            counters["part"] += 1
+                            assets[key] = _serialise_json(cleaned)
+                            asset_meta[key] = {
+                                "inline": False,
+                                "kind": "part",
+                                "payload": cleaned,
+                            }
 
         if status == "completed" and not assets:
             status = "failed"
             if not error:
                 error = "Модель не вернула результат"
-        return status, error, assets, inline_assets
+        return status, error, assets, inline_assets, asset_meta
 
 
 class GeminiTextClient(GeminiGenerativeClient):
@@ -368,14 +639,159 @@ class GeminiTextClient(GeminiGenerativeClient):
 class GeminiImageClient(GeminiGenerativeClient):
     """Generate images using Gemini."""
 
-    def __init__(self, *, config: Config) -> None:
-        super().__init__(
-            config=config,
-            api_key=config.gemini_api_key,
-            model=config.gemini_model_image,
-            provider_name="gemini-image",
-        )
+    def _build_images_config(
+        self,
+        settings: Dict[str, Any],
+        existing: Optional[Any] = None,
+    ) -> _genai_types.GenerateImagesConfig:
+        kwargs: Dict[str, Any]
+        if isinstance(existing, _genai_types.GenerateImagesConfig):
+            kwargs = existing.model_dump(mode="json", exclude_none=True)
+        elif isinstance(existing, dict):
+            kwargs = dict(existing)
+        else:
+            kwargs = {}
 
+        allowed_fields = set(_genai_types.GenerateImagesConfig.model_fields.keys())
+        skip_fields = {"http_options"}
+        for raw_key, value in settings.items():
+            if value is None:
+                continue
+            key = _normalise_setting_key(raw_key)
+            if key in {"reference_inline_data", "image_file_id"}:
+                continue
+            if key in skip_fields or key not in allowed_fields:
+                continue
+            if key == "size":
+                continue
+            kwargs[key] = value
+
+        if "aspect_ratio" not in kwargs:
+            aspect = settings.get("aspect_ratio")
+            if not aspect:
+                inferred = _infer_aspect_ratio(str(settings.get("size"))) if settings.get("size") else None
+                if inferred:
+                    aspect = inferred
+            if aspect:
+                kwargs["aspect_ratio"] = aspect
+
+        labels = kwargs.get("labels")
+        if isinstance(labels, dict):
+            kwargs["labels"] = {str(k): str(v) for k, v in labels.items()}
+
+        return _genai_types.GenerateImagesConfig(**kwargs)
+
+    def _prepare_generate_call(
+        self,
+        *,
+        prompt: str,
+        settings: Dict[str, Any],
+        payload: Dict[str, Any],
+    ) -> Tuple[Any, Dict[str, Any], Dict[str, Any]]:
+        reference = settings.get("reference_inline_data")
+        force_content = bool(payload.get("contents"))
+        if reference or force_content:
+            contents = payload.get("contents")
+            if contents is None:
+                contents = self._build_contents(prompt=prompt, settings=settings)
+            config = payload.get("config")
+            if not isinstance(config, _genai_types.GenerateContentConfig):
+                config = self._build_generation_config(settings)
+            request_kwargs = {
+                "model": self._model,
+                "contents": contents,
+                "config": config,
+            }
+            request_meta = {
+                "mode": "generate_content",
+                "config": config.model_dump(mode="json") if hasattr(config, "model_dump") else config,
+            }
+            return self._client.models.generate_content, request_kwargs, request_meta
+
+        config = payload.get("config")
+        images_config = self._build_images_config(settings, existing=config)
+        request_kwargs = {
+            "model": self._model,
+            "prompt": prompt,
+            "config": images_config,
+        }
+        request_meta = {
+            "mode": "generate_images",
+            "config": images_config.model_dump(mode="json") if hasattr(images_config, "model_dump") else images_config,
+        }
+        return self._client.models.generate_images, request_kwargs, request_meta
+
+    def _extract_result(
+        self, payload: Dict[str, Any]
+    ) -> Tuple[str, Optional[str], Dict[str, str], List[Dict[str, Any]], Dict[str, Dict[str, Any]]]:
+        generated = payload.get("generated_images") or payload.get("generatedImages")
+        if isinstance(generated, list):
+            return self._extract_images(payload)
+        return super()._extract_result(payload)
+
+    def _extract_images(
+        self, payload: Dict[str, Any]
+    ) -> Tuple[str, Optional[str], Dict[str, str], List[Dict[str, Any]], Dict[str, Dict[str, Any]]]:
+        assets: Dict[str, str] = {}
+        inline_assets: List[Dict[str, Any]] = []
+        asset_meta: Dict[str, Dict[str, Any]] = {}
+        error: Optional[str] = None
+        status = "completed"
+
+        prompt_feedback = payload.get("prompt_feedback") or payload.get("promptFeedback")
+        if isinstance(prompt_feedback, dict):
+            block_reason = prompt_feedback.get("block_reason") or prompt_feedback.get("blockReason")
+            block_message = prompt_feedback.get("block_reason_message") or prompt_feedback.get("blockReasonMessage")
+            if block_reason or block_message:
+                status = "failed"
+                parts = [str(part) for part in (block_reason, block_message) if part]
+                error = " ".join(parts) if parts else str(block_reason)
+
+        generated_images = payload.get("generated_images") or payload.get("generatedImages") or []
+        filtered_reasons: List[str] = []
+        for index, item in enumerate(generated_images):
+            if not isinstance(item, dict):
+                continue
+            rai_reason = item.get("rai_filtered_reason") or item.get("raiFilteredReason")
+            if rai_reason:
+                filtered_reasons.append(str(rai_reason))
+                continue
+            image_obj = item.get("image") or {}
+            meta = _normalise_inline_blob(image_obj)
+            key = f"inline_{index}"
+            if meta:
+                data_uri = meta.get("data_uri") or meta.get("data_url")
+                inline_entry = {
+                    "key": key,
+                    "kind": "image",
+                    "mime": meta.get("mime"),
+                    "bytes": meta.get("bytes"),
+                    "data_uri": data_uri,
+                    "data_url": data_uri,
+                }
+                inline_assets.append(inline_entry)
+                if data_uri:
+                    assets[key] = data_uri
+                asset_meta[key] = {
+                    "inline": True,
+                    "kind": inline_entry.get("kind"),
+                    "mime": inline_entry.get("mime"),
+                    "bytes": inline_entry.get("bytes"),
+                }
+            else:
+                gcs_uri = image_obj.get("gcs_uri") or image_obj.get("gcsUri")
+                if gcs_uri:
+                    assets[key] = gcs_uri
+                    asset_meta[key] = {"inline": False, "kind": "image_uri", "uri": gcs_uri}
+
+        if not inline_assets and filtered_reasons and not assets:
+            status = "failed"
+            error = "; ".join(filtered_reasons)
+        if status == "completed" and not assets:
+            status = "failed"
+            if not error:
+                error = "Модель не вернула результат"
+        return status, error, assets, inline_assets, asset_meta
 
 __all__ = [
     "GeminiGenerativeClient",

@@ -9,7 +9,7 @@ Sora2_bot — это Telegram-бот, который подключается к
 - Python версии 3.10 или новее.
 - Токен Telegram-бота, полученный у [@BotFather](https://t.me/BotFather).
 - Ключ API Sora с доступом к эндпоинтам генерации видео.
-- (Опционально для генерации изображений) ключ API Gemini.
+- (Опционально для генерации изображений) ключ Gemini (`GOOGLE_API_KEY` или `GEMINI_API_KEY`).
 - (Необязательно) Redis, если вы планируете использовать собственное хранилище
   конечного автомата (FSM) или бэкенд ограничения скорости для Aiogram.
 
@@ -43,7 +43,8 @@ Sora2_bot — это Telegram-бот, который подключается к
 | --- | --- |
 | `TELEGRAM_BOT_TOKEN` | Токен Telegram-бота, полученный у BotFather. |
 | `SORA_API_KEY` | Ключ API для сервиса генерации видео Sora. |
-| `GEMINI_API_KEY` | Ключ API Google Gemini для генерации изображений (опционально). |
+| `GOOGLE_API_KEY` | Ключ Gemini API, используемый SDK по умолчанию. При наличии перекрывает `GEMINI_API_KEY`. |
+| `GEMINI_API_KEY` | Резервный ключ Google Gemini (используется, если `GOOGLE_API_KEY` не задан). |
 | `SORA_ENABLED` | Включает генерацию видео через Sora (`true`/`false`). |
 | `BOT_MODE` | Режим запуска бота: `polling` или `webhook`. |
 | `WEBHOOK_HOST` | Публичный HTTPS-хост, на который Telegram будет отправлять вебхуки. |

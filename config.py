@@ -362,7 +362,16 @@ def load_config() -> Config:
         )
 
     sora_enabled = _get_env_bool("SORA_ENABLED", Config.sora_enabled)
-    gemini_api_key = (os.getenv("GEMINI_API_KEY") or "").strip()
+    raw_gemini_api_key = (
+        os.getenv("GOOGLE_API_KEY")
+        or os.getenv("GEMINI_API_KEY")
+        or ""
+    )
+    if os.getenv("GOOGLE_API_KEY") and os.getenv("GEMINI_API_KEY"):
+        log.info(
+            "GOOGLE_API_KEY detected; preferring it over GEMINI_API_KEY for Gemini API access"
+        )
+    gemini_api_key = raw_gemini_api_key.strip()
     gemini_model_text = (
         os.getenv("GEMINI_MODEL_TEXT", Config.gemini_model_text).strip()
         or Config.gemini_model_text
