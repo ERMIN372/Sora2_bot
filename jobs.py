@@ -153,6 +153,7 @@ class JobQueue:
         preflight_reason: Optional[str] = None,
         preflight_scope: Optional[str] = None,
         idempotency_key: Optional[str] = None,
+        content_type: str = "video",
     ) -> GenerationJobRecord:
         model_key = model or self._config.default_video_model
         client, provider_key = self._resolve_provider(provider or model_key)
@@ -197,6 +198,7 @@ class JobQueue:
             cost_credits=self._config.generation_cost_credits,
             username=username,
             corr_id=corr_id,
+            content_type=content_type or "video",
         )
         await self._db.create_job(record)
         await self.enqueue(

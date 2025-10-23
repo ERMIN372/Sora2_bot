@@ -117,6 +117,10 @@ _JOBS_HEADERS = [
     "cost_credits",
     "username",
     "corr_id",
+    "content_type",
+    "status_message_id",
+    "status_message_index",
+    "status_message_updated_at",
 ]
 
 _ERRORS_HEADERS = [
@@ -424,6 +428,10 @@ def _normalise_job(row: Dict[str, Any]) -> Dict[str, Any]:
         "cost_credits": _parse_int(row.get("cost_credits")),
         "username": _parse_str(row.get("username")),
         "corr_id": _parse_str(row.get("corr_id")),
+        "content_type": _parse_str(row.get("content_type")) or "video",
+        "status_message_id": _parse_int(row.get("status_message_id")),
+        "status_message_index": _parse_int(row.get("status_message_index")),
+        "status_message_updated_at": _parse_str(row.get("status_message_updated_at")),
     }
 
 
@@ -1046,6 +1054,7 @@ async def create_job(
     cost_credits: int,
     corr_id: Optional[str],
     username: Optional[str] = None,
+    content_type: str = "video",
 ) -> None:
     state = await _ensure_jobs_state()
     async with state.lock:
@@ -1071,6 +1080,10 @@ async def create_job(
             "cost_credits": cost_credits,
             "username": username_clean,
             "corr_id": corr_id or "",
+            "content_type": (content_type or "video"),
+            "status_message_id": "",
+            "status_message_index": 0,
+            "status_message_updated_at": "",
         }
         await _write_row(state, row_index, record)
         state.index[job_id] = row_index

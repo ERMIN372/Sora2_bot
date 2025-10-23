@@ -174,8 +174,24 @@ async def download_asset(
                 file_meta = await asyncio.to_thread(client.files.get, name=file_name)
             payload = await asyncio.to_thread(client.files.download, file=file_meta)
         except _genai_errors.APIError as exc:
-            status_code = int(getattr(exc, "code", 0) or 0)
+            raw_code = getattr(exc, "code", 0)
+            payload_error = None
+            if isinstance(raw_code, dict):
+                payload_error = raw_code.get("error") if isinstance(raw_code.get("error"), dict) else None
+                raw_code = (
+                    (payload_error or {}).get("code")
+                    or (payload_error or {}).get("status")
+                    or 0
+                )
+            try:
+                status_code = int(raw_code or 0)
+            except (TypeError, ValueError):
+                status_code = int(exc.args[0]) if exc.args else 0
             status_label = str(getattr(exc, "status", "") or "").upper() or None
+            if payload_error:
+                status_label = (
+                    str(payload_error.get("status") or status_label or "").upper() or None
+                )
             message = str(exc)
             log.warning(
                 "gemini.download api_error corr_id=%s asset=%s file=%s status=%s status_label=%s key_mask=%s",

@@ -36,6 +36,10 @@ class GenerationJobRecord:
     cost_credits: Optional[int] = None
     username: Optional[str] = None
     corr_id: Optional[str] = None
+    content_type: str = "video"
+    status_message_id: Optional[int] = None
+    status_message_index: int = 0
+    status_message_updated_at: Optional[datetime] = None
     extra: Dict[str, Any] = field(default_factory=dict)
 
 
@@ -73,8 +77,21 @@ class FakeDB:
         status: str,
         video_url: Optional[str] = None,
         error: Optional[str] = None,
+        status_message_id: Optional[int] = None,
+        status_message_index: Optional[int] = None,
+        status_message_updated_at: Optional[datetime] = None,
     ) -> None:
-        self.update_calls.append((job_id, status, video_url, error))
+        self.update_calls.append(
+            (
+                job_id,
+                status,
+                video_url,
+                error,
+                status_message_id,
+                status_message_index,
+                status_message_updated_at,
+            )
+        )
         job = self.jobs.get(job_id)
         if job:
             job.status = status
@@ -83,6 +100,29 @@ class FakeDB:
             if error is not None:
                 job.error = error
             job.updated_at = datetime.utcnow()
+            if status_message_id is not None:
+                job.status_message_id = status_message_id
+            if status_message_index is not None:
+                job.status_message_index = status_message_index
+            if status_message_updated_at is not None:
+                job.status_message_updated_at = status_message_updated_at
+
+    async def update_job_fields(
+        self,
+        job_id: str,
+        *,
+        status: Optional[str] = None,
+        status_message_id: Optional[int] = None,
+        status_message_index: Optional[int] = None,
+        status_message_updated_at: Optional[datetime] = None,
+    ) -> None:
+        await self.update_job(
+            job_id,
+            status or self.jobs[job_id].status,
+            status_message_id=status_message_id,
+            status_message_index=status_message_index,
+            status_message_updated_at=status_message_updated_at,
+        )
 
     async def add_credits(self, user_id: int, credits: int) -> None:
         self.added_credits.append(credits)

@@ -42,6 +42,10 @@ class GenerationJobRecord:
     cost_credits: Optional[int] = None
     username: Optional[str] = None
     corr_id: Optional[str] = None
+    content_type: str = "video"
+    status_message_id: Optional[int] = None
+    status_message_index: int = 0
+    status_message_updated_at: Optional[datetime] = None
     extra: Dict[str, Any] = field(default_factory=dict)
 
 
@@ -122,6 +126,27 @@ def _job_from_dict(data: Dict[str, Any]) -> GenerationJobRecord:
         cost_credits = int(cost_raw) if cost_raw not in (None, "") else None
     except (TypeError, ValueError):
         cost_credits = None
+    status_message_id_raw = data.get("status_message_id")
+    try:
+        status_message_id = (
+            int(status_message_id_raw)
+            if status_message_id_raw not in (None, "")
+            else None
+        )
+    except (TypeError, ValueError):
+        status_message_id = None
+    status_message_index_raw = data.get("status_message_index")
+    try:
+        status_message_index = (
+            int(status_message_index_raw)
+            if status_message_index_raw not in (None, "")
+            else 0
+        )
+    except (TypeError, ValueError):
+        status_message_index = 0
+    status_message_updated_raw = data.get("status_message_updated_at") or ""
+    status_message_updated_at = _parse_datetime(status_message_updated_raw)
+    content_type = str(data.get("content_type") or "video")
     return GenerationJobRecord(
         id=str(data.get("job_id", "")),
         user_id=int(data.get("user_id", 0)),
@@ -139,6 +164,10 @@ def _job_from_dict(data: Dict[str, Any]) -> GenerationJobRecord:
         cost_credits=cost_credits,
         username=str(data.get("username", "")) or None,
         corr_id=str(data.get("corr_id", "")) or None,
+        content_type=content_type or "video",
+        status_message_id=status_message_id,
+        status_message_index=status_message_index,
+        status_message_updated_at=status_message_updated_at,
         extra={},
     )
 
@@ -428,6 +457,7 @@ class Database:
             job.cost_credits or 0,
             job.corr_id,
             username=job.username,
+            content_type=job.content_type,
         )
 
     async def update_job(
@@ -437,6 +467,9 @@ class Database:
         *,
         video_url: Optional[str] = None,
         error: Optional[str] = None,
+        status_message_id: Optional[int] = None,
+        status_message_index: Optional[int] = None,
+        status_message_updated_at: Optional[datetime] = None,
     ) -> None:
         normalised_status = _normalise_job_status(status)
         updates: Dict[str, Any] = {}
@@ -444,6 +477,31 @@ class Database:
             updates["video_url"] = video_url
         if error is not None:
             updates["error"] = error
+        if status_message_id is not None:
+            updates["status_message_id"] = status_message_id
+        if status_message_index is not None:
+            updates["status_message_index"] = status_message_index
+        if status_message_updated_at is not None:
+            updates["status_message_updated_at"] = status_message_updated_at.isoformat()
+        await gsheets_db.update_job_status(job_id, normalised_status, **updates)
+
+    async def update_job_fields(
+        self,
+        job_id: str,
+        *,
+        status: Optional[str] = None,
+        status_message_id: Optional[int] = None,
+        status_message_index: Optional[int] = None,
+        status_message_updated_at: Optional[datetime] = None,
+    ) -> None:
+        updates: Dict[str, Any] = {}
+        if status_message_id is not None:
+            updates["status_message_id"] = status_message_id
+        if status_message_index is not None:
+            updates["status_message_index"] = status_message_index
+        if status_message_updated_at is not None:
+            updates["status_message_updated_at"] = status_message_updated_at.isoformat()
+        normalised_status = _normalise_job_status(status) if status is not None else ""
         await gsheets_db.update_job_status(job_id, normalised_status, **updates)
 
     async def list_pending_jobs(self, *, limit: int) -> List[GenerationJobRecord]:

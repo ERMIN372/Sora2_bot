@@ -13,7 +13,6 @@ import re
 import uuid
 from datetime import datetime
 from typing import Any, Dict, List, Literal, Optional, Set, Tuple
-from urllib.parse import urlparse
 
 from aiogram import Bot, Dispatcher
 from aiogram.dispatcher import FSMContext
@@ -51,6 +50,7 @@ from services.gemini_downloader import (
     GeminiKeyMismatchError,
     download_asset,
 )
+from services.status_tracker import StatusMessageManager
 from utils import build_inline_data_from_telegram_file
 import yookassa_client
 
@@ -342,6 +342,7 @@ class SessionManager:
 
 
 SESSION_MANAGER = SessionManager()
+STATUS_MESSAGES = StatusMessageManager()
 
 
 def _main_keyboard() -> ReplyKeyboardMarkup:
@@ -1029,7 +1030,7 @@ async def _launch_order(
             provider_settings["reference_inline_data"] = inline_data
 
     try:
-        await job_queue.submit(
+        job_record = await job_queue.submit(
             user_id=user_id,
             prompt=order.prompt,
             size=order.size,
@@ -1045,6 +1046,7 @@ async def _launch_order(
             preflight_reason=preflight.reason,
             preflight_scope=preflight.scope,
             idempotency_key=idempotency_key,
+            content_type=order.category,
         )
     except RuntimeError as exc:
         log.warning(
@@ -1277,16 +1279,21 @@ async def _launch_order(
 
     queue_pos = await db.count_active_jobs(user_id)
     await callback.message.answer(i18n.t("flow.order_submitted", queue_pos=queue_pos))
+    await STATUS_MESSAGES.ensure_started(
+        bot=callback.message.bot,
+        db=db,
+        job=job_record,
+    )
 
 
-def _format_job_message(job: GenerationJobRecord) -> str:
-    if job.status == "completed":
-        return i18n.t("status.completed_file")
-    if job.status == "failed":
-        return i18n.t("status.failed", error=job.error or i18n.t("errors.unknown"))
-    if job.status == "running":
-        return i18n.t("status.running")
-    return i18n.t("status.generic", status=job.status or i18n.t("errors.unknown"))
+@dataclass
+class SentMediaInfo:
+    message: Message
+    method: Literal["video", "document", "photo"]
+    file_id: str
+    file_size: int
+    duration_seconds: Optional[int] = None
+    mime_type: Optional[str] = None
 
 
 async def _send_job_update(
@@ -1297,64 +1304,82 @@ async def _send_job_update(
     db: Database,
 ) -> None:
     try:
-        reply_markup = _main_keyboard() if job.status in {"completed", "failed"} else None
-        if job.status == "completed":
-            inline_assets = _collect_inline_assets(job)
-            archived = False
-            if inline_assets:
-                responded, inline_archived = await _send_inline_assets(
-                    dp,
-                    job,
-                    inline_assets,
-                    archive,
-                    reply_markup=reply_markup,
-                )
-                archived = archived or inline_archived
-                if responded:
-                    if archive and not archived:
-                        payload = _build_remote_archive_payload(job)
-                        if payload:
-                            archive.schedule(payload)
-                    return
-            if job.video_url:
-                inline_image = _parse_inline_image(job.video_url)
-                if inline_image:
-                    responded, image_archived = await _send_inline_image(
-                        dp,
-                        job,
-                        inline_image,
-                        archive,
-                        reply_markup=reply_markup,
-                    )
-                    archived = archived or image_archived
-                    if responded and archive and not archived:
-                        payload = _build_remote_archive_payload(job)
-                        if payload:
-                            archive.schedule(payload)
-                    return
+        await STATUS_MESSAGES.ensure_started(bot=dp.bot, db=db, job=job)
+        status = (job.status or "").lower()
+        if status in {"queued", "running"}:
+            await STATUS_MESSAGES.tick(bot=dp.bot, db=db, job=job)
+            return
+        if status == "failed":
+            error_text = i18n.t("status.failed", error=job.error or i18n.t("errors.unknown"))
+            await STATUS_MESSAGES.mark_failed(bot=dp.bot, db=db, job=job, text=error_text)
+            return
+        if status != "completed":
+            generic_text = i18n.t(
+                "status.generic", status=job.status or i18n.t("errors.unknown")
+            )
+            await STATUS_MESSAGES.mark_failed(bot=dp.bot, db=db, job=job, text=generic_text)
+            return
+
+        sending_text = (
+            i18n.t("status.completed_photo")
+            if (job.content_type or "video") == "image"
+            else i18n.t("status.completed_file")
+        )
+        await STATUS_MESSAGES.mark_sending(
+            bot=dp.bot,
+            db=db,
+            job=job,
+            text=sending_text,
+        )
+
+        sent_info: Optional[SentMediaInfo] = None
+        inline_assets = _collect_inline_assets(job)
+        if inline_assets:
+            sent_info = await _send_inline_assets(dp, job, inline_assets, config, db)
+        if sent_info is None and job.video_url:
+            inline_image = _parse_inline_image(job.video_url)
+            if inline_image:
+                sent_info = await _send_inline_image(dp, job, inline_image, config, db)
+        if sent_info is None:
             remote_asset = _select_remote_video_asset(job)
             if remote_asset and remote_asset.get("url"):
-                if await _deliver_remote_video(
-                    dp,
-                    job,
-                    remote_asset,
-                    config,
-                    db,
-                    reply_markup,
-                    archive,
-                ):
-                    return
-            if archive and not archived:
-                payload = _build_remote_archive_payload(job)
-                if payload:
-                    archive.schedule(payload)
-        await dp.bot.send_message(
-            job.user_id,
-            _format_job_message(job),
-            reply_markup=reply_markup,
+                sent_info = await _deliver_remote_video(
+                    dp=dp,
+                    job=job,
+                    asset=remote_asset,
+                    config=config,
+                    db=db,
+                )
+
+        if sent_info is None:
+            await _handle_delivery_failure(
+                dp,
+                job,
+                config,
+                db,
+                message=i18n.t("status.delivery_generic"),
+                reason="no_media",
+                extra_log={"stage": "no_media_assets"},
+            )
+            return
+
+        summary_text = _format_media_summary(
+            job,
+            file_size=sent_info.file_size,
+            duration_seconds=sent_info.duration_seconds,
         )
+        await STATUS_MESSAGES.mark_completed(
+            bot=dp.bot,
+            db=db,
+            job=job,
+            text=summary_text,
+        )
+        if archive:
+            payload = _build_archive_payload_from_sent(job, sent_info)
+            if payload:
+                archive.schedule(payload)
     except Exception:  # pragma: no cover - external dependency
-        log.exception("Failed to send job update to %s", job.user_id)
+        log.exception("Failed to process job update for user_id=%s", job.user_id)
 
 
 def _parse_inline_image(data_uri: Optional[str]) -> Optional[tuple[str, bytes]]:
@@ -1448,6 +1473,18 @@ def _format_video_summary(duration_seconds: Optional[int], size_bytes: int) -> s
     )
 
 
+def _format_media_summary(
+    job: GenerationJobRecord,
+    *,
+    file_size: int,
+    duration_seconds: Optional[int],
+) -> str:
+    if (job.content_type or "video") == "image":
+        size_mb = max(file_size / (1024 * 1024), 0)
+        return i18n.t("status.completed_image_summary", size_mb=f"{size_mb:.1f}")
+    return _format_video_summary(duration_seconds, file_size)
+
+
 def _extract_video_duration(job: GenerationJobRecord) -> Optional[int]:
     if isinstance(job.seconds, int) and job.seconds > 0:
         return job.seconds
@@ -1470,81 +1507,87 @@ async def _send_inline_image(
     dp: Dispatcher,
     job: GenerationJobRecord,
     inline_image: tuple[str, bytes],
-    archive: Optional[ArchivePublisher] = None,
-    reply_markup: Optional[ReplyKeyboardMarkup | InlineKeyboardMarkup] = None,
-) -> Tuple[bool, bool]:
+    config: Config,
+    db: Database,
+) -> Optional[SentMediaInfo]:
     mime, payload = inline_image
     buffer = io.BytesIO(payload)
     suffix = mimetypes.guess_extension(mime) or ".jpg"
     filename = f"result{suffix}"
     buffer.seek(0)
     input_file = InputFile(buffer, filename=filename)
-    await dp.bot.send_document(
-        job.user_id,
-        input_file,
-        caption=i18n.t("status.completed_photo"),
-        reply_markup=reply_markup,
-    )
-    archived = False
-    if archive and mime.startswith("image/"):
-        archive.schedule(
-            ArchivePayload(
-                corr_id=job.corr_id or job.id,
-                prompt=job.prompt,
-                model_name=job.model,
-                username=job.username,
-                user_id=job.user_id,
-                content_type="image",
-                mime_type=mime,
-                file_bytes=payload,
-                file_size=len(payload),
-            )
+    try:
+        message = await dp.bot.send_document(job.user_id, input_file)
+    except Exception:
+        log.exception("Failed to send inline image to user_id=%s", job.user_id)
+        await _handle_delivery_failure(
+            dp,
+            job,
+            config,
+            db,
+            message=i18n.t("status.delivery_generic"),
+            reason="telegram_error",
+            extra_log={"stage": "inline_image"},
         )
-        archived = True
-    return True, archived
+        return None
+    document = message.document
+    if document is None:
+        size = len(payload)
+        file_id = ""
+    else:
+        size = document.file_size or len(payload)
+        file_id = document.file_id
+    return SentMediaInfo(
+        message=message,
+        method="document",
+        file_id=file_id,
+        file_size=size,
+        duration_seconds=None,
+        mime_type=mime,
+    )
 
 
 async def _send_inline_assets(
     dp: Dispatcher,
     job: GenerationJobRecord,
     assets: List[Dict[str, Any]],
-    archive: Optional[ArchivePublisher] = None,
-    reply_markup: Optional[ReplyKeyboardMarkup | InlineKeyboardMarkup] = None,
-) -> Tuple[bool, bool]:
-    responded = False
-    sent_assets = False
-    markup_sent = False
-    archived = False
+    config: Config,
+    db: Database,
+) -> Optional[SentMediaInfo]:
     for index, asset in enumerate(assets):
         data_uri = asset.get("data_uri")
         if not isinstance(data_uri, str):
             continue
         decoded = _decode_data_uri(data_uri)
         if not decoded:
-            responded = True
-            await dp.bot.send_message(
-                job.user_id,
-                i18n.t("status.inline_decode_failed"),
-                reply_markup=reply_markup if not markup_sent else None,
+            await _handle_delivery_failure(
+                dp,
+                job,
+                config,
+                db,
+                message=i18n.t("status.inline_decode_failed"),
+                reason="inline_decode",
+                extra_log={"asset_index": index},
             )
-            markup_sent = True
-            continue
+            return None
         mime, payload = decoded
         size = len(payload)
         if size > _INLINE_ASSET_MAX_BYTES:
-            responded = True
-            await dp.bot.send_message(
-                job.user_id,
-                i18n.t(
+            await _handle_delivery_failure(
+                dp,
+                job,
+                config,
+                db,
+                message=i18n.t(
                     "status.inline_too_large",
                     mime=mime,
                     size=size,
                     limit_mb=_INLINE_ASSET_MAX_BYTES // (1024 * 1024),
                 ),
-                reply_markup=reply_markup if not markup_sent else None,
+                reason="inline_too_large",
+                extra_log={"asset_index": index, "asset_size": size},
             )
-            markup_sent = True
-            continue
+            return None
         buffer = io.BytesIO(payload)
         suffix = mimetypes.guess_extension(mime) or ".bin"
         base_name = re.sub(r"[^a-zA-Z0-9_-]", "", str(asset.get("kind") or "asset"))
@@ -1552,62 +1595,42 @@ async def _send_inline_assets(
             base_name = "asset"
         filename = f"{base_name}_{index}{suffix}"
         input_file = InputFile(buffer, filename=filename)
-        caption_key = "status.completed_photo" if mime.startswith("image/") else "status.completed_file"
-        caption = i18n.t(caption_key) if not sent_assets else None
-        if mime.startswith("image/"):
-            buffer.seek(0)
-            await dp.bot.send_document(
-                job.user_id,
-                input_file,
-                caption=caption,
-                reply_markup=reply_markup if not markup_sent else None,
+        try:
+            message = await dp.bot.send_document(job.user_id, input_file)
+        except Exception:
+            log.exception("Failed to send inline asset to user_id=%s", job.user_id)
+            await _handle_delivery_failure(
+                dp,
+                job,
+                config,
+                db,
+                message=i18n.t("status.delivery_generic"),
+                reason="telegram_error",
+                extra_log={"stage": "inline_asset", "asset_index": index},
             )
-        else:
-            buffer.seek(0)
-            await dp.bot.send_document(
-                job.user_id,
-                input_file,
-                caption=caption,
-                reply_markup=reply_markup if not markup_sent else None,
-            )
-        markup_sent = True
-        responded = True
-        sent_assets = True
-        if (
-            archive
-            and not archived
-            and (mime.startswith("image/") or mime.startswith("video/"))
-        ):
-            content_type: Literal["image", "video"] = (
-                "video" if mime.startswith("video/") else "image"
-            )
-            archive.schedule(
-                ArchivePayload(
-                    corr_id=job.corr_id or job.id,
-                    prompt=job.prompt,
-                    model_name=job.model,
-                    username=job.username,
-                    user_id=job.user_id,
-                    content_type=content_type,
-                    mime_type=mime,
-                    file_bytes=payload,
-                    file_size=len(payload),
-                    duration_seconds=job.seconds if content_type == "video" else None,
-                )
-            )
-            archived = True
-    return responded, archived
+            return None
+        document = message.document
+        file_size = document.file_size if document else size
+        file_id = document.file_id if document else ""
+        return SentMediaInfo(
+            message=message,
+            method="document",
+            file_id=file_id,
+            file_size=file_size or size,
+            duration_seconds=None,
+            mime_type=mime,
+        )
+    return None
 
 
 async def _deliver_remote_video(
+    *,
     dp: Dispatcher,
     job: GenerationJobRecord,
     asset: Dict[str, Any],
     config: Config,
     db: Database,
-    reply_markup: Optional[ReplyKeyboardMarkup | InlineKeyboardMarkup],
-    archive: Optional[ArchivePublisher],
-) -> bool:
+) -> Optional[SentMediaInfo]:
     corr_id = job.corr_id or job.id
     asset_name = str(asset.get("key") or "video")
     mime_hint = asset.get("mime") if isinstance(asset.get("mime"), str) else None
@@ -1635,13 +1658,12 @@ async def _deliver_remote_video(
             job,
             config,
             db,
-            reply_markup=reply_markup,
             message=i18n.t("status.delivery_key_mismatch"),
             reason="key_mismatch",
             extra_log={"expected_mask": exc.expected, "actual_mask": exc.actual},
             key_mask=exc.actual,
         )
-        return True
+        return None
     except GeminiConfigurationError as exc:
         log.error(
             "Gemini configuration error corr_id=%s status=%s",
@@ -1653,13 +1675,12 @@ async def _deliver_remote_video(
             job,
             config,
             db,
-            reply_markup=reply_markup,
             message=i18n.t("status.delivery_config_error"),
             reason="config_error",
             extra_log={"error_status": exc.error_status},
             key_mask=expected_mask,
         )
-        return True
+        return None
     except GeminiDownloadError as exc:
         log.warning(
             "Gemini download failed corr_id=%s status=%s error=%s",
@@ -1672,7 +1693,6 @@ async def _deliver_remote_video(
             job,
             config,
             db,
-            reply_markup=reply_markup,
             message=i18n.t("status.delivery_generic"),
             reason="download_error",
             extra_log={
@@ -1681,28 +1701,24 @@ async def _deliver_remote_video(
             },
             key_mask=expected_mask,
         )
-        return True
+        return None
 
     buffer = io.BytesIO(downloaded.content)
-    caption = i18n.t("status.completed_file")
-    method = "video"
+    method: Literal["video", "document"] = "video"
+    message: Optional[Message] = None
     try:
         if downloaded.size <= _TELEGRAM_VIDEO_MAX_BYTES:
             buffer.seek(0)
-            await dp.bot.send_video(
+            message = await dp.bot.send_video(
                 job.user_id,
                 InputFile(buffer, filename=downloaded.filename),
-                caption=caption,
                 supports_streaming=True,
-                reply_markup=reply_markup,
             )
         elif downloaded.size <= _TELEGRAM_DOCUMENT_MAX_BYTES:
             buffer.seek(0)
-            await dp.bot.send_document(
+            message = await dp.bot.send_document(
                 job.user_id,
                 InputFile(buffer, filename=downloaded.filename),
-                caption=caption,
-                reply_markup=reply_markup,
             )
             method = "document"
         else:
@@ -1711,13 +1727,12 @@ async def _deliver_remote_video(
                 job,
                 config,
                 db,
-                reply_markup=reply_markup,
                 message=i18n.t("status.delivery_too_large"),
                 reason="too_large",
                 extra_log={"asset_bytes": downloaded.size},
                 key_mask=downloaded.key_mask or expected_mask,
             )
-            return True
+            return None
     except Exception:
         log.exception("Failed to send Gemini video to user_id=%s", job.user_id)
         await _handle_delivery_failure(
@@ -1725,18 +1740,30 @@ async def _deliver_remote_video(
             job,
             config,
             db,
-            reply_markup=reply_markup,
             message=i18n.t("status.delivery_generic"),
             reason="telegram_error",
             extra_log={"asset_bytes": downloaded.size},
             key_mask=downloaded.key_mask or expected_mask,
         )
-        return True
+        return None
 
-    summary_text = _format_video_summary(
-        _extract_video_duration(job), downloaded.size
-    )
-    await dp.bot.send_message(job.user_id, summary_text)
+    if message is None:
+        return None
+
+    file_id: str
+    file_size: int
+    duration_seconds = _extract_video_duration(job)
+    mime_type = downloaded.mime
+    if method == "video" and message.video:
+        file_id = message.video.file_id
+        file_size = message.video.file_size or downloaded.size
+        duration_seconds = message.video.duration or duration_seconds
+    elif method == "document" and message.document:
+        file_id = message.document.file_id
+        file_size = message.document.file_size or downloaded.size
+    else:
+        file_id = ""
+        file_size = downloaded.size
 
     log_event(
         level="INFO",
@@ -1752,13 +1779,17 @@ async def _deliver_remote_video(
             "delivery_method": method,
             "asset_bytes": downloaded.size,
             "gemini_key_mask": downloaded.key_mask or expected_mask,
+            "archive_status": "pending",
         },
     )
-    if archive:
-        payload = _build_remote_archive_payload(job)
-        if payload:
-            archive.schedule(payload)
-    return True
+    return SentMediaInfo(
+        message=message,
+        method=method,
+        file_id=file_id,
+        file_size=file_size,
+        duration_seconds=duration_seconds,
+        mime_type=mime_type,
+    )
 
 
 async def _handle_delivery_failure(
@@ -1767,7 +1798,6 @@ async def _handle_delivery_failure(
     config: Config,
     db: Database,
     *,
-    reply_markup: Optional[ReplyKeyboardMarkup | InlineKeyboardMarkup],
     message: str,
     reason: str,
     extra_log: Optional[Dict[str, Any]] = None,
@@ -1785,7 +1815,9 @@ async def _handle_delivery_failure(
         await db.update_job(job.id, "failed", error=message)
     except Exception:
         log.exception("Failed to update job status after delivery failure job_id=%s", job.id)
-    await dp.bot.send_message(job.user_id, message, reply_markup=reply_markup or _main_keyboard())
+    job.status = "failed"
+    job.error = message
+    await STATUS_MESSAGES.mark_failed(bot=dp.bot, db=db, job=job, text=message)
     extra_payload = dict(extra_log or {})
     if key_mask:
         extra_payload.setdefault("gemini_key_mask", key_mask)
@@ -1818,45 +1850,13 @@ async def _handle_delivery_failure(
     )
 
 
-def _build_remote_archive_payload(job: GenerationJobRecord) -> Optional[ArchivePayload]:
-    extra = getattr(job, "extra", {}) or {}
-    raw_url = (job.video_url or "").strip()
-    meta = None
-    url = ""
-    if raw_url.lower().startswith("http"):
-        url = raw_url
-        meta = _select_remote_asset_meta(extra, url)
-    if not url:
-        for candidate in _collect_assets_meta(job):
-            candidate_url = candidate.get("url")
-            if isinstance(candidate_url, str) and candidate_url.startswith("http"):
-                url = candidate_url
-                meta = candidate
-                break
-    if not url:
+def _build_archive_payload_from_sent(
+    job: GenerationJobRecord, sent: SentMediaInfo
+) -> Optional[ArchivePayload]:
+    if not sent.file_id:
         return None
-
-    mime_hint = None
-    filename_hint = None
-    size_hint = None
-    duration_hint = None
-    if isinstance(meta, dict):
-        raw_mime = meta.get("mime") or meta.get("mime_type")
-        if isinstance(raw_mime, str) and raw_mime.strip():
-            mime_hint = raw_mime.strip()
-        raw_filename = meta.get("filename")
-        if isinstance(raw_filename, str) and raw_filename.strip():
-            filename_hint = raw_filename.strip()
-        size_hint = _coerce_int(meta.get("size_bytes") or meta.get("bytes"))
-        duration_hint = _coerce_int(meta.get("duration_seconds"))
-
-    content_type, resolved_mime = _infer_content_type(url, mime_hint, job)
-    filename = filename_hint or _guess_filename(url)
-    duration_seconds = None
-    if content_type == "video":
-        duration_seconds = job.seconds or duration_hint
-    file_size = size_hint if isinstance(size_hint, int) else None
-
+    content_type = "image" if (job.content_type or "video") == "image" else "video"
+    duration = sent.duration_seconds if content_type == "video" else None
     return ArchivePayload(
         corr_id=job.corr_id or job.id,
         prompt=job.prompt,
@@ -1864,93 +1864,13 @@ def _build_remote_archive_payload(job: GenerationJobRecord) -> Optional[ArchiveP
         username=job.username,
         user_id=job.user_id,
         content_type=content_type,
-        mime_type=resolved_mime,
-        file_url=url,
-        file_size=file_size,
-        filename=filename,
-        duration_seconds=duration_seconds,
+        mime_type=sent.mime_type,
+        file_id=sent.file_id,
+        file_size=sent.file_size,
+        duration_seconds=duration,
+        delivery_method=sent.method,
+        sent_at=datetime.utcnow(),
     )
-
-
-def _select_remote_asset_meta(extra: Dict[str, Any], url: str) -> Optional[Dict[str, Any]]:
-    assets_meta = extra.get("assets_meta") if isinstance(extra, dict) else None
-    if not isinstance(assets_meta, list):
-        return None
-    normalized = url.strip()
-    fallback: Optional[Dict[str, Any]] = None
-    for entry in assets_meta:
-        if not isinstance(entry, dict):
-            continue
-        if entry.get("inline"):
-            continue
-        entry_url = str(entry.get("url") or "").strip()
-        if not entry_url:
-            continue
-        if fallback is None:
-            fallback = entry
-        if entry_url == normalized:
-            return entry
-    return fallback
-
-
-def _coerce_int(value: Any) -> Optional[int]:
-    if value is None:
-        return None
-    if isinstance(value, bool):
-        return None
-    if isinstance(value, int):
-        return value if value >= 0 else None
-    if isinstance(value, float):
-        if value != value:  # NaN check
-            return None
-        candidate = int(round(value))
-        return candidate if candidate >= 0 else None
-    if isinstance(value, str):
-        text = value.strip()
-        if not text:
-            return None
-        try:
-            candidate = int(float(text))
-        except ValueError:
-            return None
-        return candidate if candidate >= 0 else None
-    return None
-
-
-def _infer_content_type(
-    url: str, mime_hint: Optional[str], job: GenerationJobRecord
-) -> Tuple[Literal["image", "video"], Optional[str]]:
-    mime = (mime_hint or "").strip() or None
-    if mime:
-        lowered = mime.lower()
-        if lowered.startswith("image/"):
-            return "image", mime
-        if lowered.startswith("video/"):
-            return "video", mime
-    guessed, _ = mimetypes.guess_type(url)
-    if guessed:
-        lowered = guessed.lower()
-        if lowered.startswith("image/"):
-            return "image", guessed
-        if lowered.startswith("video/"):
-            return "video", guessed
-    path = urlparse(url).path.lower()
-    if path.endswith((".png", ".jpg", ".jpeg", ".webp", ".gif")):
-        return "image", guessed or mime or mimetypes.guess_type(path)[0]
-    if path.endswith((".mp4", ".mov", ".webm", ".mkv", ".avi", ".m4v")):
-        return "video", guessed or mime or mimetypes.guess_type(path)[0]
-    if job.seconds:
-        return "video", guessed or mime or "video/mp4"
-    return "image", guessed or mime or "image/png"
-
-
-def _guess_filename(url: str) -> Optional[str]:
-    parsed = urlparse(url)
-    path = parsed.path
-    if not path:
-        return None
-    candidate = path.rsplit("/", 1)[-1]
-    return candidate or None
 
 
 async def start_command(
