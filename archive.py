@@ -27,6 +27,7 @@ CantTalkWithBot = getattr(aiogram_exceptions, "CantTalkWithBot", TelegramAPIErro
 
 from config import Config
 from db import ArchiveLogRecord, Database
+from observability import log_event
 
 log = logging.getLogger(__name__)
 
@@ -50,9 +51,12 @@ class ArchivePayload:
     file_bytes: Optional[bytes] = None
     file_path: Optional[str] = None
     file_url: Optional[str] = None
+    file_id: Optional[str] = None
     file_size: Optional[int] = None
     filename: Optional[str] = None
     duration_seconds: Optional[int] = None
+    delivery_method: Optional[str] = None
+    sent_at: Optional[datetime] = None
 
     def resolved_file_size(self) -> Optional[int]:
         if self.file_size is not None:
@@ -90,7 +94,9 @@ class ArchivePublisher:
             "Scheduling archive publish corr_id=%s type=%s source=%s size=%s",
             payload.corr_id,
             payload.content_type,
-            "bytes"
+            "telegram"
+            if payload.file_id
+            else "bytes"
             if payload.file_bytes is not None
             else "path"
             if payload.file_path
@@ -312,6 +318,40 @@ class ArchivePublisher:
         return self._can_publish
 
     async def _send_media(self, payload: ArchivePayload, caption: str):
+        if payload.file_id:
+            method = (payload.delivery_method or "video") if payload.content_type == "video" else (
+                payload.delivery_method or "photo"
+            )
+            if method == "video" and payload.content_type == "video":
+                log.debug(
+                    "Sending archive video via file_id corr_id=%s duration=%s",
+                    payload.corr_id,
+                    payload.duration_seconds,
+                )
+                return await self._bot.send_video(
+                    self._channel_id,
+                    payload.file_id,
+                    caption=caption,
+                    parse_mode="MarkdownV2",
+                    duration=payload.duration_seconds,
+                    supports_streaming=True,
+                )
+            if method == "photo" and payload.content_type == "image":
+                log.debug("Sending archive photo via file_id corr_id=%s", payload.corr_id)
+                return await self._bot.send_photo(
+                    self._channel_id,
+                    payload.file_id,
+                    caption=caption,
+                    parse_mode="MarkdownV2",
+                )
+            log.debug("Sending archive document via file_id corr_id=%s", payload.corr_id)
+            return await self._bot.send_document(
+                self._channel_id,
+                payload.file_id,
+                caption=caption,
+                parse_mode="MarkdownV2",
+            )
+
         data, filename = await self._prepare_input(payload)
         input_file = InputFile(data, filename=filename)
         if payload.content_type == "video":
@@ -324,6 +364,7 @@ class ArchivePublisher:
                 caption=caption,
                 parse_mode="MarkdownV2",
                 duration=payload.duration_seconds,
+                supports_streaming=True,
             )
         log.debug("Sending archive document corr_id=%s filename=%s", payload.corr_id, filename)
         return await self._bot.send_document(
@@ -392,6 +433,23 @@ class ArchivePublisher:
             user_part = f"{user_part} (id {payload.user_id})"
         base_model = f"Модель: {self._escape_markdown(model)}"
         base_user = f"Пользователь: {self._escape_markdown(user_part)}"
+        sent_at = payload.sent_at or datetime.utcnow()
+        timestamp = sent_at.strftime("%Y-%m-%d %H:%M UTC")
+        base_time = f"Дата: {self._escape_markdown(timestamp)}"
+        size_bytes = payload.resolved_file_size() or 0
+        size_line = None
+        if size_bytes:
+            size_line = f"Размер: ~{size_bytes / (1024 * 1024):.1f} МБ"
+        duration_line = None
+        if payload.duration_seconds and payload.duration_seconds > 0:
+            duration_line = f"Длительность: {int(payload.duration_seconds)} с"
+        corr_line = f"Corr ID: {self._escape_markdown(payload.corr_id)}"
+        static_lines = [base_model, base_user, base_time]
+        if duration_line:
+            static_lines.append(self._escape_markdown(duration_line))
+        if size_line:
+            static_lines.append(self._escape_markdown(size_line))
+        static_lines.append(corr_line)
 
         truncated = False
         current_prompt = prompt
@@ -399,7 +457,7 @@ class ArchivePublisher:
             suffix = "…" if truncated and current_prompt else ""
             prompt_value = current_prompt + suffix if current_prompt else "-"
             line_prompt = f"Промпт: {self._escape_markdown(prompt_value)}"
-            caption = "\n".join([line_prompt, base_model, base_user])
+            caption = "\n".join([line_prompt, *static_lines])
             if len(caption) <= _MAX_CAPTION_LENGTH or not current_prompt:
                 if len(caption) > _MAX_CAPTION_LENGTH:
                     trimmed = caption[: _MAX_CAPTION_LENGTH - 1]
@@ -469,6 +527,24 @@ class ArchivePublisher:
         attempts: int = 0,
         error_short: Optional[str] = None,
     ) -> None:
+        log_event(
+            level="INFO" if archive_status == "sent" else "WARNING",
+            event="archive_publish",
+            corr_id=payload.corr_id,
+            user_id=payload.user_id,
+            username=payload.username,
+            model=payload.model_name,
+            provider="archive",
+            size=None,
+            extra={
+                "archive_status": archive_status,
+                "attempts": attempts,
+                "error_short": error_short,
+                "content_type": payload.content_type,
+                "file_size": payload.resolved_file_size() or 0,
+                "delivery_method": payload.delivery_method,
+            },
+        )
         record = ArchiveLogRecord(
             ts=datetime.utcnow(),
             corr_id=payload.corr_id,

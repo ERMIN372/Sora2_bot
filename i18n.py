@@ -188,6 +188,7 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "status.completed_url": "Готово: {url}",
         "status.completed_video_summary": "🎬 Готово. Длительность: {duration} с. Размер: ~{size_mb} МБ.",
         "status.completed_video_summary_short": "🎬 Готово. Размер: ~{size_mb} МБ.",
+        "status.completed_image_summary": "🖼 Готово. Размер: ~{size_mb} МБ.",
         "status.inline_too_large": (
             "Файл от модели ({mime}, {size} байт) превышает лимит Telegram ({limit_mb} МБ)."
         ),
