@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import logging
 import os
 from dataclasses import dataclass
@@ -12,7 +13,7 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional
 from config import Config
 from db import Database, ErrorLogRecord, GenerationJobRecord
 from moderation import classify_safety_response, policy_message, render_error_json
-from observability import log_event
+from observability import increment_metric, log_event
 from services.gemini_key import current_key_mask, ensure_gemini_key_logged
 from generation_gate import GenerationRequestGate
 from providers import BaseProviderClient, ProviderAPIError, ProviderJobStatus, ProviderJobSubmission
@@ -441,38 +442,34 @@ class JobQueue:
                     preflight_scope=pending.preflight_scope,
                 )
                 return
-            raw_inline = []
+            provider_data: Dict[str, Any] = {}
             if isinstance(result.data, dict):
-                raw_inline = result.data.get("inline_assets") or []
-            if isinstance(raw_inline, list):
-                inline_assets = [dict(asset) for asset in raw_inline if isinstance(asset, dict)]
-            inline_asset_map = {
-                f"inline_{idx}": asset for idx, asset in enumerate(inline_assets)
-            }
-            assets_meta = []
-            for key, value in result.assets.items():
-                entry: Dict[str, Any] = {"key": key}
-                inline_meta = inline_asset_map.get(key)
-                if inline_meta:
-                    entry.update(
-                        {
-                            "inline": True,
-                            "kind": inline_meta.get("kind"),
-                            "mime": inline_meta.get("mime"),
-                            "bytes": inline_meta.get("bytes"),
-                        }
-                    )
-                else:
-                    entry.update({"inline": False, "url": value})
-                assets_meta.append(entry)
+                provider_data = dict(result.data)
+
+            raw_inline = provider_data.get("inline_assets") if provider_data else []
+            inline_assets = (
+                [dict(asset) for asset in raw_inline if isinstance(asset, dict)]
+                if isinstance(raw_inline, list)
+                else []
+            )
+
+            assets_meta: List[Dict[str, Any]] = []
+            raw_assets_meta = provider_data.get("assets") if provider_data else []
+            if isinstance(raw_assets_meta, list):
+                for item in raw_assets_meta:
+                    if isinstance(item, dict):
+                        entry = dict(item)
+                        entry["key"] = str(entry.get("key") or f"asset_{len(assets_meta)}")
+                        assets_meta.append(entry)
+            if not assets_meta:
+                for key, value in result.assets.items():
+                    assets_meta.append({"key": key, "inline": False, "url": value})
+
             provider_payload: Optional[Dict[str, Any]] = None
-            provider_data: Optional[Dict[str, Any]] = None
-            if isinstance(result.data, dict):
-                provider_data = result.data
-                raw_payload = provider_data.get("payload")
-                if isinstance(raw_payload, dict):
-                    provider_payload = raw_payload
-                    job_extra["payload"] = provider_payload
+            raw_payload = provider_data.get("payload") if provider_data else None
+            if isinstance(raw_payload, dict):
+                provider_payload = raw_payload
+                job_extra["payload"] = provider_payload
             if provider_payload:
                 data_uri = provider_payload.get("data_uri")
                 if isinstance(data_uri, str):
@@ -492,7 +489,6 @@ class JobQueue:
                         }
                         inline_assets.append(inline_entry)
                         key = f"inline_{len(inline_assets) - 1}"
-                        inline_asset_map[key] = inline_entry
                         assets_meta.append(
                             {
                                 "key": key,
@@ -525,32 +521,56 @@ class JobQueue:
                             }
                         )
             if inline_assets:
-                first_inline = inline_assets[0]
-                mime = first_inline.get("mime") or "application/octet-stream"
-                size_bytes = first_inline.get("bytes") or 0
-                asset_label = f"[inline {mime}, {size_bytes} bytes]"
                 job_extra["inline_assets"] = inline_assets
-            else:
-                asset_label = next(iter(result.assets.values()), None)
-                if asset_label:
-                    mime_hint = None
-                    for entry in assets_meta:
-                        if entry.get("url") == asset_label and entry.get("mime"):
-                            mime_hint = entry.get("mime")
-                            break
-                    descriptor = mime_hint or "asset"
-                    asset_label = f"[remote {descriptor}]"
             if assets_meta:
                 job_extra["assets_meta"] = assets_meta
             if key_mask:
                 job_extra.setdefault("gemini_key_mask", key_mask)
             if provider_data:
                 job_extra.setdefault("provider_data", provider_data)
-            poll_extra: Dict[str, Any]
-            if assets_meta:
-                poll_extra = {"status": result.status, "assets_meta": assets_meta, "gemini_key_mask": key_mask or None}
+
+            recovery_attempted = bool(provider_data.get("assets_recovery_attempted"))
+            no_media_confirmed = bool(provider_data.get("no_media_confirmed"))
+
+            if recovery_attempted:
+                job_extra.setdefault("assets_recovery_attempted", True)
+            if no_media_confirmed:
+                job_extra.setdefault("no_media_confirmed", True)
+
+            primary_asset = (
+                provider_data.get("primary_asset")
+                if isinstance(provider_data.get("primary_asset"), dict)
+                else None
+            )
+            asset_value = None
+            if isinstance(primary_asset, dict):
+                asset_value = primary_asset.get("url") or primary_asset.get("file_id")
+            if asset_value is None and not inline_assets:
+                asset_value = next(iter(result.assets.values()), None)
+
+            if inline_assets:
+                first_inline = inline_assets[0]
+                mime = first_inline.get("mime") or "application/octet-stream"
+                size_bytes = int(first_inline.get("bytes") or 0)
+                asset_label_display = f"[inline {mime}, {size_bytes} bytes]"
             else:
-                poll_extra = {"status": result.status, "gemini_key_mask": key_mask or None}
+                descriptor = None
+                if isinstance(primary_asset, dict):
+                    descriptor = primary_asset.get("mime") or primary_asset.get("quality")
+                if descriptor:
+                    asset_label_display = f"[remote {descriptor}]"
+                elif asset_value:
+                    asset_label_display = "[remote asset]"
+                else:
+                    asset_label_display = None
+
+            poll_extra: Dict[str, Any] = {"status": result.status, "gemini_key_mask": key_mask or None}
+            if assets_meta:
+                poll_extra["assets_meta"] = assets_meta
+            if recovery_attempted:
+                poll_extra["assets_recovery_attempted"] = True
+            if no_media_confirmed:
+                poll_extra["no_media_confirmed"] = True
             log_event(
                 level="INFO",
                 event="poll",
@@ -565,7 +585,43 @@ class JobQueue:
                 duration_ms=result.duration_ms,
                 extra=poll_extra,
             )
-            if result.status == "completed" and asset_label:
+            if result.status == "completed":
+                if not inline_assets and not asset_value:
+                    if no_media_confirmed:
+                        await self._handle_no_media_assets(
+                            pending,
+                            provider_key=provider_key,
+                            key_mask=key_mask,
+                            provider_data=provider_data,
+                            result=result,
+                        )
+                        return
+                    log.warning(
+                        "Job completed without assets job_id=%s corr_id=%s provider=%s retrying",
+                        pending.job_id,
+                        pending.corr_id,
+                        provider_key,
+                    )
+                    await asyncio.sleep(3)
+                    await self.enqueue(
+                        job_id=pending.job_id,
+                        user_id=pending.user_id,
+                        prompt=pending.prompt,
+                        corr_id=pending.corr_id,
+                        size=pending.size,
+                        model=pending.model,
+                        provider=provider_key,
+                        username=pending.username,
+                        original_prompt=pending.original_prompt,
+                        sanitized_prompt=pending.sanitized_prompt,
+                        auto_sanitized=pending.auto_sanitized,
+                        preflight_reason=pending.preflight_reason,
+                        preflight_scope=pending.preflight_scope,
+                    )
+                    return
+
+                video_url_value = asset_value or asset_label_display or ""
+                display_label = asset_label_display or video_url_value or ""
                 log.debug(
                     "Job completed job_id=%s corr_id=%s provider=%s assets=%s",
                     pending.job_id,
@@ -578,17 +634,24 @@ class JobQueue:
                     await self._db.update_job(
                         pending.job_id,
                         "completed",
-                        video_url=asset_label,
+                        video_url=video_url_value,
                         error=None,
                     )
                 except Exception:
                     log.exception("Failed to update job %s as completed", pending.job_id)
                     gsheets_ok = False
+                if primary_asset:
+                    job_extra.setdefault("primary_asset", primary_asset)
                 done_extra: Dict[str, Any] = {"assets": list(result.assets.keys())}
                 if assets_meta:
                     done_extra["assets_meta"] = assets_meta
+                if primary_asset:
+                    done_extra["primary_asset"] = primary_asset
+                if recovery_attempted:
+                    done_extra["assets_recovery_attempted"] = True
                 if key_mask:
                     done_extra["gemini_key_mask"] = key_mask
+                done_extra["video_label"] = display_label
                 log_event(
                     level="INFO",
                     event="done",
@@ -659,6 +722,7 @@ class JobQueue:
                         pending.user_id, self._config.generation_cost_credits
                     )
                     refunded = True
+                    increment_metric("refunds_total")
                 except Exception:
                     log.exception("Refunding credits failed for job %s", pending.job_id)
                 sheet_ok = await self._db.log_error_record(
@@ -781,6 +845,104 @@ class JobQueue:
                 pending.user_id,
                 pending.corr_id,
             )
+
+    async def _handle_no_media_assets(
+        self,
+        pending: PendingJob,
+        *,
+        provider_key: str,
+        key_mask: str,
+        provider_data: Dict[str, Any],
+        result: ProviderJobStatus,
+    ) -> None:
+        message = "Провайдер завершил операцию без доступных видеофайлов"
+        increment_metric("veo_completed_without_assets")
+        log.warning(
+            "No media assets after completion job_id=%s corr_id=%s provider=%s",
+            pending.job_id,
+            pending.corr_id,
+            provider_key,
+        )
+        try:
+            await self._db.update_job(pending.job_id, "failed", error=message)
+        except Exception:
+            log.exception("Failed to update job %s after empty assets", pending.job_id)
+        refunded = False
+        try:
+            await self._db.add_credits(pending.user_id, self._config.generation_cost_credits)
+            refunded = True
+            increment_metric("refunds_total")
+        except Exception:
+            log.exception("Refunding credits failed for no-media job %s", pending.job_id)
+
+        snippet_source: Any = provider_data.get("operation") if isinstance(provider_data, dict) else None
+        if not isinstance(snippet_source, dict):
+            snippet_source = provider_data
+        try:
+            operation_snippet = json.dumps(snippet_source, ensure_ascii=False)[:512]
+        except Exception:  # pragma: no cover - defensive serialisation
+            operation_snippet = str(snippet_source)[:512]
+
+        error_record = ErrorLogRecord(
+            ts=datetime.utcnow(),
+            user_id=pending.user_id,
+            username=pending.username,
+            corr_id=pending.corr_id,
+            job_id=pending.job_id,
+            model=pending.model,
+            size=pending.size,
+            status_code=result.status_code,
+            error_type="no_media",
+            error_msg_short=message,
+            refunded=refunded,
+            preflight_blocked=False,
+            preflight_reason=pending.preflight_reason or "",
+            auto_sanitized=pending.auto_sanitized,
+            sanitized_prompt=pending.sanitized_prompt or pending.prompt,
+            error_scope="unknown",
+            error_json="",
+        )
+        sheet_ok = await self._db.log_error_record(error_record)
+
+        log_event(
+            level="ERROR",
+            event="error",
+            corr_id=pending.corr_id,
+            job_id=pending.job_id,
+            user_id=pending.user_id,
+            username=pending.username,
+            model=pending.model,
+            provider=provider_key,
+            size=pending.size,
+            status_code=result.status_code,
+            duration_ms=result.duration_ms,
+            error_type="no_media_assets",
+            error_msg_short=message,
+            gsheets_ok=sheet_ok,
+            refund_done=refunded,
+            extra={
+                "reason": "no_media_assets_after_completed",
+                "gemini_key_mask": key_mask or None,
+                "operation_snippet": operation_snippet,
+                "assets_recovery_attempted": provider_data.get("assets_recovery_attempted"),
+                "no_media_confirmed": provider_data.get("no_media_confirmed"),
+            },
+        )
+        log_event(
+            level="INFO",
+            event="refund",
+            corr_id=pending.corr_id,
+            job_id=pending.job_id,
+            user_id=pending.user_id,
+            username=pending.username,
+            model=pending.model,
+            provider=provider_key,
+            size=pending.size,
+            credits_cost=self._config.generation_cost_credits,
+            refund_done=refunded,
+            extra={"gemini_key_mask": key_mask or None},
+        )
+        await self._release_gate(pending, reason="no_media", status="failed")
 
 
 __all__ = ["JobQueue"]

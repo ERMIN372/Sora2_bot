@@ -72,7 +72,7 @@ def list_veo_video_models(config: Config) -> List[str]:
 
     client = get_gemini_client(config)
     try:
-        response = client.models.list(page_size=200)
+        response = client.models.list()
     except _genai_errors.APIError as exc:  # pragma: no cover - network guard
         log.warning("Failed to list Gemini models: %s", exc, exc_info=True)
         return []
@@ -80,8 +80,38 @@ def list_veo_video_models(config: Config) -> List[str]:
         log.warning("Unexpected error listing Gemini models", exc_info=True)
         return []
 
+    def _iter_response(obj: object) -> Iterable[object]:
+        if obj is None:
+            return ()
+        # The google-genai SDK returns a pager object that is already iterable.
+        if hasattr(obj, "pages"):
+            try:
+                pages = getattr(obj, "pages")
+                for page in pages:
+                    for entry in _iter_models(page):
+                        yield entry
+                return
+            except Exception:  # pragma: no cover - defensive against SDK quirks
+                log.debug("Failed to iterate Gemini model pages", exc_info=True)
+        if isinstance(obj, (list, tuple)):
+            yield from obj
+            return
+        if isinstance(obj, dict):
+            yield from _iter_models(obj)
+            return
+        if isinstance(obj, str):
+            yield obj
+            return
+        try:
+            iterator = iter(obj)  # type: ignore[arg-type]
+        except TypeError:
+            yield from _iter_models(obj)
+            return
+        for entry in iterator:
+            yield entry
+
     names: List[str] = []
-    for item in _iter_models(response):
+    for item in _iter_response(response):
         name = _extract_model_name(item)
         if not name:
             continue

@@ -131,3 +131,60 @@ def test_download_asset_permission_denied(monkeypatch: pytest.MonkeyPatch) -> No
     assert excinfo.value.status_code == 403
     assert excinfo.value.error_status == "PERMISSION_DENIED"
 
+
+class _StubResponse:
+    def __init__(self, *, status: int = 200, body: bytes = b"video-bytes") -> None:
+        self.status = status
+        self._body = body
+        self.headers = {"Content-Type": "video/mp4", "Content-Length": str(len(body))}
+
+    async def read(self) -> bytes:
+        return self._body
+
+    async def __aenter__(self) -> "_StubResponse":
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb) -> None:
+        return None
+
+
+class _StubSession:
+    calls: list[tuple[str, dict[str, str]]] = []
+
+    def __init__(self, *args, **kwargs) -> None:
+        self._closed = False
+
+    async def __aenter__(self) -> "_StubSession":
+        self.__class__.calls.clear()
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb) -> None:
+        self._closed = True
+
+    def get(self, url: str, headers: dict[str, str]) -> _StubResponse:
+        self.__class__.calls.append((url, headers))
+        return _StubResponse()
+
+
+def test_download_asset_direct_url(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(downloader.aiohttp, "ClientSession", _StubSession)
+    config = _make_config()
+
+    expected_mask = downloader.current_key_mask(config)
+
+    result = asyncio.run(
+        downloader.download_asset(
+            asset_url="https://example.com/direct.mp4",
+            config=config,
+            corr_id="corr-4",
+            asset_name="video",
+            expected_mask=expected_mask,
+            filename_hint="direct.mp4",
+        )
+    )
+
+    assert result.mime == "video/mp4"
+    assert result.size == len(b"video-bytes")
+    assert _StubSession.calls
+    assert _StubSession.calls[0][1].get("x-goog-api-key") == config.gemini_api_key
+

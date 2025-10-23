@@ -38,7 +38,9 @@ from observability import (
     get_job_history,
     get_last_error,
     get_last_healthcheck,
+    increment_metric,
     log_event,
+    record_timing_metric,
     should_notify_support,
 )
 from moderation import policy_message, run_preflight
@@ -1446,17 +1448,24 @@ def _expected_key_mask(job: GenerationJobRecord) -> Optional[str]:
 
 
 def _select_remote_video_asset(job: GenerationJobRecord) -> Optional[Dict[str, Any]]:
+    candidates: List[Dict[str, Any]] = []
     for asset in _collect_assets_meta(job):
         if asset.get("inline"):
             continue
-        url = asset.get("url")
+        url = asset.get("url") or asset.get("file_id")
         if not isinstance(url, str) or not url:
             continue
         mime = str(asset.get("mime") or "")
         asset_type = str(asset.get("type") or "")
         if mime.startswith("video/") or asset_type == "video":
-            return asset
-    return None
+            score = 1
+            if asset.get("preferred"):
+                score += 10
+            candidates.append((score, asset))
+    if not candidates:
+        return None
+    candidates.sort(key=lambda item: item[0], reverse=True)
+    return candidates[0][1]
 
 
 def _format_video_summary(duration_seconds: Optional[int], size_bytes: int) -> str:
@@ -1489,6 +1498,14 @@ def _extract_video_duration(job: GenerationJobRecord) -> Optional[int]:
     if isinstance(job.seconds, int) and job.seconds > 0:
         return job.seconds
     extra = getattr(job, "extra", {}) or {}
+    primary = extra.get("primary_asset") if isinstance(extra, dict) else None
+    if isinstance(primary, dict):
+        try:
+            duration = int(primary.get("duration_seconds") or 0)
+        except (TypeError, ValueError):
+            duration = 0
+        if duration > 0:
+            return duration
     payload = extra.get("payload") if isinstance(extra, dict) else None
     if isinstance(payload, dict):
         config = payload.get("config")
@@ -1635,10 +1652,24 @@ async def _deliver_remote_video(
     asset_name = str(asset.get("key") or "video")
     mime_hint = asset.get("mime") if isinstance(asset.get("mime"), str) else None
     filename_hint = asset.get("filename") if isinstance(asset.get("filename"), str) else None
+    asset_reference = asset.get("url") or asset.get("file_id")
+    if not isinstance(asset_reference, str) or not asset_reference:
+        log.error("Missing asset reference for job_id=%s asset=%s", job.id, asset)
+        await _handle_delivery_failure(
+            dp,
+            job,
+            config,
+            db,
+            message=i18n.t("status.delivery_generic"),
+            reason="missing_asset",
+            extra_log={"asset": asset},
+            key_mask=_expected_key_mask(job),
+        )
+        return None
     expected_mask = _expected_key_mask(job)
     try:
         downloaded = await download_asset(
-            asset_url=str(asset.get("url")),
+            asset_url=str(asset_reference),
             config=config,
             corr_id=corr_id or "",
             asset_name=asset_name,
@@ -1765,6 +1796,12 @@ async def _deliver_remote_video(
         file_id = ""
         file_size = downloaded.size
 
+    if isinstance(job.created_at, datetime):
+        elapsed = (datetime.utcnow() - job.created_at).total_seconds()
+        if elapsed >= 0:
+            record_timing_metric("first_frame_seconds", elapsed)
+
+    increment_metric("delivery_success")
     log_event(
         level="INFO",
         event="delivery",
@@ -1780,6 +1817,7 @@ async def _deliver_remote_video(
             "asset_bytes": downloaded.size,
             "gemini_key_mask": downloaded.key_mask or expected_mask,
             "archive_status": "pending",
+            "duration_seconds": duration_seconds,
         },
     )
     return SentMediaInfo(
@@ -1811,13 +1849,21 @@ async def _handle_delivery_failure(
             refunded = True
         except Exception:
             log.exception("Failed to refund credits after delivery failure job_id=%s", job.id)
+    if refunded:
+        increment_metric("refunds_total")
     try:
         await db.update_job(job.id, "failed", error=message)
     except Exception:
         log.exception("Failed to update job status after delivery failure job_id=%s", job.id)
     job.status = "failed"
     job.error = message
-    await STATUS_MESSAGES.mark_failed(bot=dp.bot, db=db, job=job, text=message)
+    await STATUS_MESSAGES.mark_failed(
+        bot=dp.bot,
+        db=db,
+        job=job,
+        text=message,
+        terminal_state="refunded" if refunded else "failed",
+    )
     extra_payload = dict(extra_log or {})
     if key_mask:
         extra_payload.setdefault("gemini_key_mask", key_mask)
