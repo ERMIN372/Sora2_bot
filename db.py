@@ -68,6 +68,10 @@ class ErrorLogRecord:
     sanitized_prompt: Optional[str] = None
     error_scope: Optional[str] = None
     error_json: Optional[str] = None
+    job_status: Optional[str] = None
+    reason: Optional[str] = None
+    provider_error_code: Optional[str] = None
+    provider_error_message: Optional[str] = None
 
 
 @dataclass
@@ -535,6 +539,10 @@ class Database:
                 sanitized_prompt=record.sanitized_prompt or "",
                 error_scope=record.error_scope or "",
                 error_json=record.error_json or "",
+                job_status=record.job_status or "",
+                reason=record.reason or "",
+                provider_error_code=record.provider_error_code or "",
+                provider_error_message=record.provider_error_message or "",
             )
         except Exception:  # pragma: no cover - external dependency
             log.warning("Failed to append error record", exc_info=True)

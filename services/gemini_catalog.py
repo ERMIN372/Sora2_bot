@@ -16,6 +16,12 @@ log = logging.getLogger(__name__)
 _CACHE_TTL_SECONDS = 300.0
 _CACHE_LOCK = threading.Lock()
 _CACHE: dict[str, tuple[float, List[str]]] = {}
+_SUPPORTED_PREFIXES = ("veo-3.0-", "veo-3.1-")
+
+
+def _is_supported_model(name: str) -> bool:
+    value = (name or "").strip().lower()
+    return any(value.startswith(prefix) for prefix in _SUPPORTED_PREFIXES)
 
 
 def _extract_model_name(entry: object) -> str:
@@ -116,7 +122,7 @@ def list_veo_video_models(config: Config) -> List[str]:
         if not name:
             continue
         normalised = _normalise_model_name(name)
-        if normalised.startswith("veo-3"):
+        if _is_supported_model(normalised):
             names.append(normalised)
 
     unique_sorted = sorted(dict.fromkeys(names))
