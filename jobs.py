@@ -494,7 +494,7 @@ class JobQueue:
                 response_payload: Optional[Dict[str, Any]] = None
                 if isinstance(result.data, dict):
                     response_payload = result.data.get("response")
-                scope, _categories, summary = classify_safety_response(response_payload)
+                scope, categories, summary = classify_safety_response(response_payload)
                 if scope == "unknown" and pending.preflight_scope:
                     scope = pending.preflight_scope
                 error_json = render_error_json(summary)
@@ -517,6 +517,8 @@ class JobQueue:
                     job_extra.setdefault("preflight_auto_sanitized", pending.auto_sanitized)
                 if pending.sanitized_prompt:
                     job_extra.setdefault("sanitized_prompt", pending.sanitized_prompt)
+                if categories:
+                    job_extra.setdefault("safety_categories", categories)
                 gsheets_ok = True
                 try:
                     await self._db.update_job(
@@ -576,6 +578,7 @@ class JobQueue:
                         "provider_message": raw_error,
                         "error_scope": scope,
                         "error_json": error_json,
+                        "safety_categories": categories,
                         "preflight_blocked": False,
                         "preflight_reason": pending.preflight_reason,
                         "preflight_scope": scope,

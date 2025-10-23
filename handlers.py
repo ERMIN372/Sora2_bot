@@ -47,7 +47,7 @@ from providers import ProviderAPIError
 from utils import build_inline_data_from_telegram_file
 import yookassa_client
 
-# Соотношения сторон, которые понимает провайдеры (Veo 3.x)
+# Соотношения сторон, которые понимает Sora
 ASPECT_RATIO_OPTIONS = {
     "horizontal": "16:9",
     "vertical": "9:16",
@@ -145,23 +145,6 @@ class VideoModelOption:
 
 def _video_model_options(config: Config) -> list[VideoModelOption]:
     options: list[VideoModelOption] = []
-    if config.vertex_enabled:
-        options.append(
-            VideoModelOption(
-                key="veo3",
-                model="veo3",
-                provider="veo3",
-                label=i18n.t("video.models.veo3"),
-            )
-        )
-        options.append(
-            VideoModelOption(
-                key="veo31",
-                model="veo3.1",
-                provider="veo3.1",
-                label=i18n.t("video.models.veo31"),
-            )
-        )
     if config.sora_enabled:
         options.append(
             VideoModelOption(
@@ -184,11 +167,7 @@ def _find_video_model_option(config: Config, key: str) -> Optional[VideoModelOpt
 def _resolve_model_label(model: str, config: Config) -> str:
     if model in {config.sora_model, "sora", "sora2", "sora-2"}:
         return i18n.t("video.models.sora")
-    if model in {"veo3", "veo-3.0-generate-001"}:
-        return i18n.t("video.models.veo3")
-    if model in {"veo3.1", "veo31", "veo-3.1-generate-preview"}:
-        return i18n.t("video.models.veo31")
-    if model in {"gemini-image", "gemini"}:
+    if model in {config.gemini_model_image, "gemini-image", "gemini"}:
         return i18n.t("image.model.gemini")
     return model
 
@@ -201,7 +180,7 @@ def _video_models_description(config: Config) -> str:
 
 
 def _image_model_description(config: Config) -> str:
-    if config.vertex_enabled:
+    if config.gemini_enabled:
         return i18n.t("image.model.gemini")
     return i18n.t("image.model.unavailable")
 
@@ -245,7 +224,7 @@ def _map_provider_error(error: ProviderAPIError) -> tuple[str, str, bool, str]:
     else:
         detail = escape_html(provider_message or (error.args[0] if error.args else ""))
         message = f"Не удалось выполнить запрос: {detail or 'попробуйте позже.'}"
-        short = _shorten(provider_message or "Ошибка Vertex")
+        short = _shorten(provider_message or "Ошибка провайдера")
     return message, short, notify_support, hint
 
 
@@ -671,7 +650,7 @@ async def flow_back_callback_handler(
             )
         return
     if target == "image_mode":
-        model = data.get("model") or "gemini-image"
+        model = data.get("model") or config.gemini_model_image
         provider = data.get("provider") or "gemini-image"
         model_label = data.get("model_label") or _resolve_model_label(model, config)
         product = data.get("product", "sora_video")
@@ -1606,14 +1585,14 @@ async def generate_image_menu(
     await state.finish()
     user_id = await _ensure_user(message, db)
     SESSION_MANAGER.get(user_id)
-    if not config.vertex_enabled:
+    if not config.gemini_enabled:
         await message.answer(i18n.t("errors.image_generation_disabled"))
         await _send_main_menu(message, config)
         return
     model_label = i18n.t("image.model.gemini")
     await state.update_data(
         flow_type="image",
-        model="gemini-image",
+        model=config.gemini_model_image,
         provider="gemini-image",
         model_label=model_label,
         include_size=False,
@@ -1829,7 +1808,7 @@ async def image_mode_callback_handler(
         return
     session = SESSION_MANAGER.get(user.id)
     data = await state.get_data()
-    model = data.get("model") or "gemini-image"
+    model = data.get("model") or config.gemini_model_image
     provider = data.get("provider") or "gemini-image"
     model_label = data.get("model_label") or _resolve_model_label(model, config)
     product = data.get("product", "sora_video")

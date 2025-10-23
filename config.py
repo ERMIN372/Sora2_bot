@@ -1,14 +1,11 @@
 """Application configuration utilities for the Sora Telegram bot."""
 from __future__ import annotations
 
-import base64
-import binascii
-import json
 import logging
 import os
 from dataclasses import dataclass, field
 from decimal import ROUND_CEILING, Decimal
-from typing import Dict, Iterable, Mapping, Optional, Tuple
+from typing import Dict, Iterable, List, Mapping, Optional, Tuple
 
 from dotenv import load_dotenv
 
@@ -24,16 +21,12 @@ DEFAULT_CREDIT_PRICE_RUB = Decimal("25.8")
 DEFAULT_MARKUP_PCT = Decimal("30")
 DEFAULT_FIX_FEE_RUB = Decimal("0")
 _DEFAULT_PROVIDER_COSTS: Mapping[str, Decimal] = {
-    "veo3_default": Decimal("18.0"),
+    "gemini_image": Decimal("18.0"),
 }
 
 DEFAULT_PRODUCTS: Dict[str, Decimal] = {
     "sora_video": Decimal("5"),
 }
-
-VERTEX_MODEL_VEO31_PREVIEW = "veo-3.1-generate-preview"
-VERTEX_MODEL_GEMINI_IMAGE = "gemini-2.5-flash-image"
-
 
 @dataclass(frozen=True)
 class CreditPackage:
@@ -142,14 +135,14 @@ class Config:
     """Configuration values loaded from the environment."""
 
     bot_token: str
-    vertex_enabled: bool = True
-    gcp_project_id: str = ""
-    vertex_location: str = "us-central1"
     sora_enabled: bool = False
     sora_api_key: str = ""
     sora_api_base: str = "https://api.sora.ai/v1"
     sora_model: str = "sora-2"
-    default_video_model: str = "veo3"
+    gemini_api_key: str = ""
+    gemini_model_text: str = "gemini-2.0-flash"
+    gemini_model_image: str = "gemini-2.5-flash-image"
+    default_video_model: str = "sora-2"
     database_path: str = "./bot.db"
     jobs_concurrency: int = 2
     max_jobs_per_user: int = 3
@@ -170,7 +163,6 @@ class Config:
     archive_channel_id: Optional[int] = None
     yookassa_poll_interval: int = 60
     google_sheet_id: str = ""
-    google_service_account: Dict[str, object] = field(default_factory=dict)
     gs_users_sheet: str = "users"
     gs_payments_sheet: str = "payments"
     gs_jobs_sheet: str = "jobs"
@@ -203,6 +195,12 @@ class Config:
         """Return ``True`` if YooKassa payments can be offered to users."""
 
         return self.yookassa_enabled and bool(self.public_base_url)
+
+    @property
+    def gemini_enabled(self) -> bool:
+        """Return ``True`` if Gemini API key is configured."""
+
+        return bool(self.gemini_api_key)
 
     @property
     def allowed_package_ids(self) -> Tuple[str, ...]:
@@ -334,27 +332,6 @@ def _get_env_int_list(key: str) -> Tuple[int, ...]:
     return tuple(result)
 
 
-def _load_service_account_info() -> Dict[str, object]:
-    raw = os.getenv("GOOGLE_SA_JSON_BASE64")
-    if not raw:
-        raise RuntimeError("GOOGLE_SA_JSON_BASE64 environment variable is required")
-    raw = raw.strip()
-    try:
-        decoded = base64.b64decode(raw, validate=True)
-        text = decoded.decode("utf-8")
-    except (binascii.Error, UnicodeDecodeError):
-        text = raw
-    try:
-        data = json.loads(text)
-    except json.JSONDecodeError as exc:
-        raise RuntimeError(
-            "GOOGLE_SA_JSON_BASE64 must contain JSON or base64-encoded JSON"
-        ) from exc
-    if not isinstance(data, dict):
-        raise RuntimeError("Service account JSON must decode to an object")
-    return data
-
-
 def _parse_package_discounts(raw: Optional[str]) -> Dict[str, Decimal]:
     if not raw:
         return {}
@@ -384,20 +361,20 @@ def load_config() -> Config:
             "TELEGRAM_BOT_TOKEN environment variable is required (BOT_TOKEN is accepted for backwards compatibility)"
         )
 
-    vertex_enabled = _get_env_bool("VERTEX_ENABLED", Config.vertex_enabled)
     sora_enabled = _get_env_bool("SORA_ENABLED", Config.sora_enabled)
-
-    if not vertex_enabled and not sora_enabled:
-        raise RuntimeError("At least one provider must be enabled (Vertex or Sora)")
-
-    gcp_project_id = (os.getenv("GCP_PROJECT_ID") or "").strip()
-    vertex_location = (
-        os.getenv("VERTEX_LOCATION", Config.vertex_location).strip() or Config.vertex_location
+    gemini_api_key = (os.getenv("GEMINI_API_KEY") or "").strip()
+    gemini_model_text = (
+        os.getenv("GEMINI_MODEL_TEXT", Config.gemini_model_text).strip()
+        or Config.gemini_model_text
     )
+    gemini_model_image = (
+        os.getenv("GEMINI_MODEL_IMAGE", Config.gemini_model_image).strip()
+        or Config.gemini_model_image
+    )
+    gemini_enabled = bool(gemini_api_key)
 
-    if vertex_enabled:
-        if not gcp_project_id:
-            raise RuntimeError("GCP_PROJECT_ID environment variable is required when VERTEX_ENABLED=true")
+    if not gemini_enabled and not sora_enabled:
+        raise RuntimeError("At least one provider must be enabled (Gemini or Sora)")
 
     sora_api_key = (os.getenv("SORA_API_KEY") or "").strip()
     sora_api_base = os.getenv("SORA_API_BASE", Config.sora_api_base).strip() or Config.sora_api_base
@@ -414,41 +391,35 @@ def load_config() -> Config:
         if not value:
             return None
         normalized = value.replace("_", "-").strip().lower()
-        if normalized in {"veo3", "veo-3", "veo-3.0", "veo-3.0-generate-001"}:
-            return "veo3"
-        if normalized in {"veo31", "veo3.1", "veo-3.1", "veo-3.1-generate-preview"}:
-            return "veo3.1"
         if normalized in {"sora", "sora2", "sora-2"}:
             return sora_model
         return normalized or None
 
     default_video_model = _normalize_default_model(os.getenv("DEFAULT_VIDEO_MODEL"))
     if not default_video_model:
-        default_video_model = "veo3" if vertex_enabled else sora_model
+        default_video_model = sora_model if sora_enabled else ""
 
-    available_defaults = []
-    if vertex_enabled:
-        available_defaults.extend(["veo3", "veo3.1"])
+    available_defaults: List[str] = []
     if sora_enabled:
         available_defaults.append(sora_model)
 
     if default_video_model not in available_defaults and available_defaults:
         default_video_model = available_defaults[0]
+    elif not available_defaults and not default_video_model:
+        default_video_model = ""
     database_path = os.getenv("DATABASE_PATH", Config.database_path)
     google_sheet_id = os.getenv("GOOGLE_SHEET_ID")
     if not google_sheet_id:
         raise RuntimeError("GOOGLE_SHEET_ID environment variable is required")
-    service_account = _load_service_account_info()
+    if not os.getenv("GOOGLE_SA_JSON_BASE64"):
+        raise RuntimeError("GOOGLE_SA_JSON_BASE64 environment variable is required")
     users_sheet = os.getenv("GS_USERS_SHEET", Config.gs_users_sheet)
     payments_sheet = os.getenv("GS_PAYMENTS_SHEET", Config.gs_payments_sheet)
     jobs_sheet = os.getenv("GS_JOBS_SHEET", Config.gs_jobs_sheet)
     errors_sheet = os.getenv("GS_ERRORS_SHEET", Config.gs_errors_sheet)
 
     prefixes = [
-        "VEO3_COST_RUB_",
-        "VEO31_COST_RUB_",
         "GEMINI_COST_RUB_",
-        "VERTEX_COST_RUB_",
         "SORA2_COST_RUB_",
         "SORA_COST_RUB_",
     ]
@@ -462,17 +433,16 @@ def load_config() -> Config:
 
     return Config(
         bot_token=bot_token,
-        vertex_enabled=vertex_enabled,
-        gcp_project_id=gcp_project_id,
-        vertex_location=vertex_location,
         sora_enabled=sora_enabled,
         sora_api_key=sora_api_key,
         sora_api_base=sora_api_base,
         sora_model=sora_model,
+        gemini_api_key=gemini_api_key,
+        gemini_model_text=gemini_model_text,
+        gemini_model_image=gemini_model_image,
         default_video_model=default_video_model,
         database_path=database_path,
         google_sheet_id=google_sheet_id,
-        google_service_account=service_account,
         gs_users_sheet=users_sheet,
         gs_payments_sheet=payments_sheet,
         gs_jobs_sheet=jobs_sheet,
@@ -573,6 +543,4 @@ __all__ = [
     "RuntimeConfig",
     "CFG",
     "load_config",
-    "VERTEX_MODEL_VEO31_PREVIEW",
-    "VERTEX_MODEL_GEMINI_IMAGE",
 ]
