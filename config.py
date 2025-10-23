@@ -135,6 +135,7 @@ class Config:
     """Configuration values loaded from the environment."""
 
     bot_token: str
+    environment: str = "dev"
     gemini_api_key: str = ""
     gemini_model_text: str = "gemini-2.0-flash"
     gemini_model_image: str = "gemini-2.5-flash-image"
@@ -390,6 +391,12 @@ def load_config() -> Config:
     if not gemini_enabled:
         log.warning("Gemini API key is not configured; generation features will be disabled")
 
+    environment = (
+        os.getenv("APP_ENV")
+        or os.getenv("ENVIRONMENT")
+        or Config.environment
+    ).strip() or Config.environment
+
     default_video_model = (os.getenv("DEFAULT_VIDEO_MODEL") or "").strip()
     if not default_video_model:
         default_video_model = gemini_model_video if gemini_enabled else ""
@@ -419,6 +426,7 @@ def load_config() -> Config:
     return Config(
         bot_token=bot_token,
         gemini_api_key=gemini_api_key,
+        environment=environment,
         gemini_model_text=gemini_model_text,
         gemini_model_image=gemini_model_image,
         gemini_model_video=gemini_model_video,

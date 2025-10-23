@@ -6,6 +6,7 @@ import base64
 import binascii
 import json
 import logging
+import os
 import re
 import time
 from fractions import Fraction
@@ -16,6 +17,7 @@ from google.genai import errors as _genai_errors, types as _genai_types
 
 from config import Config
 from services.gemini_client import get_gemini_client
+from services.gemini_key import ensure_gemini_key_logged
 
 from .base import BaseProviderClient, ProviderAPIError, ProviderJobStatus, ProviderJobSubmission
 
@@ -199,6 +201,13 @@ class GeminiGenerativeClient(BaseProviderClient):
         self._safety_settings = parsed_safety or _default_safety_settings()
         self._model = model
         self._pending: Dict[str, Tuple[Dict[str, Any], int, int, Dict[str, Any]]] = {}
+        self._environment = (config.environment or "dev").lower()
+        self._key_mask = ensure_gemini_key_logged(
+            config,
+            context="gemini_generative_client",
+            process_id=f"pid={os.getpid()}",  # pragma: no cover - runtime value
+            logger=log,
+        )
 
     def _build_contents(
         self,
@@ -367,6 +376,14 @@ class GeminiGenerativeClient(BaseProviderClient):
                 payload=payload_dict,
             )
             start = time.monotonic()
+            log.info(
+                "gemini.generate start model=%s env=%s key_mask=%s corr_id=%s mode=%s",
+                self._model,
+                self._environment,
+                self._key_mask or "",
+                idempotency_key or "",
+                request_meta.get("mode") if isinstance(request_meta, dict) else "generate_content",
+            )
             try:
                 response = await asyncio.to_thread(generator, **request_kwargs)
                 duration_ms = int((time.monotonic() - start) * 1000)
@@ -379,6 +396,7 @@ class GeminiGenerativeClient(BaseProviderClient):
                     "assets_meta": {},
                     "request": request_meta,
                     "request_mode": request_meta.get("mode"),
+                    "key_mask": self._key_mask,
                 }
                 self._pending[job_id] = (payload_json, 200, duration_ms, meta)
                 size = request_settings.get("size")
@@ -392,6 +410,14 @@ class GeminiGenerativeClient(BaseProviderClient):
                     200,
                     duration_ms,
                 )
+                log.info(
+                    "gemini.generate done model=%s env=%s key_mask=%s corr_id=%s latency_ms=%s",
+                    self._model,
+                    self._environment,
+                    self._key_mask or "",
+                    idempotency_key or job_id,
+                    duration_ms,
+                )
                 return ProviderJobSubmission(
                     job_id=job_id,
                     status_code=200,
@@ -401,6 +427,15 @@ class GeminiGenerativeClient(BaseProviderClient):
             except Exception as exc:  # pragma: no cover - network guard
                 duration_ms = int((time.monotonic() - start) * 1000)
                 provider_error = self._map_error(exc, duration_ms=duration_ms)
+                log.warning(
+                    "gemini.generate error model=%s env=%s key_mask=%s corr_id=%s status=%s latency_ms=%s",
+                    self._model,
+                    self._environment,
+                    self._key_mask or "",
+                    idempotency_key or "",
+                    provider_error.status_code,
+                    duration_ms,
+                )
                 last_error = provider_error
                 if not provider_error.retryable or attempt == self._config.request_retries:
                     raise provider_error

@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
+import os
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Awaitable, Callable, Dict, List, Optional
@@ -11,6 +13,7 @@ from config import Config
 from db import Database, ErrorLogRecord, GenerationJobRecord
 from moderation import classify_safety_response, policy_message, render_error_json
 from observability import log_event
+from services.gemini_key import current_key_mask, ensure_gemini_key_logged
 from generation_gate import GenerationRequestGate
 from providers import BaseProviderClient, ProviderAPIError, ProviderJobStatus, ProviderJobSubmission
 
@@ -62,6 +65,13 @@ class JobQueue:
         self._workers: list[asyncio.Task[None]] = []
         self._stopped = asyncio.Event()
         self._notification_callbacks: Dict[str, Callable[[GenerationJobRecord], Awaitable[None]]] = {}
+        self._environment = (config.environment or "dev").lower()
+        self._gemini_key_mask = ensure_gemini_key_logged(
+            config,
+            context="job_queue",
+            process_id=f"pid={os.getpid()}",  # pragma: no cover - runtime value
+            logger=log,
+        )
 
     def register_notification_callback(
         self, *, name: str, callback: Callable[[GenerationJobRecord], Awaitable[None]]
@@ -100,6 +110,12 @@ class JobQueue:
         for _ in range(self._config.jobs_concurrency):
             task = asyncio.create_task(self._worker())
             self._workers.append(task)
+            ensure_gemini_key_logged(
+                self._config,
+                context="job_worker",
+                process_id=f"pid={os.getpid()} worker={len(self._workers)}",  # pragma: no cover - runtime value
+                logger=log,
+            )
         await self._recover_pending_jobs()
 
     async def stop(self) -> None:
@@ -147,14 +163,15 @@ class JobQueue:
         if image_file_id:
             request_settings.setdefault("image_file_id", image_file_id)
         effective_prompt = sanitized_prompt or prompt
+        prompt_hash = hashlib.sha256(effective_prompt.encode("utf-8")).hexdigest()
         log.debug(
-            "Submitting provider job corr_id=%s user_id=%s provider=%s model=%s settings=%s prompt=%s",
+            "Submitting provider job corr_id=%s user_id=%s provider=%s model=%s settings=%s prompt_hash=%s",
             corr_id,
             user_id,
             provider_key,
             model_key,
             request_settings,
-            _prompt_preview(effective_prompt),
+            prompt_hash,
         )
         submission: ProviderJobSubmission = await client.enqueue_job(
             prompt=effective_prompt,
@@ -205,6 +222,7 @@ class JobQueue:
             user_id,
             self._queue.qsize(),
         )
+        gemini_mask = self._gemini_key_mask if provider_key.startswith("veo") or provider_key.startswith("gemini") else ""
         log_event(
             level="INFO",
             event="request",
@@ -218,9 +236,10 @@ class JobQueue:
             credits_cost=self._config.generation_cost_credits,
             duration_ms=submission.duration_ms,
             status_code=submission.status_code,
-            prompt=effective_prompt,
+            prompt=None,
             gsheets_ok=True,
             extra={
+                "gemini_key_mask": gemini_mask,
                 "preflight_blocked": False,
                 "preflight_reason": preflight_reason,
                 "preflight_scope": preflight_scope,
@@ -311,7 +330,16 @@ class JobQueue:
                 self._queue.task_done()
 
     async def _process_job(self, pending: PendingJob) -> None:
-        log.info("Processing job %s corr_id=%s provider=%s", pending.job_id, pending.corr_id, pending.provider)
+        provider_hint = pending.provider or ""
+        key_mask = self._gemini_key_mask if provider_hint.startswith(("veo", "gemini")) else ""
+        log.info(
+            "Processing job %s corr_id=%s provider=%s key_mask=%s env=%s",
+            pending.job_id,
+            pending.corr_id,
+            provider_hint,
+            key_mask or "",
+            self._environment,
+        )
         await self._db.update_job(pending.job_id, "running")
         result: Optional[ProviderJobStatus] = None
         inline_assets: List[Dict[str, Any]] = []
@@ -320,6 +348,10 @@ class JobQueue:
         asset_label: Optional[str] = None
         try:
             client, provider_key = self._resolve_provider(pending.provider)
+            if provider_key.startswith(("veo", "gemini")):
+                key_mask = self._gemini_key_mask
+            else:
+                key_mask = ""
             try:
                 log.debug(
                     "Polling provider job job_id=%s provider=%s corr_id=%s",
@@ -339,6 +371,7 @@ class JobQueue:
                     exc.error_code,
                     exc,
                 )
+                error_extra = {"provider_message": exc.provider_message, "gemini_key_mask": key_mask or None}
                 log_event(
                     level="ERROR",
                     event="poll",
@@ -354,7 +387,7 @@ class JobQueue:
                     error_code=exc.error_code,
                     error_msg_short=str(exc),
                     duration_ms=exc.duration_ms,
-                    extra={"provider_message": exc.provider_message},
+                    extra=error_extra,
                 )
                 await asyncio.sleep(3)
                 await self.enqueue(
@@ -387,6 +420,7 @@ class JobQueue:
                     size=pending.size,
                     error_type="unknown",
                     error_msg_short=str(exc),
+                    extra={"gemini_key_mask": key_mask or None},
                 )
                 await asyncio.sleep(3)
                 await self.enqueue(
@@ -496,10 +530,25 @@ class JobQueue:
                 job_extra["inline_assets"] = inline_assets
             else:
                 asset_label = next(iter(result.assets.values()), None)
+                if asset_label:
+                    mime_hint = None
+                    for entry in assets_meta:
+                        if entry.get("url") == asset_label and entry.get("mime"):
+                            mime_hint = entry.get("mime")
+                            break
+                    descriptor = mime_hint or "asset"
+                    asset_label = f"[remote {descriptor}]"
             if assets_meta:
                 job_extra["assets_meta"] = assets_meta
+            if key_mask:
+                job_extra.setdefault("gemini_key_mask", key_mask)
             if provider_data:
                 job_extra.setdefault("provider_data", provider_data)
+            poll_extra: Dict[str, Any]
+            if assets_meta:
+                poll_extra = {"status": result.status, "assets_meta": assets_meta, "gemini_key_mask": key_mask or None}
+            else:
+                poll_extra = {"status": result.status, "gemini_key_mask": key_mask or None}
             log_event(
                 level="INFO",
                 event="poll",
@@ -512,11 +561,7 @@ class JobQueue:
                 size=pending.size,
                 status_code=result.status_code,
                 duration_ms=result.duration_ms,
-                extra=(
-                    {"status": result.status, "assets_meta": assets_meta}
-                    if assets_meta
-                    else {"status": result.status}
-                ),
+                extra=poll_extra,
             )
             if result.status == "completed" and asset_label:
                 log.debug(
@@ -540,6 +585,8 @@ class JobQueue:
                 done_extra: Dict[str, Any] = {"assets": list(result.assets.keys())}
                 if assets_meta:
                     done_extra["assets_meta"] = assets_meta
+                if key_mask:
+                    done_extra["gemini_key_mask"] = key_mask
                 log_event(
                     level="INFO",
                     event="done",
@@ -658,6 +705,7 @@ class JobQueue:
                         "preflight_reason": pending.preflight_reason,
                         "preflight_scope": scope,
                         "preflight_auto_sanitized": pending.auto_sanitized,
+                        "gemini_key_mask": key_mask or None,
                     },
                 )
                 log_event(
@@ -672,6 +720,7 @@ class JobQueue:
                     size=pending.size,
                     credits_cost=self._config.generation_cost_credits,
                     refund_done=refunded,
+                    extra={"gemini_key_mask": key_mask or None},
                 )
                 await self._release_gate(
                     pending,
