@@ -25,7 +25,7 @@ async def _probe_gemini_models(config: Config) -> Tuple[bool, str]:
     client = _GenAIClient(api_key=config.gemini_api_key)
     model_name = config.gemini_model_image or config.gemini_model_text
     try:
-        response = await asyncio.to_thread(client.models.get, model_name)
+        response = await asyncio.to_thread(client.models.get, name=model_name)
     except _genai_errors.APIError as exc:  # pragma: no cover - external API
         detail = f"{getattr(exc, 'code', 0)}:{getattr(exc, 'status', '')}".strip(":")
         log.warning("Gemini models probe failed: %s", exc, exc_info=True)
