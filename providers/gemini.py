@@ -12,10 +12,10 @@ from fractions import Fraction
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 from uuid import uuid4
 
-from google.genai import Client as _GenAIClient, errors as _genai_errors, types as _genai_types
-from google.genai._api_client import HttpOptions as _HttpOptions
+from google.genai import errors as _genai_errors, types as _genai_types
 
 from config import Config
+from services.gemini_client import get_gemini_client
 
 from .base import BaseProviderClient, ProviderAPIError, ProviderJobStatus, ProviderJobSubmission
 
@@ -37,25 +37,6 @@ def _default_safety_settings() -> List[_genai_types.SafetySetting]:
         _genai_types.SafetySetting(category=category, threshold=threshold)
         for category in categories
     ]
-
-
-def _build_http_options(config: Config) -> _HttpOptions:
-    timeout_seconds: Optional[float] = None
-    candidates: List[float] = []
-    for value in (
-        config.request_timeout,
-        config.request_read_timeout,
-        config.request_connect_timeout,
-    ):
-        if value:
-            try:
-                candidates.append(float(value))
-            except (TypeError, ValueError):
-                continue
-    if candidates:
-        timeout_seconds = max(candidates)
-    timeout_ms = int(timeout_seconds * 1000) if timeout_seconds else None
-    return _HttpOptions(timeout=timeout_ms)
 
 
 def _normalise_inline_blob(data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -212,8 +193,8 @@ class GeminiGenerativeClient(BaseProviderClient):
             api_key=api_key,
             provider_name=provider_name,
         )
-        http_options = _build_http_options(config)
-        self._client = _GenAIClient(api_key=api_key, http_options=http_options)
+        self._client = get_gemini_client(config)
+        self._api_key = api_key
         parsed_safety = _convert_setting_list(safety_settings, _genai_types.SafetySetting)
         self._safety_settings = parsed_safety or _default_safety_settings()
         self._model = model

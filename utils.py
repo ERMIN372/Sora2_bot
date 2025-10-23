@@ -1,4 +1,4 @@
-"""Utility helpers for the Sora Telegram bot."""
+"""Utility helpers for the video generation bot."""
 from __future__ import annotations
 
 import asyncio

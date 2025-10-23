@@ -1,0 +1,172 @@
+import pathlib
+import sys
+import types
+from typing import Any, Dict
+
+ROOT = pathlib.Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+try:  # pragma: no cover - prefer real dependency
+    import dotenv  # type: ignore
+except ModuleNotFoundError:  # pragma: no cover - test environment shim
+    dotenv_stub = types.ModuleType("dotenv")
+
+    def load_dotenv(*_: Any, **__: Any) -> None:
+        return None
+
+    dotenv_stub.load_dotenv = load_dotenv
+    sys.modules["dotenv"] = dotenv_stub
+
+try:  # pragma: no cover - prefer real dependency
+    import aiohttp  # type: ignore
+except ModuleNotFoundError:  # pragma: no cover - test environment shim
+    aiohttp_stub = types.ModuleType("aiohttp")
+
+    class ClientTimeout:
+        def __init__(self, total=None, sock_connect=None, sock_read=None):
+            self.total = total
+            self.sock_connect = sock_connect
+            self.sock_read = sock_read
+
+    class ClientSession:
+        def __init__(self, *_, timeout=None, **__):
+            self.timeout = timeout
+            self.closed = False
+
+        async def close(self) -> None:
+            self.closed = True
+
+    aiohttp_stub.ClientTimeout = ClientTimeout
+    aiohttp_stub.ClientSession = ClientSession
+    sys.modules["aiohttp"] = aiohttp_stub
+
+try:  # pragma: no cover - prefer real dependency
+    import google.genai  # type: ignore
+except ModuleNotFoundError:  # pragma: no cover - test environment shim
+    google_mod = types.ModuleType("google")
+    sys.modules.setdefault("google", google_mod)
+
+    genai_mod = types.ModuleType("google.genai")
+    sys.modules["google.genai"] = genai_mod
+
+    class HttpOptions:
+        def __init__(self, timeout=None):
+            self.timeout = timeout
+
+    api_client_mod = types.ModuleType("google.genai._api_client")
+    api_client_mod.HttpOptions = HttpOptions
+    sys.modules["google.genai._api_client"] = api_client_mod
+
+    class APIError(Exception):
+        def __init__(self, message="", code=500, status="ERROR", response=None):
+            super().__init__(message)
+            self.code = code
+            self.status = status
+            self.response = response
+
+    errors_mod = types.ModuleType("google.genai.errors")
+    errors_mod.APIError = APIError
+    sys.modules["google.genai.errors"] = errors_mod
+
+    class _BaseModel:
+        def __init__(self, **fields: Any) -> None:
+            for key, value in fields.items():
+                setattr(self, key, value)
+
+        @classmethod
+        def model_validate(cls, data: Dict[str, Any]):
+            return cls(**data)
+
+        def model_dump(self, exclude_none: bool = False) -> Dict[str, Any]:
+            items = self.__dict__.copy()
+            if exclude_none:
+                items = {k: v for k, v in items.items() if v is not None}
+            return items
+
+    class Image(_BaseModel):
+        def __init__(self, image_bytes: bytes, mime_type: str = "image/jpeg") -> None:
+            super().__init__(image_bytes=image_bytes, mime_type=mime_type)
+
+    class Video(_BaseModel):
+        def __init__(self, uri: str | None = None, mime_type: str | None = None, video_bytes: bytes | None = None) -> None:
+            super().__init__(uri=uri, mime_type=mime_type, video_bytes=video_bytes)
+
+    class GeneratedVideo(_BaseModel):
+        def __init__(self, video: Video | None = None) -> None:
+            super().__init__(video=video)
+
+    class GenerateVideosResult(_BaseModel):
+        def __init__(self, generated_videos=None):
+            super().__init__(generated_videos=generated_videos or [])
+
+    class GenerateVideosSource(_BaseModel):
+        def __init__(self, prompt: str | None = None, image: Image | None = None) -> None:
+            super().__init__(prompt=prompt, image=image)
+
+    class GenerateVideosConfig(_BaseModel):
+        pass
+
+    class GenerateVideosOperation(_BaseModel):
+        def __init__(self, name: str = "", done: bool = False, error=None, result=None, response=None):
+            super().__init__(name=name, done=done, error=error, result=result, response=response)
+
+    types_mod = types.ModuleType("google.genai.types")
+    types_mod.Image = Image
+    types_mod.Video = Video
+    types_mod.GeneratedVideo = GeneratedVideo
+    types_mod.GenerateVideosResult = GenerateVideosResult
+    types_mod.GenerateVideosSource = GenerateVideosSource
+    types_mod.GenerateVideosConfig = GenerateVideosConfig
+    types_mod.GenerateVideosOperation = GenerateVideosOperation
+    sys.modules["google.genai.types"] = types_mod
+
+    class _Models:
+        def generate_videos(self, *args: Any, **kwargs: Any):  # pragma: no cover - not used in tests
+            raise NotImplementedError
+
+    class _Operations:
+        def get(self, operation):  # pragma: no cover - tests stub behaviour
+            return operation
+
+    class Client:
+        def __init__(self, api_key: str, http_options: HttpOptions | None = None) -> None:
+            self.api_key = api_key
+            self.http_options = http_options
+            self.models = _Models()
+            self.operations = _Operations()
+
+    genai_mod.Client = Client
+    genai_mod.types = types_mod
+    genai_mod.errors = errors_mod
+
+try:  # pragma: no cover - prefer real dependency
+    import gspread  # type: ignore
+except ModuleNotFoundError:  # pragma: no cover - test environment shim
+    gspread_mod = types.ModuleType("gspread")
+
+    class _GSpreadBase:
+        pass
+
+    class Client(_GSpreadBase):
+        pass
+
+    class Worksheet(_GSpreadBase):
+        pass
+
+    class Spreadsheet(_GSpreadBase):
+        pass
+
+    class _Exceptions:
+        APIError = type("APIError", (Exception,), {})
+        WorksheetNotFound = type("WorksheetNotFound", (Exception,), {})
+
+    def authorize(credentials):  # pragma: no cover - tests do not use
+        return Client()
+
+    gspread_mod.Client = Client
+    gspread_mod.Worksheet = Worksheet
+    gspread_mod.Spreadsheet = Spreadsheet
+    gspread_mod.exceptions = _Exceptions()
+    gspread_mod.authorize = authorize
+    sys.modules["gspread"] = gspread_mod

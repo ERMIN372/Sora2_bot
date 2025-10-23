@@ -70,7 +70,7 @@ def create_payment(package: CreditPackage, user_id: int, description: str) -> Di
             "customer": {"email": "user@example.com"},
             "items": [
                 {
-                    "description": "Sora2 video generation",
+                    "description": "Video generation credits",
                     "quantity": "1.0",
                     "amount": {"value": str(amount_value), "currency": "RUB"},
                     "vat_code": 1,

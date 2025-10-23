@@ -1,4 +1,4 @@
-"""Prompt moderation helpers for Sora bot."""
+"""Prompt moderation helpers for the video generation bot."""
 from __future__ import annotations
 
 import json
