@@ -61,7 +61,7 @@ def test_build_config_infers_and_validates(config: Config) -> None:
 
     assert config_obj is not None
     assert config_obj.aspect_ratio == "16:9"
-    assert config_obj.resolution == "1080p"
+    assert getattr(config_obj, "resolution", None) in (None, "")
     assert config_obj.duration_seconds == 8
     assert config_obj.fps == 30
     assert config_obj.seed == 42

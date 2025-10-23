@@ -51,7 +51,11 @@ async def _probe_gemini_models(config: Config) -> Tuple[bool, str]:
             checked.append(display)
 
     try:
-        image_response = await asyncio.to_thread(client.models.generate_images, "ping")
+        image_response = await asyncio.to_thread(
+            client.models.generate_images,
+            model=config.gemini_model_image,
+            prompt="ping",
+        )
     except _genai_errors.APIError as exc:  # pragma: no cover - external API
         detail = f"{getattr(exc, 'code', 0)}:{getattr(exc, 'status', '')}".strip(":")
         log.warning("Gemini image ping failed error=%s", exc, exc_info=True)
@@ -60,7 +64,36 @@ async def _probe_gemini_models(config: Config) -> Tuple[bool, str]:
         log.warning("Gemini image ping failed", exc_info=True)
         return False, str(exc)
     else:
-        if not isinstance(image_response, (bytes, bytearray)):
+        binary_ok = False
+        if isinstance(image_response, (bytes, bytearray)):
+            binary_ok = True
+        else:
+            generated = getattr(image_response, "generated_images", None)
+            if not generated:
+                generated = getattr(image_response, "generatedImages", None)
+            if generated:
+                candidates = generated if isinstance(generated, (list, tuple)) else [generated]
+                for item in candidates:
+                    image_obj = None
+                    if hasattr(item, "image"):
+                        image_obj = getattr(item, "image")
+                    elif isinstance(item, dict):
+                        image_obj = item.get("image")
+                    if image_obj is None and isinstance(item, dict):
+                        image_obj = item.get("inlineData") or item.get("inline_data")
+                    if image_obj is None:
+                        continue
+                    data = None
+                    if hasattr(image_obj, "image_bytes"):
+                        data = getattr(image_obj, "image_bytes")
+                    elif isinstance(image_obj, dict):
+                        data = image_obj.get("image_bytes") or image_obj.get("data")
+                    elif isinstance(image_obj, (bytes, bytearray)):
+                        data = image_obj
+                    if isinstance(data, (bytes, bytearray)) and data:
+                        binary_ok = True
+                        break
+        if not binary_ok:
             log.warning(
                 "Gemini image ping produced invalid payload type=%s", type(image_response)
             )
