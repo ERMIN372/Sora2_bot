@@ -22,6 +22,7 @@ from handlers import register_handlers
 from jobs import JobQueue
 from healthcheck import run_startup_healthcheck
 from providers import BaseProviderClient, GeminiImageClient, VeoVideoClient
+from services.gemini_key import ensure_gemini_key_logged
 import yookassa_client
 
 _LOG_LEVEL_NAME = os.getenv("LOG_LEVEL", "INFO").upper()
@@ -270,6 +271,12 @@ async def _run_webhook(state: ApplicationState) -> None:
 def main() -> None:
     args = _parse_args()
     config = load_config()
+    ensure_gemini_key_logged(
+        config,
+        context="bot_main",
+        process_id=f"pid={os.getpid()}",
+        logger=log,
+    )
     state = _init_application(config)
 
     mode = (args.mode or CFG.BOT_MODE).lower()

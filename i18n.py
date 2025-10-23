@@ -186,12 +186,18 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "status.completed_file": "✅ Готово. Отправляю ролик.",
         "status.completed_photo": "✅ Готово. Отправляю фото.",
         "status.completed_url": "Готово: {url}",
+        "status.completed_video_summary": "🎬 Готово. Длительность: {duration} с. Размер: ~{size_mb} МБ.",
+        "status.completed_video_summary_short": "🎬 Готово. Размер: ~{size_mb} МБ.",
         "status.inline_too_large": (
             "Файл от модели ({mime}, {size} байт) превышает лимит Telegram ({limit_mb} МБ)."
         ),
         "status.inline_decode_failed": "Не удалось обработать файл от модели.",
         "status.failed": "Не удалось создать. Ошибка {error}.",
         "status.generic": "Статус задачи: {status}.",
+        "status.delivery_key_mismatch": "Остановили задачу: используется другой ключ Gemini. Кредиты вернули.",
+        "status.delivery_config_error": "Gemini временно недоступен. Мы вернули кредиты — попробуйте позже.",
+        "status.delivery_generic": "Не удалось скачать видео. Мы вернули кредиты — попробуйте позже.",
+        "status.delivery_too_large": "Видео слишком большое для Telegram. Кредиты вернули.",
         "errors.video_models_unavailable": "Нет доступных моделей видеогенерации. Обратитесь к оператору или попробуйте позже.",
         "errors.image_generation_disabled": "Генерация изображений недоступна. Обратитесь к оператору или попробуйте позже.",
         "errors.unknown": "неизвестная ошибка",

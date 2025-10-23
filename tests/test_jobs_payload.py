@@ -15,6 +15,7 @@ from config import (
 )
 from jobs import JobQueue, PendingJob
 from providers.base import ProviderJobStatus, ProviderJobSubmission
+from services.gemini_key import mask_gemini_key
 
 
 @dataclass
@@ -202,7 +203,11 @@ def test_process_job_records_inline_payload(monkeypatch, config: Config, fake_db
         assert fake_db.jobs["job-1"].video_url == "[inline video/mp4, 5 bytes]"
         assert "payload" in fake_db.jobs["job-1"].extra
         assert fake_db.jobs["job-1"].extra["payload"]["mime"] == "video/mp4"
-        assert any(event.get("event") == "done" for event in events)
+        assert fake_db.jobs["job-1"].extra.get("gemini_key_mask") == mask_gemini_key(config.gemini_api_key)
+        assert any(
+            event.get("event") == "done" and event.get("extra", {}).get("gemini_key_mask")
+            for event in events
+        )
 
     asyncio.run(_run())
 

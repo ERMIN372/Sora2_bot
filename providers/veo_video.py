@@ -5,6 +5,7 @@ import asyncio
 import base64
 import binascii
 import logging
+import os
 import time
 from fractions import Fraction
 from typing import Any, Dict, Optional
@@ -14,6 +15,7 @@ from google.genai import errors as _genai_errors, types as _genai_types
 
 from config import Config
 from services.gemini_client import get_gemini_client
+from services.gemini_key import ensure_gemini_key_logged
 
 from .base import (
     BaseProviderClient,
@@ -90,6 +92,13 @@ class VeoVideoClient(BaseProviderClient):
         self._operations: Dict[str, _genai_types.GenerateVideosOperation] = {}
         self._requests: Dict[str, Dict[str, Any]] = {}
         self._lock = asyncio.Lock()
+        self._environment = (config.environment or "dev").lower()
+        self._key_mask = ensure_gemini_key_logged(
+            config,
+            context="veo_video_client",
+            process_id=f"pid={os.getpid()}",  # pragma: no cover - runtime value
+            logger=log,
+        )
 
     async def enqueue_job(
         self,
@@ -109,6 +118,14 @@ class VeoVideoClient(BaseProviderClient):
         config_obj, config_meta = self._build_config(request_settings)
 
         start = time.perf_counter()
+        corr_label = idempotency_key or ""
+        log.info(
+            "gemini.veo.submit start corr_id=%s env=%s key_mask=%s model=%s",
+            corr_label or "n/a",
+            self._environment,
+            self._key_mask or "",
+            model_name,
+        )
         try:
             operation = await asyncio.to_thread(
                 self._generate_videos_operation,
@@ -132,7 +149,15 @@ class VeoVideoClient(BaseProviderClient):
             self._requests[job_id] = {
                 "model": model_name,
                 "config": config_meta,
+                "key_mask": self._key_mask,
             }
+        log.info(
+            "gemini.veo.submit done corr_id=%s env=%s key_mask=%s latency_ms=%s",
+            corr_label or job_id,
+            self._environment,
+            self._key_mask or "",
+            duration_ms,
+        )
         return ProviderJobSubmission(
             job_id=job_id,
             status_code=200,
@@ -143,6 +168,12 @@ class VeoVideoClient(BaseProviderClient):
     async def get_job_status(self, job_id: str) -> ProviderJobStatus:
         operation = await self._get_operation(job_id)
         start = time.perf_counter()
+        log.info(
+            "gemini.veo.poll start job_id=%s env=%s key_mask=%s",
+            job_id,
+            self._environment,
+            self._key_mask or "",
+        )
         try:
             refreshed = await asyncio.to_thread(self._client.operations.get, operation)
         except _genai_errors.APIError as exc:  # pragma: no cover - network guard
@@ -154,6 +185,14 @@ class VeoVideoClient(BaseProviderClient):
                 provider_message=str(getattr(exc, "response", exc)),
             ) from exc
         duration_ms = int((time.perf_counter() - start) * 1000)
+        log.info(
+            "gemini.veo.poll done job_id=%s env=%s key_mask=%s status=%s latency_ms=%s",
+            job_id,
+            self._environment,
+            self._key_mask or "",
+            getattr(refreshed, "done", False),
+            duration_ms,
+        )
         payload: Dict[str, Any] = {"operation": refreshed.model_dump(exclude_none=True)}
         async with self._lock:
             self._operations[job_id] = refreshed

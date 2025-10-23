@@ -45,6 +45,12 @@ from observability import (
 from moderation import policy_message, run_preflight
 from providers import ProviderAPIError
 from services.gemini_catalog import list_veo_video_models
+from services.gemini_downloader import (
+    GeminiConfigurationError,
+    GeminiDownloadError,
+    GeminiKeyMismatchError,
+    download_asset,
+)
 from utils import build_inline_data_from_telegram_file
 import yookassa_client
 
@@ -65,6 +71,8 @@ SIZE_OPTIONS: Dict[str, str] = {
 }
 
 _INLINE_ASSET_MAX_BYTES = 9 * 1024 * 1024
+_TELEGRAM_VIDEO_MAX_BYTES = 48 * 1024 * 1024
+_TELEGRAM_DOCUMENT_MAX_BYTES = 2 * 1024 * 1024 * 1024
 
 
 SIZE_LABEL_KEYS: Dict[str, str] = {
@@ -1273,12 +1281,6 @@ async def _launch_order(
 
 def _format_job_message(job: GenerationJobRecord) -> str:
     if job.status == "completed":
-        if job.video_url:
-            if job.video_url.startswith("[inline"):
-                return i18n.t("status.completed_file")
-            if _parse_inline_image(job.video_url):
-                return i18n.t("status.completed_photo")
-            return i18n.t("status.completed_url", url=job.video_url)
         return i18n.t("status.completed_file")
     if job.status == "failed":
         return i18n.t("status.failed", error=job.error or i18n.t("errors.unknown"))
@@ -1288,7 +1290,11 @@ def _format_job_message(job: GenerationJobRecord) -> str:
 
 
 async def _send_job_update(
-    dp: Dispatcher, job: GenerationJobRecord, archive: Optional[ArchivePublisher] = None
+    dp: Dispatcher,
+    job: GenerationJobRecord,
+    archive: Optional[ArchivePublisher],
+    config: Config,
+    db: Database,
 ) -> None:
     try:
         reply_markup = _main_keyboard() if job.status in {"completed", "failed"} else None
@@ -1325,6 +1331,18 @@ async def _send_job_update(
                         payload = _build_remote_archive_payload(job)
                         if payload:
                             archive.schedule(payload)
+                    return
+            remote_asset = _select_remote_video_asset(job)
+            if remote_asset and remote_asset.get("url"):
+                if await _deliver_remote_video(
+                    dp,
+                    job,
+                    remote_asset,
+                    config,
+                    db,
+                    reply_markup,
+                    archive,
+                ):
                     return
             if archive and not archived:
                 payload = _build_remote_archive_payload(job)
@@ -1380,6 +1398,72 @@ def _collect_inline_assets(job: GenerationJobRecord) -> List[Dict[str, Any]]:
         if isinstance(asset, dict) and isinstance(asset.get("data_uri"), str):
             assets.append(asset)
     return assets
+
+
+def _collect_assets_meta(job: GenerationJobRecord) -> List[Dict[str, Any]]:
+    extra = getattr(job, "extra", {}) or {}
+    raw_meta = extra.get("assets_meta") if isinstance(extra, dict) else None
+    if not isinstance(raw_meta, list):
+        return []
+    entries: List[Dict[str, Any]] = []
+    for item in raw_meta:
+        if isinstance(item, dict):
+            entries.append(dict(item))
+    return entries
+
+
+def _expected_key_mask(job: GenerationJobRecord) -> Optional[str]:
+    extra = getattr(job, "extra", {}) or {}
+    mask = extra.get("gemini_key_mask") if isinstance(extra, dict) else None
+    if isinstance(mask, str) and mask:
+        return mask
+    return None
+
+
+def _select_remote_video_asset(job: GenerationJobRecord) -> Optional[Dict[str, Any]]:
+    for asset in _collect_assets_meta(job):
+        if asset.get("inline"):
+            continue
+        url = asset.get("url")
+        if not isinstance(url, str) or not url:
+            continue
+        mime = str(asset.get("mime") or "")
+        asset_type = str(asset.get("type") or "")
+        if mime.startswith("video/") or asset_type == "video":
+            return asset
+    return None
+
+
+def _format_video_summary(duration_seconds: Optional[int], size_bytes: int) -> str:
+    size_mb = max(size_bytes / (1024 * 1024), 0)
+    if duration_seconds and duration_seconds > 0:
+        return i18n.t(
+            "status.completed_video_summary",
+            duration=duration_seconds,
+            size_mb=f"{size_mb:.1f}",
+        )
+    return i18n.t(
+        "status.completed_video_summary_short",
+        size_mb=f"{size_mb:.1f}",
+    )
+
+
+def _extract_video_duration(job: GenerationJobRecord) -> Optional[int]:
+    if isinstance(job.seconds, int) and job.seconds > 0:
+        return job.seconds
+    extra = getattr(job, "extra", {}) or {}
+    payload = extra.get("payload") if isinstance(extra, dict) else None
+    if isinstance(payload, dict):
+        config = payload.get("config")
+        if isinstance(config, dict):
+            value = config.get("duration_seconds")
+            try:
+                duration_int = int(value)
+            except (TypeError, ValueError):
+                duration_int = None
+            if duration_int and duration_int > 0:
+                return duration_int
+    return None
 
 
 async def _send_inline_image(
@@ -1515,18 +1599,242 @@ async def _send_inline_assets(
     return responded, archived
 
 
+async def _deliver_remote_video(
+    dp: Dispatcher,
+    job: GenerationJobRecord,
+    asset: Dict[str, Any],
+    config: Config,
+    db: Database,
+    reply_markup: Optional[ReplyKeyboardMarkup | InlineKeyboardMarkup],
+    archive: Optional[ArchivePublisher],
+) -> bool:
+    corr_id = job.corr_id or job.id
+    asset_name = str(asset.get("key") or "video")
+    mime_hint = asset.get("mime") if isinstance(asset.get("mime"), str) else None
+    filename_hint = asset.get("filename") if isinstance(asset.get("filename"), str) else None
+    expected_mask = _expected_key_mask(job)
+    try:
+        downloaded = await download_asset(
+            asset_url=str(asset.get("url")),
+            config=config,
+            corr_id=corr_id or "",
+            asset_name=asset_name,
+            expected_mask=expected_mask,
+            mime_hint=mime_hint,
+            filename_hint=filename_hint,
+        )
+    except GeminiKeyMismatchError as exc:
+        log.error(
+            "Gemini key mismatch corr_id=%s expected=%s actual=%s",
+            corr_id,
+            exc.expected,
+            exc.actual,
+        )
+        await _handle_delivery_failure(
+            dp,
+            job,
+            config,
+            db,
+            reply_markup=reply_markup,
+            message=i18n.t("status.delivery_key_mismatch"),
+            reason="key_mismatch",
+            extra_log={"expected_mask": exc.expected, "actual_mask": exc.actual},
+            key_mask=exc.actual,
+        )
+        return True
+    except GeminiConfigurationError as exc:
+        log.error(
+            "Gemini configuration error corr_id=%s status=%s",
+            corr_id,
+            exc.error_status,
+        )
+        await _handle_delivery_failure(
+            dp,
+            job,
+            config,
+            db,
+            reply_markup=reply_markup,
+            message=i18n.t("status.delivery_config_error"),
+            reason="config_error",
+            extra_log={"error_status": exc.error_status},
+            key_mask=expected_mask,
+        )
+        return True
+    except GeminiDownloadError as exc:
+        log.warning(
+            "Gemini download failed corr_id=%s status=%s error=%s",
+            corr_id,
+            exc.status_code,
+            exc.error_status,
+        )
+        await _handle_delivery_failure(
+            dp,
+            job,
+            config,
+            db,
+            reply_markup=reply_markup,
+            message=i18n.t("status.delivery_generic"),
+            reason="download_error",
+            extra_log={
+                "status_code": exc.status_code,
+                "error_status": exc.error_status,
+            },
+            key_mask=expected_mask,
+        )
+        return True
+
+    buffer = io.BytesIO(downloaded.content)
+    caption = i18n.t("status.completed_file")
+    method = "video"
+    try:
+        if downloaded.size <= _TELEGRAM_VIDEO_MAX_BYTES:
+            buffer.seek(0)
+            await dp.bot.send_video(
+                job.user_id,
+                InputFile(buffer, filename=downloaded.filename),
+                caption=caption,
+                supports_streaming=True,
+                reply_markup=reply_markup,
+            )
+        elif downloaded.size <= _TELEGRAM_DOCUMENT_MAX_BYTES:
+            buffer.seek(0)
+            await dp.bot.send_document(
+                job.user_id,
+                InputFile(buffer, filename=downloaded.filename),
+                caption=caption,
+                reply_markup=reply_markup,
+            )
+            method = "document"
+        else:
+            await _handle_delivery_failure(
+                dp,
+                job,
+                config,
+                db,
+                reply_markup=reply_markup,
+                message=i18n.t("status.delivery_too_large"),
+                reason="too_large",
+                extra_log={"asset_bytes": downloaded.size},
+                key_mask=downloaded.key_mask or expected_mask,
+            )
+            return True
+    except Exception:
+        log.exception("Failed to send Gemini video to user_id=%s", job.user_id)
+        await _handle_delivery_failure(
+            dp,
+            job,
+            config,
+            db,
+            reply_markup=reply_markup,
+            message=i18n.t("status.delivery_generic"),
+            reason="telegram_error",
+            extra_log={"asset_bytes": downloaded.size},
+            key_mask=downloaded.key_mask or expected_mask,
+        )
+        return True
+
+    summary_text = _format_video_summary(
+        _extract_video_duration(job), downloaded.size
+    )
+    await dp.bot.send_message(job.user_id, summary_text)
+
+    log_event(
+        level="INFO",
+        event="delivery",
+        corr_id=job.corr_id,
+        job_id=job.id,
+        user_id=job.user_id,
+        username=job.username,
+        model=job.model,
+        provider="veo",
+        size=job.size,
+        extra={
+            "delivery_method": method,
+            "asset_bytes": downloaded.size,
+            "gemini_key_mask": downloaded.key_mask or expected_mask,
+        },
+    )
+    if archive:
+        payload = _build_remote_archive_payload(job)
+        if payload:
+            archive.schedule(payload)
+    return True
+
+
+async def _handle_delivery_failure(
+    dp: Dispatcher,
+    job: GenerationJobRecord,
+    config: Config,
+    db: Database,
+    *,
+    reply_markup: Optional[ReplyKeyboardMarkup | InlineKeyboardMarkup],
+    message: str,
+    reason: str,
+    extra_log: Optional[Dict[str, Any]] = None,
+    key_mask: Optional[str] = None,
+) -> None:
+    credits = job.cost_credits or config.generation_cost_credits
+    refunded = False
+    if credits > 0:
+        try:
+            await db.add_credits(job.user_id, credits)
+            refunded = True
+        except Exception:
+            log.exception("Failed to refund credits after delivery failure job_id=%s", job.id)
+    try:
+        await db.update_job(job.id, "failed", error=message)
+    except Exception:
+        log.exception("Failed to update job status after delivery failure job_id=%s", job.id)
+    await dp.bot.send_message(job.user_id, message, reply_markup=reply_markup or _main_keyboard())
+    extra_payload = dict(extra_log or {})
+    if key_mask:
+        extra_payload.setdefault("gemini_key_mask", key_mask)
+    extra_payload.setdefault("delivery_reason", reason)
+    log_event(
+        level="ERROR",
+        event="delivery_failed",
+        corr_id=job.corr_id,
+        job_id=job.id,
+        user_id=job.user_id,
+        username=job.username,
+        model=job.model,
+        provider="veo",
+        size=job.size,
+        extra=extra_payload,
+    )
+    log_event(
+        level="INFO",
+        event="refund",
+        corr_id=job.corr_id,
+        job_id=job.id,
+        user_id=job.user_id,
+        username=job.username,
+        model=job.model,
+        provider="veo",
+        size=job.size,
+        credits_cost=config.generation_cost_credits,
+        refund_done=refunded,
+        extra={"gemini_key_mask": key_mask},
+    )
+
+
 def _build_remote_archive_payload(job: GenerationJobRecord) -> Optional[ArchivePayload]:
-    url = (job.video_url or "").strip()
+    extra = getattr(job, "extra", {}) or {}
+    raw_url = (job.video_url or "").strip()
+    meta = None
+    url = ""
+    if raw_url.lower().startswith("http"):
+        url = raw_url
+        meta = _select_remote_asset_meta(extra, url)
+    if not url:
+        for candidate in _collect_assets_meta(job):
+            candidate_url = candidate.get("url")
+            if isinstance(candidate_url, str) and candidate_url.startswith("http"):
+                url = candidate_url
+                meta = candidate
+                break
     if not url:
         return None
-    lowered = url.lower()
-    if lowered.startswith("[inline") or lowered.startswith("data:"):
-        return None
-    if not lowered.startswith("http://") and not lowered.startswith("https://"):
-        return None
-
-    extra = getattr(job, "extra", {}) or {}
-    meta = _select_remote_asset_meta(extra, url)
 
     mime_hint = None
     filename_hint = None
@@ -2311,7 +2619,7 @@ def register_handlers(
 ) -> None:
     job_queue.register_notification_callback(
         name="telegram",
-        callback=lambda job: _send_job_update(dp, job, archive_publisher),
+        callback=lambda job: _send_job_update(dp, job, archive_publisher, config, db),
     )
 
     dp.register_message_handler(

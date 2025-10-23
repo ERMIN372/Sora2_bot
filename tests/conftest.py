@@ -121,6 +121,38 @@ except ModuleNotFoundError:  # pragma: no cover - test environment shim
     types_mod.GenerateVideosOperation = GenerateVideosOperation
     sys.modules["google.genai.types"] = types_mod
 
+    oauth2_mod = types.ModuleType("google.oauth2")
+    service_account_mod = types.ModuleType("google.oauth2.service_account")
+
+    class Credentials:  # pragma: no cover - stub
+        @classmethod
+        def from_service_account_info(cls, *_args: Any, **_kwargs: Any) -> "Credentials":
+            return cls()
+
+    service_account_mod.Credentials = Credentials
+    oauth2_mod.service_account = service_account_mod
+    sys.modules["google.oauth2"] = oauth2_mod
+    sys.modules["google.oauth2.service_account"] = service_account_mod
+
+try:  # pragma: no cover - prefer real dependency
+    import tenacity  # type: ignore
+except ModuleNotFoundError:  # pragma: no cover - test environment shim
+    tenacity_stub = types.ModuleType("tenacity")
+
+    def _identity_decorator(fn=None, **_kwargs):
+        def _wrap(func):
+            return func
+
+        if fn is not None:
+            return fn
+        return _wrap
+
+    tenacity_stub.retry = _identity_decorator
+    tenacity_stub.retry_if_exception_type = lambda *_, **__: None
+    tenacity_stub.stop_after_attempt = lambda *_args, **_kwargs: None
+    tenacity_stub.wait_exponential = lambda *_args, **_kwargs: None
+    sys.modules["tenacity"] = tenacity_stub
+
     class _Models:
         def generate_videos(self, *args: Any, **kwargs: Any):  # pragma: no cover - not used in tests
             raise NotImplementedError

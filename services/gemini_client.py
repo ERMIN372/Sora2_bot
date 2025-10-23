@@ -1,6 +1,8 @@
 """Shared Gemini client factory."""
 from __future__ import annotations
 
+import logging
+import os
 import threading
 from typing import Dict, Tuple
 
@@ -8,6 +10,9 @@ from google.genai import Client as _GenAIClient
 from google.genai._api_client import HttpOptions as _HttpOptions
 
 from config import Config
+from services.gemini_key import ensure_gemini_key_logged
+
+log = logging.getLogger(__name__)
 
 _CLIENT_CACHE: Dict[Tuple[str, int], _GenAIClient] = {}
 _CACHE_LOCK = threading.Lock()
@@ -38,6 +43,12 @@ def get_gemini_client(config: Config) -> _GenAIClient:
     api_key = (config.gemini_api_key or "").strip()
     if not api_key:
         raise RuntimeError("Gemini API key is required to use Gemini services")
+    ensure_gemini_key_logged(
+        config,
+        context="gemini_client",
+        process_id=f"pid={os.getpid()}",
+        logger=log,
+    )
     cache_key = (
         api_key,
         (

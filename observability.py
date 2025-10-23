@@ -69,8 +69,7 @@ def _prompt_details(prompt: Optional[str]) -> Dict[str, Any]:
     if not prompt:
         return {}
     digest = sha256(prompt.encode("utf-8")).hexdigest()
-    preview = escape(prompt[:120])
-    return {"prompt_hash": digest, "prompt_preview": preview}
+    return {"prompt_hash": digest}
 
 
 def log_event(
