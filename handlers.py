@@ -1319,6 +1319,15 @@ async def _send_job_update(
         if status in {"queued", "running"}:
             await STATUS_MESSAGES.tick(bot=dp.bot, db=db, job=job)
             return
+        if status == "no_media":
+            await STATUS_MESSAGES.mark_failed(
+                bot=dp.bot,
+                db=db,
+                job=job,
+                text=i18n.t("status.delivery_generic"),
+                terminal_state="no_media",
+            )
+            return
         if status == "failed":
             error_text = i18n.t("status.failed", error=job.error or i18n.t("errors.unknown"))
             await STATUS_MESSAGES.mark_failed(
@@ -1620,6 +1629,7 @@ async def _send_inline_assets(
     config: Config,
     db: Database,
 ) -> Optional[SentMediaInfo]:
+    send_as_photo = (job.content_type or "video") == "image"
     for index, asset in enumerate(assets):
         data_uri = asset.get("data_uri")
         if not isinstance(data_uri, str):
@@ -1660,9 +1670,18 @@ async def _send_inline_assets(
         if not base_name:
             base_name = "asset"
         filename = f"{base_name}_{index}{suffix}"
-        input_file = InputFile(buffer, filename=filename)
         try:
-            message = await dp.bot.send_document(job.user_id, input_file)
+            if send_as_photo and mime.startswith("image/") and size <= _INLINE_ASSET_MAX_BYTES:
+                buffer.seek(0)
+                message = await dp.bot.send_photo(
+                    job.user_id,
+                    InputFile(buffer, filename=filename),
+                )
+                method: Literal["photo", "document"] = "photo"
+            else:
+                input_file = InputFile(buffer, filename=filename)
+                message = await dp.bot.send_document(job.user_id, input_file)
+                method = "document"
         except Exception:
             log.exception("Failed to send inline asset to user_id=%s", job.user_id)
             await _handle_delivery_failure(
@@ -1676,11 +1695,16 @@ async def _send_inline_assets(
             )
             return None
         document = message.document
-        file_size = document.file_size if document else size
-        file_id = document.file_id if document else ""
+        if method == "photo":
+            photo = message.photo[-1] if message.photo else None
+            file_size = photo.file_size if photo else size
+            file_id = photo.file_id if photo else ""
+        else:
+            file_size = document.file_size if document else size
+            file_id = document.file_id if document else ""
         return SentMediaInfo(
             message=message,
-            method="document",
+            method=method,
             file_id=file_id,
             file_size=file_size or size,
             duration_seconds=None,

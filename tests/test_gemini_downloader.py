@@ -122,7 +122,7 @@ def test_download_asset_permission_denied(monkeypatch: pytest.MonkeyPatch) -> No
     monkeypatch.setattr(downloader.asyncio, "sleep", _instant_sleep)
     config = _make_config()
 
-    with pytest.raises(downloader.GeminiConfigurationError) as excinfo:
+    with pytest.raises(downloader.GeminiDownloadError) as excinfo:
         asyncio.run(
             downloader.download_asset(
                 asset_url="https://generativelanguage.googleapis.com/download/v1beta/files/file-789:download?alt=media",
@@ -135,7 +135,7 @@ def test_download_asset_permission_denied(monkeypatch: pytest.MonkeyPatch) -> No
 
     assert files.attempts == 2
     assert excinfo.value.status_code == 403
-    assert excinfo.value.error_status == "PERMISSION_DENIED"
+    assert excinfo.value.error_status == "download_failed"
 
 
 class _StubResponse:

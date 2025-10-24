@@ -18,12 +18,15 @@ if TYPE_CHECKING:  # pragma: no cover
 
 
 _DEFAULT_PHRASES: Sequence[str] = (
-    "⚙️ Генерирую…",
-    "⏳ Ещё немного…",
-    "🎞️ Собираю кадры…",
-    "🧩 Склеиваю сцену…",
-    "🔍 Проверяю качество…",
+    "Готовим сцены…",
+    "Сшиваем кадры…",
+    "Рендерим свет…",
+    "Почти готово…",
+    "Финализируем…",
 )
+
+_MAX_EDITS = 12
+_TERMINAL_STATUSES = {"completed", "failed", "no_media", "refunded", "timeout"}
 
 _ACTION_BY_CONTENT = {
     "image": "upload_photo",
@@ -47,6 +50,7 @@ class _StatusState:
     delete_task: Optional[asyncio.Task[None]] = None
     terminal_state: Optional[str] = None
     closed: bool = False
+    edit_count: int = 0
 
 
 class StatusMessageManager:
@@ -56,7 +60,7 @@ class StatusMessageManager:
         self,
         *,
         phrases: Sequence[str] = _DEFAULT_PHRASES,
-        edit_interval: tuple[float, float] = (6.0, 10.0),
+        edit_interval: tuple[float, float] = (3.0, 5.0),
         action_interval: tuple[float, float] = (5.0, 10.0),
         delete_interval: tuple[float, float] = (60.0, 300.0),
     ) -> None:
@@ -134,6 +138,17 @@ class StatusMessageManager:
         job: "GenerationJobRecord",
     ) -> None:
         state = await self.ensure_started(bot=bot, db=db, job=job)
+        status_value = (job.status or "").lower()
+        if status_value in _TERMINAL_STATUSES and not state.closed:
+            state.active = False
+            state.next_edit_at = float("inf")
+            state.next_action_at = float("inf")
+            return
+        if state.edit_count >= _MAX_EDITS and not state.closed:
+            state.active = False
+            state.next_edit_at = float("inf")
+            state.next_action_at = float("inf")
+            return
         if not state.active or state.closed:
             return
         await self._maybe_send_action(bot, state)
@@ -215,6 +230,10 @@ class StatusMessageManager:
             return
         if state.closed:
             return
+        if state.edit_count >= _MAX_EDITS:
+            state.active = False
+            state.next_edit_at = float("inf")
+            return
         phrase = self._phrases[state.phrase_index % len(self._phrases)]
         state.phrase_index = (state.phrase_index + 1) % len(self._phrases)
         await self._edit_text(bot, db, job, state, phrase)
@@ -266,9 +285,19 @@ class StatusMessageManager:
             )
             job.status_message_index = state.phrase_index
             job.status_message_updated_at = datetime.now(timezone.utc)
+            if not force:
+                state.edit_count += 1
         finally:
             now = time.monotonic()
-            state.next_edit_at = now + self._jitter(self._edit_interval)
+            if state.closed:
+                state.next_edit_at = float("inf")
+                state.next_action_at = float("inf")
+            elif state.edit_count >= _MAX_EDITS and not force:
+                state.active = False
+                state.next_edit_at = float("inf")
+                state.next_action_at = float("inf")
+            else:
+                state.next_edit_at = now + self._jitter(self._edit_interval)
 
     async def _finalise_state(
         self,

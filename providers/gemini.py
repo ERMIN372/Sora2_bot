@@ -7,6 +7,7 @@ import binascii
 import json
 import logging
 import os
+import random
 import re
 import time
 from fractions import Fraction
@@ -866,6 +867,306 @@ class GeminiImageClient(GeminiGenerativeClient):
             api_version="v1beta",
         )
 
+    async def enqueue_job(
+        self,
+        *,
+        prompt: str,
+        settings: Optional[Dict[str, Any]] = None,
+        payload: Optional[Dict[str, Any]] = None,
+        idempotency_key: Optional[str] = None,
+        **_: Any,
+    ) -> ProviderJobSubmission:
+        if not self._api_key:
+            raise ProviderAPIError(
+                provider=self.provider_name,
+                status_code=401,
+                message="Gemini API key is not configured",
+                error_type="auth",
+            )
+
+        request_settings = dict(settings or {})
+        corr_id = idempotency_key or ""
+        max_attempts = 5
+        last_error: Optional[ProviderAPIError] = None
+
+        for attempt in range(1, max_attempts + 1):
+            try:
+                decision = self._router.route(
+                    task=self._task,
+                    model=request_settings.get("model") or self._model,
+                    prompt=prompt,
+                    assets=request_settings,
+                )
+            except GeminiRoutingError as exc:
+                raise ProviderAPIError(
+                    provider=self.provider_name,
+                    status_code=400,
+                    message=str(exc),
+                    error_type="routing",
+                    retryable=False,
+                ) from exc
+
+            generator = getattr(decision.client.models, "generate_images", None)
+            if generator is None:
+                raise ProviderAPIError(
+                    provider=self.provider_name,
+                    status_code=500,
+                    message="Gemini SDK is missing generate_images",
+                    error_type="configuration",
+                    retryable=False,
+                )
+
+            request_kwargs = {"model": decision.model, "prompt": decision.prompt}
+            request_meta = {
+                "mode": "generate_images",
+                "method": "generate_images",
+                "model": decision.model,
+                "api_version": decision.api_version,
+                "prompt": decision.prompt,
+            }
+            log.info(
+                "gemini.generateImages start corr_id=%s model=%s version=%s env=%s key_mask=%s",
+                corr_id or "",
+                decision.model,
+                decision.api_version,
+                self._environment,
+                self._key_mask or "",
+            )
+            start = time.monotonic()
+            try:
+                response = await asyncio.wait_for(
+                    asyncio.to_thread(generator, **request_kwargs),
+                    timeout=60.0,
+                )
+            except asyncio.TimeoutError as exc:
+                duration_ms = int((time.monotonic() - start) * 1000)
+                provider_error = ProviderAPIError(
+                    provider=self.provider_name,
+                    status_code=504,
+                    message="Gemini image request timed out",
+                    error_type="timeout",
+                    retryable=True,
+                    duration_ms=duration_ms,
+                )
+                last_error = provider_error
+                log.warning(
+                    "gemini.generateImages timeout corr_id=%s model=%s version=%s latency_ms=%s",
+                    corr_id or "",
+                    decision.model,
+                    decision.api_version,
+                    duration_ms,
+                )
+                if attempt == max_attempts:
+                    provider_error.error_type = "provider_unavailable"
+                    raise provider_error from exc
+                log.warning(
+                    "Retrying Gemini image request corr_id=%s model=%s attempt=%s/%s reason=timeout",
+                    corr_id or "",
+                    decision.model,
+                    attempt + 1,
+                    max_attempts,
+                )
+                await self._sleep_with_backoff(attempt)
+                continue
+            except _genai_errors.APIError as exc:
+                duration_ms = int((time.monotonic() - start) * 1000)
+                provider_error = self._map_error(
+                    exc,
+                    duration_ms=duration_ms,
+                    decision=decision,
+                )
+                last_error = provider_error
+                log.warning(
+                    "gemini.generateImages error corr_id=%s model=%s version=%s status=%s latency_ms=%s",
+                    corr_id or "",
+                    decision.model,
+                    decision.api_version,
+                    provider_error.status_code,
+                    duration_ms,
+                )
+                if (
+                    provider_error.status_code in {429, 500, 503}
+                    and attempt < max_attempts
+                ):
+                    log.warning(
+                        "Retrying Gemini image request corr_id=%s model=%s attempt=%s/%s status=%s",
+                        corr_id or "",
+                        decision.model,
+                        attempt + 1,
+                        max_attempts,
+                        provider_error.status_code,
+                    )
+                    await self._sleep_with_backoff(attempt)
+                    continue
+                if provider_error.status_code in {429, 500, 503}:
+                    provider_error.error_type = provider_error.error_type or "provider_unavailable"
+                raise provider_error from exc
+            except Exception as exc:
+                duration_ms = int((time.monotonic() - start) * 1000)
+                provider_error = self._map_error(
+                    exc,
+                    duration_ms=duration_ms,
+                    decision=decision,
+                )
+                last_error = provider_error
+                log.warning(
+                    "gemini.generateImages error corr_id=%s model=%s version=%s status=%s latency_ms=%s",
+                    corr_id or "",
+                    decision.model,
+                    decision.api_version,
+                    provider_error.status_code,
+                    duration_ms,
+                )
+                if (
+                    provider_error.status_code in {429, 500, 503}
+                    and attempt < max_attempts
+                ):
+                    log.warning(
+                        "Retrying Gemini image request corr_id=%s model=%s attempt=%s/%s status=%s",
+                        corr_id or "",
+                        decision.model,
+                        attempt + 1,
+                        max_attempts,
+                        provider_error.status_code,
+                    )
+                    await self._sleep_with_backoff(attempt)
+                    continue
+                if provider_error.status_code in {429, 500, 503}:
+                    provider_error.error_type = provider_error.error_type or "provider_unavailable"
+                raise provider_error
+
+            duration_ms = int((time.monotonic() - start) * 1000)
+            payload_json, inline_assets, asset_meta = self._serialise_image_response(
+                response
+            )
+            job_id = idempotency_key or str(uuid4())
+            meta = {
+                "prompt": decision.prompt,
+                "settings": request_settings or {},
+                "payload": payload_json.get("response"),
+                "assets_meta": {key: dict(value) for key, value in asset_meta.items()},
+                "request": request_meta,
+                "request_mode": "generate_images",
+                "key_mask": self._key_mask,
+            }
+            if inline_assets:
+                meta.setdefault("inline_assets", inline_assets)
+
+            self._pending[job_id] = (payload_json, 200, duration_ms, meta)
+            log.info(
+                "gemini.generateImages success corr_id=%s job_id=%s model=%s status=%s duration_ms=%s",
+                corr_id or job_id,
+                job_id,
+                decision.model,
+                200,
+                duration_ms,
+            )
+            return ProviderJobSubmission(
+                job_id=job_id,
+                status_code=200,
+                duration_ms=duration_ms,
+                data=payload_json,
+            )
+
+        if last_error is not None:
+            if last_error.status_code in {429, 500, 503} and not last_error.error_type:
+                last_error.error_type = "provider_unavailable"
+            raise last_error
+        raise ProviderAPIError(
+            provider=self.provider_name,
+            status_code=500,
+            message="Gemini image request failed",
+            error_type="provider_unavailable",
+        )
+
+    async def _sleep_with_backoff(self, attempt: int) -> None:
+        base_delay = 1.0 * (2 ** max(attempt - 1, 0))
+        jitter = random.uniform(0.5, 1.5)
+        await asyncio.sleep(min(base_delay * jitter, 15.0))
+
+    def _serialise_image_response(
+        self, response: Any
+    ) -> Tuple[Dict[str, Any], List[Dict[str, Any]], Dict[str, Dict[str, Any]]]:
+        if hasattr(response, "model_dump"):
+            try:
+                base_payload = response.model_dump(mode="json")
+            except Exception:  # pragma: no cover - defensive serialisation
+                base_payload = {"raw": str(response)}
+        elif isinstance(response, dict):
+            base_payload = dict(response)
+        else:
+            base_payload = {"raw": str(response)}
+
+        inline_assets, asset_meta = self._extract_image_inline_assets(response)
+        payload = {"response": base_payload}
+        if inline_assets:
+            payload["inline_assets"] = [dict(item) for item in inline_assets]
+        if asset_meta:
+            payload["assets_meta"] = {key: dict(value) for key, value in asset_meta.items()}
+        return payload, inline_assets, asset_meta
+
+    def _extract_image_inline_assets(
+        self, response: Any
+    ) -> Tuple[List[Dict[str, Any]], Dict[str, Dict[str, Any]]]:
+        inline_assets: List[Dict[str, Any]] = []
+        asset_meta: Dict[str, Dict[str, Any]] = {}
+
+        candidates: Iterable[Any]
+        if hasattr(response, "images"):
+            candidates = getattr(response, "images") or []
+        elif isinstance(response, dict):
+            candidates = response.get("images") or []
+        else:
+            candidates = []
+
+        for index, item in enumerate(candidates):
+            data = getattr(item, "data", None)
+            if data is None:
+                data = getattr(item, "image_bytes", None)
+            if data is None and isinstance(item, dict):
+                data = item.get("data") or item.get("image_bytes")
+            if isinstance(data, str):
+                try:
+                    decoded = base64.b64decode(data)
+                except (binascii.Error, ValueError):
+                    decoded = b""
+                data_bytes = decoded
+            else:
+                data_bytes = bytes(data) if isinstance(data, (bytes, bytearray)) else b""
+            if not data_bytes:
+                continue
+            mime = (
+                getattr(item, "mime_type", None)
+                or getattr(item, "mime", None)
+                or (item.get("mime_type") if isinstance(item, dict) else None)
+                or "image/png"
+            )
+            base64_data = base64.b64encode(data_bytes).decode("ascii")
+            data_uri = f"data:{mime};base64,{base64_data}"
+            key = f"inline_{index}"
+            inline_entry = {
+                "key": key,
+                "kind": "image",
+                "mime": mime,
+                "bytes": len(data_bytes),
+                "data_uri": data_uri,
+                "data_url": data_uri,
+            }
+            uri_value = getattr(item, "uri", None) or (
+                item.get("uri") if isinstance(item, dict) else None
+            )
+            if uri_value:
+                inline_entry["uri"] = uri_value
+            inline_assets.append(inline_entry)
+            asset_meta[key] = {
+                "inline": True,
+                "kind": "image",
+                "mime": mime,
+                "bytes": len(data_bytes),
+            }
+
+        return inline_assets, asset_meta
+
     def _build_images_config(
         self,
         settings: Dict[str, Any],
@@ -956,6 +1257,29 @@ class GeminiImageClient(GeminiGenerativeClient):
     def _extract_result(
         self, payload: Dict[str, Any]
     ) -> Tuple[str, Optional[str], Dict[str, str], List[Dict[str, Any]], Dict[str, Dict[str, Any]]]:
+        inline_inline = payload.get("inline_assets")
+        if isinstance(inline_inline, list) and inline_inline:
+            assets: Dict[str, str] = {}
+            inline_assets: List[Dict[str, Any]] = []
+            asset_meta: Dict[str, Dict[str, Any]] = {}
+            for index, item in enumerate(inline_inline):
+                if not isinstance(item, dict):
+                    continue
+                entry = dict(item)
+                key = entry.get("key") or f"inline_{index}"
+                entry["key"] = key
+                data_uri = entry.get("data_uri") or entry.get("data_url")
+                if data_uri:
+                    assets[key] = str(data_uri)
+                inline_assets.append(entry)
+                asset_meta[key] = {
+                    "inline": True,
+                    "kind": entry.get("kind") or "image",
+                    "mime": entry.get("mime"),
+                    "bytes": entry.get("bytes"),
+                }
+            if inline_assets:
+                return "completed", None, assets, inline_assets, asset_meta
         generated = payload.get("generated_images") or payload.get("generatedImages")
         if isinstance(generated, list):
             return self._extract_images(payload)

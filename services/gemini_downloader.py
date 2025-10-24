@@ -350,12 +350,12 @@ async def download_asset(
                 mask or "",
             )
             file_meta = None
-            if status_code == 403 or status_label in {"PERMISSION_DENIED", "SERVICE_DISABLED"}:
+            if status_code in {401, 403} or status_label in {"PERMISSION_DENIED", "SERVICE_DISABLED", "UNAUTHENTICATED"}:
                 if permission_retry:
-                    raise GeminiConfigurationError(
-                        message,
+                    raise GeminiDownloadError(
+                        message or "Gemini вернул ошибку доступа при скачивании",
                         status_code=status_code or 403,
-                        error_status=status_label or "PERMISSION_DENIED",
+                        error_status="download_failed",
                     ) from exc
                 permission_retry = True
                 await asyncio.sleep(min(delay, 3.0))
