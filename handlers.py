@@ -892,6 +892,7 @@ async def _launch_order(
                 sanitized_prompt=preflight.sanitized_prompt,
                 error_scope=preflight.scope or "unknown",
                 error_json="",
+                stage="submit",
             )
         )
         session.pending_order = None
@@ -1091,6 +1092,7 @@ async def _launch_order(
                 sanitized_prompt=order.prompt,
                 error_scope=preflight.scope or "provider_unavailable",
                 error_json="",
+                stage="submit",
             )
         )
         await callback.message.answer(i18n.t("errors.video_models_unavailable"))
@@ -1161,6 +1163,7 @@ async def _launch_order(
                 sanitized_prompt=order.prompt,
                 error_scope=preflight.scope or hint,
                 error_json="",
+                stage="submit",
             )
         )
         log_event(
@@ -1242,6 +1245,7 @@ async def _launch_order(
                 sanitized_prompt=order.prompt,
                 error_scope=preflight.scope or "unknown",
                 error_json="",
+                stage="submit",
             )
         )
         log_event(
@@ -1941,6 +1945,45 @@ async def _handle_delivery_failure(
     if key_mask:
         extra_payload.setdefault("gemini_key_mask", key_mask)
     extra_payload.setdefault("delivery_reason", reason)
+    stage = "download" if reason in {"download_error", "key_mismatch", "config_error"} else "deliver"
+    if reason == "no_media":
+        stage = "poll"
+    status_code_value = None
+    provider_error_code = ""
+    if isinstance(extra_log, dict):
+        raw_status = extra_log.get("status_code")
+        if isinstance(raw_status, int):
+            status_code_value = raw_status
+        provider_error_code = str(extra_log.get("error_status") or raw_status or extra_log.get("status") or "")
+        provider_error_message = str(extra_log.get("error_status") or extra_log.get("reason_message") or "")
+    else:
+        provider_error_message = ""
+    await db.log_error_record(
+        ErrorLogRecord(
+            ts=datetime.utcnow(),
+            user_id=job.user_id,
+            username=job.username,
+            corr_id=job.corr_id,
+            job_id=job.id,
+            model=job.model,
+            size=job.size,
+            status_code=status_code_value,
+            error_type=reason,
+            error_msg_short=message[:240],
+            refunded=refunded,
+            preflight_blocked=False,
+            preflight_reason="",
+            auto_sanitized=False,
+            sanitized_prompt=job.prompt,
+            error_scope="delivery",
+            error_json="",
+            job_status="failed",
+            reason=reason,
+            provider_error_code=provider_error_code[:120],
+            provider_error_message=provider_error_message[:240],
+            stage=stage,
+        )
+    )
     log_event(
         level="ERROR",
         event="delivery_failed",

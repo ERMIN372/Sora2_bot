@@ -886,7 +886,7 @@ class GeminiImageClient(GeminiGenerativeClient):
 
         request_settings = dict(settings or {})
         corr_id = idempotency_key or ""
-        max_attempts = 5
+        max_attempts = 4
         last_error: Optional[ProviderAPIError] = None
 
         for attempt in range(1, max_attempts + 1):
