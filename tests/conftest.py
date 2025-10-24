@@ -132,11 +132,17 @@ except ModuleNotFoundError:  # pragma: no cover - test environment shim
     types_mod.GeneratedVideo = GeneratedVideo
     types_mod.GenerateVideosResult = GenerateVideosResult
     types_mod.GenerateVideosSource = GenerateVideosSource
+    class GenerateImagesConfig(_BaseModel):
+        def __init__(self, **kwargs: Any) -> None:
+            super().__init__(**kwargs)
+
     types_mod.GenerateVideosConfig = GenerateVideosConfig
     types_mod.GenerateVideosOperation = GenerateVideosOperation
+    types_mod.GenerateImagesConfig = GenerateImagesConfig
     types_mod.HarmCategory = HarmCategory
     types_mod.HarmBlockThreshold = HarmBlockThreshold
     types_mod.SafetySetting = SafetySetting
+    types_mod.HTTPOptions = HttpOptions
     sys.modules["google.genai.types"] = types_mod
 
     oauth2_mod = types.ModuleType("google.oauth2")

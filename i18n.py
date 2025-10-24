@@ -193,7 +193,7 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
             "Файл от модели ({mime}, {size} байт) превышает лимит Telegram ({limit_mb} МБ)."
         ),
         "status.inline_decode_failed": "Не удалось обработать файл от модели.",
-        "status.failed": "Не удалось создать. Ошибка {error}.",
+        "status.failed": "Не удалось создать. Кредиты вернули. {error}",
         "status.generic": "Статус задачи: {status}.",
         "status.delivery_key_mismatch": "Остановили задачу: используется другой ключ Gemini. Кредиты вернули.",
         "status.delivery_config_error": "Gemini временно недоступен. Мы вернули кредиты — попробуйте позже.",

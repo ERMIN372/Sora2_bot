@@ -11,7 +11,7 @@ from urllib.parse import urlparse
 import aiohttp
 
 from config import Config
-from services.gemini_client import get_gemini_client
+from services.gemini_client import get_media_client
 from services.gemini_key import current_key_mask, ensure_gemini_key_logged
 
 try:  # pragma: no cover - import guard for optional dependency
@@ -156,9 +156,9 @@ async def _download_direct_asset(
         sock_connect=config.request_connect_timeout,
         sock_read=config.request_read_timeout,
     )
-    headers = {"x-goog-api-key": api_key}
-    max_attempts = 3
-    delay = max(config.retry_backoff or 2.0, 1.5)
+    headers = {"X-Goog-Api-Key": api_key}
+    retry_schedule = (3.0, 6.0, 10.0)
+    max_attempts = len(retry_schedule) + 1
 
     async with aiohttp.ClientSession(timeout=timeout) as session:
         for attempt in range(1, max_attempts + 1):
@@ -206,21 +206,25 @@ async def _download_direct_asset(
                             size=size_bytes,
                             key_mask=mask,
                         )
-                    elif status in {401, 403}:
+                    elif status == 403:
+                        if attempt <= len(retry_schedule):
+                            await asyncio.sleep(retry_schedule[attempt - 1])
+                            continue
                         raise GeminiConfigurationError(
                             "Сервер отказал в доступе к прямой ссылке Gemini",
                             status_code=status,
                             error_status="PERMISSION_DENIED",
                         )
-                    elif status >= 500 or status in {408, 429}:
+                    elif status in {401, 429, 500, 502, 503, 504, 408}:
                         if attempt >= max_attempts:
                             raise GeminiDownloadError(
                                 "Gemini вернул ошибку при скачивании",
                                 status_code=status,
                                 error_status=str(status),
                             )
-                        await asyncio.sleep(delay)
-                        delay *= config.retry_backoff or 2.0
+                        await asyncio.sleep(
+                            retry_schedule[min(attempt - 1, len(retry_schedule) - 1)]
+                        )
                         continue
                     else:
                         raise GeminiDownloadError(
@@ -242,8 +246,9 @@ async def _download_direct_asset(
                 )
                 if attempt >= max_attempts:
                     raise GeminiDownloadError(str(exc)) from exc
-                await asyncio.sleep(delay)
-                delay *= config.retry_backoff or 2.0
+                await asyncio.sleep(
+                    retry_schedule[min(attempt - 1, len(retry_schedule) - 1)]
+                )
                 continue
 
     raise GeminiDownloadError("Не удалось скачать файл Gemini", status_code=0)
@@ -297,11 +302,10 @@ async def download_asset(
     except ValueError as exc:
         raise GeminiDownloadError(str(exc), status_code=400) from exc
 
-    client = get_gemini_client(config)
+    client = get_media_client(config)
     attempt = 0
-    max_attempts = 3
-    delay = max(config.retry_backoff or 2.0, 1.5)
-    permission_retry = False
+    retry_schedule = (3.0, 6.0, 10.0)
+    max_attempts = len(retry_schedule) + 1
     file_meta: Optional[_genai_types.File] = None
 
     while attempt < max_attempts:
@@ -350,23 +354,23 @@ async def download_asset(
                 mask or "",
             )
             file_meta = None
-            if status_code in {401, 403} or status_label in {"PERMISSION_DENIED", "SERVICE_DISABLED", "UNAUTHENTICATED"}:
-                if permission_retry:
-                    raise GeminiDownloadError(
-                        message or "Gemini вернул ошибку доступа при скачивании",
-                        status_code=status_code or 403,
-                        error_status="download_failed",
-                    ) from exc
-                permission_retry = True
-                await asyncio.sleep(min(delay, 3.0))
-                continue
-            if status_code >= 500 or status_code in {408, 429}:
+            if status_code == 403 or status_label in {"PERMISSION_DENIED", "SERVICE_DISABLED", "UNAUTHENTICATED"}:
+                if attempt <= len(retry_schedule):
+                    await asyncio.sleep(retry_schedule[attempt - 1])
+                    continue
+                raise GeminiDownloadError(
+                    message or "Gemini вернул ошибку доступа при скачивании",
+                    status_code=status_code or 403,
+                    error_status="download_failed",
+                ) from exc
+            if status_code in {401, 429, 500, 502, 503, 504, 408}:
                 if attempt >= max_attempts:
                     raise GeminiDownloadError(
                         message, status_code=status_code, error_status=status_label
                     ) from exc
-                await asyncio.sleep(delay)
-                delay *= config.retry_backoff or 2.0
+                await asyncio.sleep(
+                    retry_schedule[min(attempt - 1, len(retry_schedule) - 1)]
+                )
                 continue
             raise GeminiDownloadError(
                 message, status_code=status_code, error_status=status_label
@@ -385,8 +389,9 @@ async def download_asset(
             file_meta = None
             if attempt >= max_attempts:
                 raise GeminiDownloadError(str(exc)) from exc
-            await asyncio.sleep(delay)
-            delay *= config.retry_backoff or 2.0
+            await asyncio.sleep(
+                retry_schedule[min(attempt - 1, len(retry_schedule) - 1)]
+            )
             continue
         else:
             if not payload:

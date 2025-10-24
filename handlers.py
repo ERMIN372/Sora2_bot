@@ -1592,11 +1592,10 @@ async def _send_inline_image(
     db: Database,
 ) -> Optional[SentMediaInfo]:
     mime, payload = inline_image
-    suffix = mimetypes.guess_extension(mime) or ".jpg"
-    filename = f"result{suffix}"
+    filename = "image.png"
     input_file = BufferedInputFile(payload, filename=filename, mime_type=mime)
     try:
-        message = await dp.bot.send_document(job.user_id, input_file)
+        message = await dp.bot.send_photo(job.user_id, input_file)
     except Exception:
         log.exception("Failed to send inline image to user_id=%s", job.user_id)
         await _handle_delivery_failure(
@@ -1609,16 +1608,16 @@ async def _send_inline_image(
             extra_log={"stage": "inline_image"},
         )
         return None
-    document = message.document
-    if document is None:
+    photo = message.photo[-1] if message.photo else None
+    if photo is None:
         size = len(payload)
         file_id = ""
     else:
-        size = document.file_size or len(payload)
-        file_id = document.file_id
+        size = photo.file_size or len(payload)
+        file_id = photo.file_id
     return SentMediaInfo(
         message=message,
-        method="document",
+        method="photo",
         file_id=file_id,
         file_size=size,
         duration_seconds=None,
@@ -1675,6 +1674,8 @@ async def _send_inline_assets(
         if not base_name:
             base_name = "asset"
         filename = f"{base_name}_{index}{suffix}"
+        if send_as_photo and mime.startswith("image/"):
+            filename = "image.png"
         try:
             if send_as_photo and mime.startswith("image/") and size <= _INLINE_ASSET_MAX_BYTES:
                 message = await dp.bot.send_photo(
@@ -1815,23 +1816,28 @@ async def _deliver_remote_video(
 
     method: Literal["video", "document"] = "video"
     message: Optional[Message] = None
+    duration_seconds = _extract_video_duration(job)
+    video_filename = downloaded.filename or "video.mp4"
+    if not video_filename.lower().endswith(".mp4"):
+        video_filename = "video.mp4"
     try:
         if downloaded.size <= _TELEGRAM_VIDEO_MAX_BYTES:
             message = await dp.bot.send_video(
                 job.user_id,
                 BufferedInputFile(
                     downloaded.content,
-                    filename=downloaded.filename,
+                    filename=video_filename,
                     mime_type=downloaded.mime,
                 ),
                 supports_streaming=True,
+                duration=duration_seconds or None,
             )
         elif downloaded.size <= _TELEGRAM_DOCUMENT_MAX_BYTES:
             message = await dp.bot.send_document(
                 job.user_id,
                 BufferedInputFile(
                     downloaded.content,
-                    filename=downloaded.filename,
+                    filename=video_filename,
                     mime_type=downloaded.mime,
                 ),
             )
@@ -1867,7 +1873,7 @@ async def _deliver_remote_video(
 
     file_id: str
     file_size: int
-    duration_seconds = _extract_video_duration(job)
+    duration_seconds = duration_seconds or _extract_video_duration(job)
     mime_type = downloaded.mime
     if method == "video" and message.video:
         file_id = message.video.file_id

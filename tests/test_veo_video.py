@@ -40,8 +40,8 @@ def stub_gemini_client(monkeypatch):
             self.operations = SimpleNamespace(get=lambda operation: operation)
 
     monkeypatch.setattr(
-        "providers.veo_video.get_gemini_client",
-        lambda config, **_: DummyClient(),
+        "providers.veo_video.get_media_client",
+        lambda config: DummyClient(),
     )
     return None
 
