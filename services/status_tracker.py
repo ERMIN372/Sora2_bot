@@ -18,11 +18,12 @@ if TYPE_CHECKING:  # pragma: no cover
 
 
 _DEFAULT_PHRASES: Sequence[str] = (
-    "Готовим сцены…",
-    "Сшиваем кадры…",
-    "Рендерим свет…",
-    "Почти готово…",
-    "Финализируем…",
+    "⏳ Генерация идёт…",
+    "🔧 Подкручиваем детали…",
+    "🧪 Тестируем кадры…",
+    "🎬 Сцена почти готова…",
+    "✨ Полируем финальные штрихи…",
+    "🤖 Модель ещё думает…",
 )
 
 _MAX_EDITS = 12
@@ -60,8 +61,8 @@ class StatusMessageManager:
         self,
         *,
         phrases: Sequence[str] = _DEFAULT_PHRASES,
-        edit_interval: tuple[float, float] = (3.0, 5.0),
-        action_interval: tuple[float, float] = (5.0, 10.0),
+        edit_interval: tuple[float, float] = (7.0, 12.0),
+        action_interval: tuple[float, float] = (6.0, 12.0),
         delete_interval: tuple[float, float] = (60.0, 300.0),
     ) -> None:
         self._phrases: Sequence[str] = tuple(phrases) or _DEFAULT_PHRASES
@@ -94,13 +95,15 @@ class StatusMessageManager:
             now = time.monotonic()
             content_type = (job.content_type or "video").lower()
             if message_id is None:
-                initial_phrase = self._phrases[0]
+                initial_phrase, next_index = self._select_next_phrase(
+                    job.status_message_index or -1
+                )
                 try:
                     message = await bot.send_message(job.user_id, initial_phrase)
                 except Exception:  # pragma: no cover - external dependency
                     raise
                 message_id = message.message_id
-                phrase_index = 1 % len(self._phrases)
+                phrase_index = next_index
                 last_text = initial_phrase
                 self._active_by_user[job.user_id].add(job.id)
                 await db.update_job_fields(
@@ -234,8 +237,8 @@ class StatusMessageManager:
             state.active = False
             state.next_edit_at = float("inf")
             return
-        phrase = self._phrases[state.phrase_index % len(self._phrases)]
-        state.phrase_index = (state.phrase_index + 1) % len(self._phrases)
+        phrase, next_index = self._select_next_phrase(state.phrase_index)
+        state.phrase_index = next_index
         await self._edit_text(bot, db, job, state, phrase)
 
     async def _maybe_send_action(self, bot: Bot, state: _StatusState) -> None:
@@ -368,6 +371,18 @@ class StatusMessageManager:
     def _jitter(window: tuple[float, float]) -> float:
         start, end = window
         return random.uniform(start, end)
+
+    def _select_next_phrase(self, previous_index: int) -> tuple[str, int]:
+        if not self._phrases:
+            return "…", previous_index
+        indices = list(range(len(self._phrases)))
+        if len(indices) > 1 and 0 <= previous_index < len(self._phrases):
+            try:
+                indices.remove(previous_index)
+            except ValueError:  # pragma: no cover - defensive
+                pass
+        next_index = random.choice(indices) if indices else previous_index
+        return self._phrases[next_index], next_index
 
 
 __all__ = ["StatusMessageManager"]

@@ -41,6 +41,8 @@ class GenerationJobRecord:
     status_message_id: Optional[int] = None
     status_message_index: int = 0
     status_message_updated_at: Optional[datetime] = None
+    operation_name: Optional[str] = None
+    file_url: Optional[str] = None
     extra: Dict[str, Any] = field(default_factory=dict)
 
 
@@ -88,6 +90,8 @@ class FakeDB:
         job_id: str,
         status: str,
         video_url: Optional[str] = None,
+        file_url: Optional[str] = None,
+        operation_name: Optional[str] = None,
         error: Optional[str] = None,
         status_message_id: Optional[int] = None,
         status_message_index: Optional[int] = None,
@@ -98,6 +102,8 @@ class FakeDB:
                 job_id,
                 status,
                 video_url,
+                file_url,
+                operation_name,
                 error,
                 status_message_id,
                 status_message_index,
@@ -109,6 +115,10 @@ class FakeDB:
             job.status = status
             if video_url is not None:
                 job.video_url = video_url
+            if file_url is not None:
+                job.file_url = file_url
+            if operation_name is not None:
+                job.operation_name = operation_name
             if error is not None:
                 job.error = error
             job.updated_at = datetime.utcnow()

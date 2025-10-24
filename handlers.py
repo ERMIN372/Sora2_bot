@@ -4,7 +4,6 @@ from __future__ import annotations
 import asyncio
 import base64
 import binascii
-import io
 import logging
 import mimetypes
 import time
@@ -22,7 +21,6 @@ from aiogram.types import (
     CallbackQuery,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
-    InputFile,
     KeyboardButton,
     Message,
     ReplyKeyboardMarkup,
@@ -53,6 +51,7 @@ from services.gemini_downloader import (
     download_asset,
 )
 from services.status_tracker import StatusMessageManager
+from telegram_files import BufferedInputFile
 from utils import build_inline_data_from_telegram_file
 import yookassa_client
 
@@ -1514,7 +1513,8 @@ def _select_remote_video_asset(job: GenerationJobRecord) -> Optional[Dict[str, A
                 score += 10
             candidates.append((score, asset))
     if not candidates:
-        fallback = job.video_url if isinstance(job.video_url, str) else None
+        fallback_source = job.file_url if isinstance(job.file_url, str) and job.file_url else job.video_url
+        fallback = fallback_source if isinstance(fallback_source, str) else None
         if fallback:
             candidate = fallback.strip()
             if candidate and not candidate.startswith("["):
@@ -1590,11 +1590,9 @@ async def _send_inline_image(
     db: Database,
 ) -> Optional[SentMediaInfo]:
     mime, payload = inline_image
-    buffer = io.BytesIO(payload)
     suffix = mimetypes.guess_extension(mime) or ".jpg"
     filename = f"result{suffix}"
-    buffer.seek(0)
-    input_file = InputFile(buffer, filename=filename)
+    input_file = BufferedInputFile(payload, filename=filename, mime_type=mime)
     try:
         message = await dp.bot.send_document(job.user_id, input_file)
     except Exception:
@@ -1668,7 +1666,6 @@ async def _send_inline_assets(
                 extra_log={"asset_index": index, "asset_size": size},
             )
             return None
-        buffer = io.BytesIO(payload)
         suffix = mimetypes.guess_extension(mime) or ".bin"
         base_name = re.sub(r"[^a-zA-Z0-9_-]", "", str(asset.get("kind") or "asset"))
         if not base_name:
@@ -1676,14 +1673,13 @@ async def _send_inline_assets(
         filename = f"{base_name}_{index}{suffix}"
         try:
             if send_as_photo and mime.startswith("image/") and size <= _INLINE_ASSET_MAX_BYTES:
-                buffer.seek(0)
                 message = await dp.bot.send_photo(
                     job.user_id,
-                    InputFile(buffer, filename=filename),
+                    BufferedInputFile(payload, filename=filename, mime_type=mime),
                 )
                 method: Literal["photo", "document"] = "photo"
             else:
-                input_file = InputFile(buffer, filename=filename)
+                input_file = BufferedInputFile(payload, filename=filename, mime_type=mime)
                 message = await dp.bot.send_document(job.user_id, input_file)
                 method = "document"
         except Exception:
@@ -1811,22 +1807,27 @@ async def _deliver_remote_video(
         )
         return None
 
-    buffer = io.BytesIO(downloaded.content)
     method: Literal["video", "document"] = "video"
     message: Optional[Message] = None
     try:
         if downloaded.size <= _TELEGRAM_VIDEO_MAX_BYTES:
-            buffer.seek(0)
             message = await dp.bot.send_video(
                 job.user_id,
-                InputFile(buffer, filename=downloaded.filename),
+                BufferedInputFile(
+                    downloaded.content,
+                    filename=downloaded.filename,
+                    mime_type=downloaded.mime,
+                ),
                 supports_streaming=True,
             )
         elif downloaded.size <= _TELEGRAM_DOCUMENT_MAX_BYTES:
-            buffer.seek(0)
             message = await dp.bot.send_document(
                 job.user_id,
-                InputFile(buffer, filename=downloaded.filename),
+                BufferedInputFile(
+                    downloaded.content,
+                    filename=downloaded.filename,
+                    mime_type=downloaded.mime,
+                ),
             )
             method = "document"
         else:
@@ -1929,11 +1930,12 @@ async def _handle_delivery_failure(
     if refunded:
         increment_metric("refunds_total")
     try:
-        await db.update_job(job.id, "failed", error=message)
+        await db.update_job(job.id, "failed", file_url="", error=message)
     except Exception:
         log.exception("Failed to update job status after delivery failure job_id=%s", job.id)
     job.status = "failed"
     job.error = message
+    job.file_url = ""
     await STATUS_MESSAGES.mark_failed(
         bot=dp.bot,
         db=db,

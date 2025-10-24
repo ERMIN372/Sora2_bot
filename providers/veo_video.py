@@ -510,7 +510,8 @@ class VeoVideoClient(BaseProviderClient):
                 provider_message=str(getattr(exc, "response", exc)),
             ) from exc
         duration_ms = int((time.perf_counter() - start) * 1000)
-        job_id = operation.name or str(uuid4())
+        operation_name = operation.name or str(uuid4())
+        job_id = operation_name
         data = operation.model_dump(exclude_none=True)
         async with self._lock:
             self._operations[job_id] = operation
@@ -520,6 +521,7 @@ class VeoVideoClient(BaseProviderClient):
                 "key_mask": self._key_mask,
                 "api_version": decision.api_version,
                 "corr_id": corr_label or job_id,
+                "operation_name": operation_name,
             }
             if decision.rewrite_notes:
                 self._requests[job_id]["prompt_notes"] = decision.rewrite_notes
@@ -538,7 +540,7 @@ class VeoVideoClient(BaseProviderClient):
             job_id=job_id,
             status_code=200,
             duration_ms=duration_ms,
-            data={"operation": data},
+            data={"operation": data, "operation_name": operation_name},
         )
 
     async def get_job_status(self, job_id: str) -> ProviderJobStatus:

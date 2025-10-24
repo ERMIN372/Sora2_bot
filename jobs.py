@@ -603,6 +603,7 @@ class JobQueue:
             idempotency_key=stable_idempotency_key,
         )
         job_id = submission.job_id
+        operation_name = submission.data.get("operation_name") if isinstance(submission.data, dict) else None
         now = datetime.utcnow()
         record = GenerationJobRecord(
             id=job_id,
@@ -621,6 +622,7 @@ class JobQueue:
             corr_id=corr_id,
             content_type=content_type_value,
             idempotency_key=stable_idempotency_key,
+            operation_name=operation_name,
         )
         await self._db.create_job(record)
         await self.enqueue(
@@ -1117,6 +1119,7 @@ class JobQueue:
                         pending.job_id,
                         "completed",
                         video_url=video_url_value,
+                        file_url=video_url_value,
                         error=None,
                     )
                 except Exception:
@@ -1212,6 +1215,7 @@ class JobQueue:
                     await self._db.update_job(
                         pending.job_id,
                         "failed",
+                        file_url="",
                         error=error_message,
                     )
                 except Exception:

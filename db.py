@@ -47,6 +47,8 @@ class GenerationJobRecord:
     status_message_id: Optional[int] = None
     status_message_index: int = 0
     status_message_updated_at: Optional[datetime] = None
+    operation_name: Optional[str] = None
+    file_url: Optional[str] = None
     extra: Dict[str, Any] = field(default_factory=dict)
 
 
@@ -117,6 +119,7 @@ def _user_from_dict(data: Dict[str, Any]) -> User:
 
 def _job_from_dict(data: Dict[str, Any]) -> GenerationJobRecord:
     video_url = data.get("video_url") or None
+    file_url = data.get("file_url") or None
     error = data.get("error") or None
     image_file_id = data.get("image_file_id") or None
     sora_req_id = data.get("sora_req_id") or None
@@ -154,6 +157,7 @@ def _job_from_dict(data: Dict[str, Any]) -> GenerationJobRecord:
     status_message_updated_raw = data.get("status_message_updated_at") or ""
     status_message_updated_at = _parse_datetime(status_message_updated_raw)
     content_type = str(data.get("content_type") or "video")
+    operation_name = data.get("operation_name") or None
     return GenerationJobRecord(
         id=str(data.get("job_id", "")),
         user_id=int(data.get("user_id", 0)),
@@ -176,6 +180,8 @@ def _job_from_dict(data: Dict[str, Any]) -> GenerationJobRecord:
         status_message_id=status_message_id,
         status_message_index=status_message_index,
         status_message_updated_at=status_message_updated_at,
+        operation_name=operation_name,
+        file_url=file_url,
         extra={},
     )
 
@@ -467,6 +473,8 @@ class Database:
             username=job.username,
             content_type=job.content_type,
             idempotency_key=job.idempotency_key or "",
+            operation_name=job.operation_name,
+            file_url=job.file_url,
         )
 
     async def find_job_by_idempotency_key(
@@ -485,6 +493,8 @@ class Database:
         status: str,
         *,
         video_url: Optional[str] = None,
+        file_url: Optional[str] = None,
+        operation_name: Optional[str] = None,
         error: Optional[str] = None,
         status_message_id: Optional[int] = None,
         status_message_index: Optional[int] = None,
@@ -494,6 +504,10 @@ class Database:
         updates: Dict[str, Any] = {}
         if video_url is not None:
             updates["video_url"] = video_url
+        if file_url is not None:
+            updates["file_url"] = file_url
+        if operation_name is not None:
+            updates["operation_name"] = operation_name
         if error is not None:
             updates["error"] = error
         if status_message_id is not None:
