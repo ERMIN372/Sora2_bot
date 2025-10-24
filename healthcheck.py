@@ -152,8 +152,18 @@ async def run_startup_healthcheck(*, config: Config, mode: str) -> HealthCheckRe
         for category, threshold in safety_state.get("thresholds", [])
         if category
     ]
-    last_fallback = safety_state.get("last_fallback")
-    if last_fallback:
+    last_fallback = safety_state.get("last_fallback") or {}
+    if isinstance(last_fallback, dict):
+        for category, ts in last_fallback.items():
+            if not category:
+                category = "n/a"
+            label = str(category)
+            if isinstance(ts, (int, float)) and ts > 0:
+                timestamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(ts))
+                thresholds_detail.append(f"fallback {label}@{timestamp}")
+            else:
+                thresholds_detail.append(f"fallback {label}")
+    elif last_fallback:
         thresholds_detail.append(f"fallback seen: {last_fallback}")
     add_check("Gemini safety", True, ", ".join(thresholds_detail) if thresholds_detail else "n/a")
 

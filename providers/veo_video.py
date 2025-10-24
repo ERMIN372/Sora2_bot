@@ -449,8 +449,8 @@ class VeoVideoClient(BaseProviderClient):
         self._schema_logged = False
         self._asset_recovery_attempted: Set[str] = set()
         self._force_none_enabled = bool(getattr(config, "gemini_safety_force_none", False))
-        order, thresholds, configured = gemini_safety.current_configuration()
-        if not configured:
+        order, thresholds, configured, force_none_state = gemini_safety.current_configuration()
+        if not configured or force_none_state != self._force_none_enabled:
             order, thresholds = gemini_safety.initialise(
                 force_none=self._force_none_enabled,
                 settings=[],
@@ -460,7 +460,9 @@ class VeoVideoClient(BaseProviderClient):
         self._safety_order: List[str] = list(order)
         self._safety_thresholds: Dict[str, str] = dict(thresholds)
         self._safety_settings = gemini_safety.build_safety_settings(
-            self._safety_order, self._safety_thresholds
+            force_none=self._force_none_enabled,
+            order=self._safety_order,
+            thresholds=self._safety_thresholds,
         )
 
     async def enqueue_job(
@@ -494,13 +496,13 @@ class VeoVideoClient(BaseProviderClient):
         while True:
             safety_settings = list(fallback_override or self._safety_settings)
             fallback_override = None
+            effective_config = self._with_video_safety_config(config_obj, safety_settings)
             try:
                 operation = await asyncio.to_thread(
                     self._generate_videos_operation,
                     model_name,
                     source,
-                    config_obj,
-                    safety_settings,
+                    effective_config,
                 )
                 break
             except _genai_errors.APIError as exc:  # pragma: no cover - network guard
@@ -513,9 +515,13 @@ class VeoVideoClient(BaseProviderClient):
                         conflict_category,
                         threshold=gemini_safety.FALLBACK_THRESHOLD,
                     )
+                    override_order = list(self._safety_order)
+                    if conflict_category and conflict_category not in override_order:
+                        override_order.append(conflict_category)
                     fallback_override = gemini_safety.build_safety_settings(
-                        self._safety_order,
-                        override_map,
+                        force_none=self._force_none_enabled,
+                        order=override_order,
+                        thresholds=override_map,
                     )
                     fallback_attempted = True
                     label = (
@@ -529,8 +535,10 @@ class VeoVideoClient(BaseProviderClient):
                         provider=self.provider_name,
                         logger=log,
                     )
-                    log.debug(
-                        "Retrying Veo request with fallback safety category=%s", conflict_category
+                    log.warning(
+                        "Retrying Veo request with fallback safety category=%s threshold=%s",
+                        conflict_category,
+                        gemini_safety.FALLBACK_THRESHOLD,
                     )
                     continue
                 raise ProviderAPIError(
@@ -767,15 +775,33 @@ class VeoVideoClient(BaseProviderClient):
         model: str,
         source: Optional[_genai_types.GenerateVideosSource],
         config: Optional[_genai_types.GenerateVideosConfig],
-        safety_settings: Optional[List[_genai_types.SafetySetting]] = None,
     ) -> _genai_types.GenerateVideosOperation:
         models = self._client.models
         kwargs = {"model": model, "source": source, "config": config}
-        if safety_settings is not None:
-            kwargs["safety_settings"] = list(safety_settings)
         if hasattr(models, "generate_videos"):
             return models.generate_videos(**kwargs)
         return models._generate_videos(**kwargs)
+
+    def _with_video_safety_config(
+        self,
+        config: Optional[_genai_types.GenerateVideosConfig],
+        safety_settings: Sequence[_genai_types.SafetySetting],
+    ) -> _genai_types.GenerateVideosConfig:
+        if isinstance(config, _genai_types.GenerateVideosConfig):
+            try:
+                return config.model_copy(update={"safety_settings": list(safety_settings)})
+            except Exception:  # pragma: no cover - defensive path
+                data = config.model_dump(mode="json", exclude_none=True)
+        elif isinstance(config, dict):  # pragma: no cover - defensive path
+            data = dict(config)
+        else:
+            data = {}
+        data["safety_settings"] = list(safety_settings)
+        try:
+            return _genai_types.GenerateVideosConfig(**data)
+        except Exception:  # pragma: no cover - defensive path
+            log.debug("Failed to coerce Veo safety config; using fallback", exc_info=True)
+            return _genai_types.GenerateVideosConfig.model_validate(data)
 
     async def _get_operation(self, job_id: str) -> _genai_types.GenerateVideosOperation:
         async with self._lock:
