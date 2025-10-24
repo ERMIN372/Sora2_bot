@@ -64,7 +64,7 @@ def _make_config() -> Config:
 def test_download_asset_success(monkeypatch: pytest.MonkeyPatch) -> None:
     files = _SuccessfulFiles()
     monkeypatch.setattr(
-        downloader, "get_gemini_client", lambda _cfg, **__: _DummyClient(files)
+        downloader, "get_media_client", lambda _cfg: _DummyClient(files)
     )
     config = _make_config()
 
@@ -88,7 +88,7 @@ def test_download_asset_success(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_download_asset_uses_hints_when_metadata_missing(monkeypatch: pytest.MonkeyPatch) -> None:
     files = _DownloadOnlyFiles()
     monkeypatch.setattr(
-        downloader, "get_gemini_client", lambda _cfg, **__: _DummyClient(files)
+        downloader, "get_media_client", lambda _cfg: _DummyClient(files)
     )
     config = _make_config()
 
@@ -113,7 +113,7 @@ def test_download_asset_uses_hints_when_metadata_missing(monkeypatch: pytest.Mon
 def test_download_asset_permission_denied(monkeypatch: pytest.MonkeyPatch) -> None:
     files = _ForbiddenFiles()
     monkeypatch.setattr(
-        downloader, "get_gemini_client", lambda _cfg, **__: _DummyClient(files)
+        downloader, "get_media_client", lambda _cfg: _DummyClient(files)
     )
 
     async def _instant_sleep(*_args, **_kwargs) -> None:
@@ -133,7 +133,7 @@ def test_download_asset_permission_denied(monkeypatch: pytest.MonkeyPatch) -> No
             )
         )
 
-    assert files.attempts == 2
+    assert files.attempts == 4
     assert excinfo.value.status_code == 403
     assert excinfo.value.error_status == "download_failed"
 
@@ -192,5 +192,5 @@ def test_download_asset_direct_url(monkeypatch: pytest.MonkeyPatch) -> None:
     assert result.mime == "video/mp4"
     assert result.size == len(b"video-bytes")
     assert _StubSession.calls
-    assert _StubSession.calls[0][1].get("x-goog-api-key") == config.gemini_api_key
+    assert _StubSession.calls[0][1].get("X-Goog-Api-Key") == config.gemini_api_key
 

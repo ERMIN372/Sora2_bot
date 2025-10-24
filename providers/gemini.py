@@ -356,6 +356,7 @@ class GeminiGenerativeClient(BaseProviderClient):
                 provider_message = getattr(exc.response, "text", None)
             status_name = str(getattr(exc, "status", "") or "")
             provider_text = str(provider_message or "")
+            error_type = "api"
             if status_code in {400, 404}:
                 message = (
                     "Эта модель не поддерживает данный метод. Поменяй модель или метод."
@@ -364,6 +365,14 @@ class GeminiGenerativeClient(BaseProviderClient):
                     message = (
                         "Для изображений и видео используй v1beta; для текста — v1."
                     )
+                if (
+                    status_code == 404
+                    and decision
+                    and decision.method == "generate_images"
+                ):
+                    error_type = "provider_misconfigured"
+                    retryable = False
+                    message = "Модель временно недоступна из-за конфигурации. Попробуй позже, кредиты вернули."
             policy_trigger = (
                 "policy" in provider_text.lower()
                 or "safety" in provider_text.lower()
@@ -374,11 +383,15 @@ class GeminiGenerativeClient(BaseProviderClient):
                 message = (
                     "Запрос отклонён политикой. Попробуем смягчить формулировку или уберём прямые названия брендов/фильмов."
                 )
+            if status_code == 403 and "download" in provider_text.lower():
+                error_type = "download_failed"
+                retryable = False
+                message = "Не удалось скачать файл Gemini. Попробуем ещё раз позже и вернём кредиты."
             return ProviderAPIError(
                 provider=self.provider_name,
                 status_code=status_code,
                 message=message,
-                error_type="api",
+                error_type=error_type,
                 error_code=str(getattr(exc, "status", "")) or None,
                 provider_message=str(provider_message or message),
                 retryable=retryable,
@@ -864,7 +877,7 @@ class GeminiImageClient(GeminiGenerativeClient):
             model=config.gemini_model_image,
             provider_name="gemini-image",
             task="image",
-            api_version="v1",
+            api_version="v1beta",
         )
 
     async def enqueue_job(
@@ -1229,6 +1242,7 @@ class GeminiImageClient(GeminiGenerativeClient):
         if references:
             kwargs["reference_images"] = references
 
+        kwargs.setdefault("mime_type", "image/png")
         return _genai_types.GenerateImagesConfig(**kwargs)
 
     def _prepare_generate_call(

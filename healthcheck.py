@@ -14,30 +14,9 @@ from google.genai import errors as _genai_errors, types as _genai_types
 
 from config import Config
 from observability import HealthCheckResult, record_healthcheck
-from services.gemini_client import get_gemini_client
+from services.gemini_client import get_media_client, get_text_client
 
 log = logging.getLogger(__name__)
-
-
-def _collect_files(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
-    files: List[Dict[str, Any]] = []
-    stack: List[Any] = [payload]
-    while stack:
-        node = stack.pop()
-        if isinstance(node, dict):
-            for key, value in node.items():
-                if key == "files" and isinstance(value, list):
-                    for item in value:
-                        if isinstance(item, dict):
-                            files.append(item)
-                if isinstance(value, (dict, list, tuple)):
-                    stack.append(value)
-        elif isinstance(node, (list, tuple)):
-            for item in node:
-                if isinstance(item, (dict, list, tuple)):
-                    stack.append(item)
-    return files
-
 
 def _supports_method(catalog: Dict[str, List[str]], model: str, method: str) -> bool:
     methods = catalog.get(model, [])
@@ -54,25 +33,26 @@ async def _probe_gemini_models(config: Config) -> Tuple[bool, str]:
         return True, "disabled"
     if not config.gemini_api_key:
         return False, "missing api key"
+
     clients: Dict[str, Any] = {}
-    for version in ("v1", "v1beta"):
+    for scope, factory in (("text", get_text_client), ("media", get_media_client)):
         try:
-            clients[version] = get_gemini_client(config, api_version=version)
+            clients[scope] = factory(config)
         except Exception as exc:  # pragma: no cover - defensive
-            log.warning("Gemini client init failed version=%s", version, exc_info=True)
+            log.warning("Gemini client init failed scope=%s", scope, exc_info=True)
 
     if not clients:
         return False, "models.list:no_client"
 
     supported: Dict[str, List[str]] = {}
-    model_versions: Dict[str, str] = {}
+    model_scope: Dict[str, str] = {}
 
-    for version, client in clients.items():
+    async def _load_catalog(scope: str, client: Any) -> None:
         try:
             catalog = await asyncio.to_thread(lambda cl=client: list(cl.models.list()))
         except Exception as exc:  # pragma: no cover - defensive
-            log.warning("Gemini models.list failed version=%s", version, exc_info=True)
-            continue
+            log.warning("Gemini models.list failed scope=%s", scope, exc_info=True)
+            return
         for item in catalog:
             name = getattr(item, "name", None) or getattr(item, "model", None) or ""
             short = name.split("/")[-1] if name else ""
@@ -80,21 +60,23 @@ async def _probe_gemini_models(config: Config) -> Tuple[bool, str]:
             method_list = [str(method) for method in methods]
             if short:
                 supported[short] = method_list
-                model_versions.setdefault(short, version)
+                model_scope.setdefault(short, scope)
             if name:
                 supported[name] = method_list
-                model_versions.setdefault(name, version)
+                model_scope.setdefault(name, scope)
+
+    await asyncio.gather(*[_load_catalog(scope, client) for scope, client in clients.items()])
 
     if not supported:
         return False, "models.list:empty"
 
     detail: Dict[str, Any] = {"catalog": supported}
 
-    def _resolve_version(model_name: str, default_version: str) -> str:
-        if model_name in model_versions:
-            return model_versions[model_name]
-        short_name = model_name.split("/")[-1]
-        return model_versions.get(short_name, default_version)
+    def _resolve_scope(model_name: str, default_scope: str) -> str:
+        if model_name in model_scope:
+            return model_scope[model_name]
+        short = model_name.split("/")[-1]
+        return model_scope.get(short, default_scope)
 
     text_model = (config.gemini_model_text or "").strip()
     if text_model:
@@ -109,10 +91,10 @@ async def _probe_gemini_models(config: Config) -> Tuple[bool, str]:
             return False, f"image model {image_model} missing"
         if not _supports_method(supported, image_model, "generate_images"):
             return False, f"image model {image_model} lacks generate_images"
-        image_version = _resolve_version(image_model, "v1")
-        image_client = clients.get(image_version) or clients.get("v1")
+        image_scope = _resolve_scope(image_model, "media")
+        image_client = clients.get(image_scope) or clients.get("media")
         if image_client is None:
-            return False, f"image client {image_version} unavailable"
+            return False, f"image client {image_scope} unavailable"
         start = time.perf_counter()
         try:
             response = await asyncio.wait_for(
@@ -120,6 +102,7 @@ async def _probe_gemini_models(config: Config) -> Tuple[bool, str]:
                     image_client.models.generate_images,
                     model=image_model,
                     prompt="ping",
+                    config=_genai_types.GenerateImagesConfig(mime_type="image/png"),
                 ),
                 timeout=60.0,
             )
@@ -137,10 +120,7 @@ async def _probe_gemini_models(config: Config) -> Tuple[bool, str]:
             if value is None and isinstance(response, dict):
                 value = response.get(attr)
             if value:
-                if isinstance(value, (list, tuple)):
-                    image_candidates = list(value)
-                else:
-                    image_candidates = [value]
+                image_candidates = list(value) if isinstance(value, (list, tuple)) else [value]
                 break
 
         image_found = False
@@ -176,6 +156,7 @@ async def _probe_gemini_models(config: Config) -> Tuple[bool, str]:
                 if data_field:
                     image_found = True
                     break
+            uri = None
             if isinstance(candidate, dict):
                 uri = candidate.get("uri") or candidate.get("url")
             else:
@@ -188,7 +169,7 @@ async def _probe_gemini_models(config: Config) -> Tuple[bool, str]:
             return False, "image:no_binary"
         detail.setdefault("image", {})
         detail["image"].update(
-            {"model": image_model, "latency_ms": duration_ms, "version": image_version}
+            {"model": image_model, "latency_ms": duration_ms, "scope": image_scope}
         )
 
     video_model = (config.gemini_model_video or "").strip()
@@ -197,12 +178,12 @@ async def _probe_gemini_models(config: Config) -> Tuple[bool, str]:
             return False, f"video model {video_model} missing"
         if not _supports_method(supported, video_model, "generate_videos"):
             return False, f"video model {video_model} lacks generate_videos"
-        video_version = _resolve_version(video_model, "v1beta")
-        video_client = clients.get(video_version) or clients.get("v1beta")
+        video_client = clients.get("media")
         if video_client is None:
-            return False, f"video client {video_version} unavailable"
-        video_config = _genai_types.GenerateVideosConfig(duration_seconds=2)
+            return False, "video client media unavailable"
+        video_config = _genai_types.GenerateVideosConfig(duration_seconds=1)
         try:
+            start = time.perf_counter()
             operation = await asyncio.wait_for(
                 asyncio.to_thread(
                     video_client.models.generate_videos,
@@ -224,55 +205,33 @@ async def _probe_gemini_models(config: Config) -> Tuple[bool, str]:
         if not operation_name:
             return False, "video:missing_operation_name"
 
-        poll_start = time.perf_counter()
-        poll_deadline = poll_start + 45.0
-        refreshed = operation
         polls = 0
-        while time.perf_counter() < poll_deadline:
-            polls += 1
-            refreshed = await asyncio.to_thread(video_client.operations.get, operation_name)
-            if refreshed.error:
-                error_message = (
-                    refreshed.error.get("message")
-                    if isinstance(refreshed.error, dict)
-                    else str(refreshed.error)
-                )
+        refreshed = operation
+        if not getattr(operation, "done", False):
+            for _ in range(2):
+                polls += 1
+                await asyncio.sleep(random.uniform(2.0, 3.0))
                 try:
-                    await asyncio.to_thread(video_client.operations.cancel, operation_name)
-                except Exception:
-                    log.debug("Gemini video cancel failed name=%s", operation_name, exc_info=True)
-                return False, f"video:error:{error_message}"
-            if getattr(refreshed, "done", False):
-                break
-            await asyncio.sleep(random.uniform(2.0, 3.5))
-
-        cancelled = False
-        try:
-            await asyncio.to_thread(video_client.operations.cancel, operation_name)
-            cancelled = True
-        except Exception:
-            log.debug("Gemini video cancel failed name=%s", operation_name, exc_info=True)
+                    refreshed = await asyncio.to_thread(video_client.operations.get, operation)
+                except _genai_errors.APIError as exc:
+                    detail_msg = f"{getattr(exc, 'code', 0)}:{getattr(exc, 'status', '')}".strip(":")
+                    log.warning(
+                        "Gemini video poll failed model=%s op=%s", video_model, operation_name, exc_info=True
+                    )
+                    return False, detail_msg or str(exc)
+                if getattr(refreshed, "done", False):
+                    break
 
         detail.setdefault("video", {})
-        detail_video = detail["video"]
-        detail_video.update(
+        detail["video"].update(
             {
                 "model": video_model,
-                "version": video_version,
+                "operation": getattr(refreshed, "name", None) or operation_name,
                 "polls": polls,
-                "operation": operation_name,
-                "cancelled": cancelled,
-                "latency_ms": int((time.perf_counter() - poll_start) * 1000),
                 "done": bool(getattr(refreshed, "done", False)),
+                "latency_ms": int((time.perf_counter() - start) * 1000),
             }
         )
-
-        if getattr(refreshed, "done", False):
-            payload = refreshed.model_dump(exclude_none=True)
-            files = _collect_files(payload)
-            if not files:
-                return False, "video:no_media"
-            detail_video["files"] = len(files)
 
     detail_json = json.dumps(detail, ensure_ascii=False)
     log.info("Gemini models: ok %s", detail_json)

@@ -5,12 +5,12 @@ import logging
 import re
 import threading
 import time
-from typing import Iterable, List
+from typing import Iterable, List, Optional
 
 from google.genai import errors as _genai_errors
 
 from config import Config
-from services.gemini_client import get_gemini_client
+from services.gemini_client import get_media_client, get_text_client
 
 log = logging.getLogger(__name__)
 
@@ -105,11 +105,16 @@ def _normalise_method_name(method: object) -> str:
     return text.replace("-", "_").strip().lower()
 
 
+def _pick_client(config: Config, capability_key: str):
+    if capability_key in {"generate_videos", "generate_images"}:
+        return get_media_client(config)
+    return get_text_client(config)
+
+
 def list_models_with_capability(
     config: Config,
     *,
     capability: str,
-    api_version: str | None = None,
 ) -> List[str]:
     """Return model names that advertise *capability* in the catalog."""
 
@@ -118,19 +123,42 @@ def list_models_with_capability(
         return []
 
     try:
-        client = get_gemini_client(config, api_version=api_version or "v1")
+        client = _pick_client(config, capability_key)
     except Exception:
         log.warning("Gemini client initialisation failed for capability=%s", capability_key, exc_info=True)
         return []
 
-    try:
-        response = client.models.list()
-    except _genai_errors.APIError as exc:  # pragma: no cover - network guard
-        log.warning("Gemini models.list failed capability=%s: %s", capability_key, exc, exc_info=True)
-        return []
-    except Exception as exc:  # pragma: no cover - defensive
-        log.warning("Unexpected error listing Gemini models capability=%s", capability_key, exc_info=True)
-        return []
+    responses: List[object] = []
+    page_token: Optional[str] = None
+    while True:
+        try:
+            if page_token:
+                response = client.models.list(page_token=page_token)
+            else:
+                response = client.models.list()
+        except _genai_errors.APIError as exc:  # pragma: no cover - network guard
+            log.warning("Gemini models.list failed capability=%s: %s", capability_key, exc, exc_info=True)
+            return []
+        except Exception as exc:  # pragma: no cover - defensive
+            log.warning("Unexpected error listing Gemini models capability=%s", capability_key, exc_info=True)
+            return []
+        responses.append(response)
+        next_token = None
+        for attr in ("next_page_token", "nextPageToken"):
+            candidate = getattr(response, attr, None)
+            if isinstance(candidate, str) and candidate:
+                next_token = candidate
+                break
+            if isinstance(response, dict):
+                candidate = response.get(attr)
+                if isinstance(candidate, str) and candidate:
+                    next_token = candidate
+                    break
+        if not next_token:
+            break
+        if next_token == page_token:
+            break
+        page_token = next_token
 
     names: List[str] = []
     seen: set[str] = set()
@@ -142,10 +170,11 @@ def list_models_with_capability(
             names.append(name)
             seen.add(name)
 
-    for entry in _iter_response(response):
-        supported = getattr(entry, "supported_generation_methods", None)
-        if supported is None and isinstance(entry, dict):
-            supported = entry.get("supported_generation_methods")
+    for response in responses:
+        for entry in _iter_response(response):
+            supported = getattr(entry, "supported_generation_methods", None)
+            if supported is None and isinstance(entry, dict):
+                supported = entry.get("supported_generation_methods")
         method_names = {
             _normalise_method_name(value)
             for value in (supported or [])
@@ -179,7 +208,6 @@ def list_veo_video_models(config: Config) -> List[str]:
     names = list_models_with_capability(
         config,
         capability="generateVideos",
-        api_version="v1beta",
     )
     filtered: List[str] = []
     for name in names:

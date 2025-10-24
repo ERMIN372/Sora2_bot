@@ -10,7 +10,7 @@ from typing import Dict, Iterable, List, Mapping, Optional, Set, Tuple
 from google.genai import Client as _GenAIClient
 
 from config import Config
-from services.gemini_client import get_gemini_client
+from services.gemini_client import get_media_client, get_text_client
 
 log = logging.getLogger(__name__)
 
@@ -18,12 +18,6 @@ _TASK_METHOD: Mapping[str, str] = {
     "text": "generate_content",
     "image": "generate_images",
     "video": "generate_videos",
-}
-
-_TASK_VERSION: Mapping[str, str] = {
-    "text": "v1",
-    "image": "v1",
-    "video": "v1beta",
 }
 
 _METHOD_HUMAN: Mapping[str, str] = {
@@ -134,23 +128,22 @@ class GeminiRouter:
     def supported_models(self) -> Mapping[str, Tuple[str, ...]]:
         return dict(self._supported_methods)
 
-    def _load_catalog(self, client: _GenAIClient, api_version: str) -> None:
-        version = api_version or ""
-        if version in self._loaded_versions:
+    def _load_catalog(self, client: _GenAIClient, cache_key: str) -> None:
+        if cache_key in self._loaded_versions:
             return
         with self._catalog_lock:
-            if version in self._loaded_versions:
+            if cache_key in self._loaded_versions:
                 return
             try:
                 models = list(client.models.list())
             except Exception as exc:  # pragma: no cover - network guard
                 log.warning(
-                    "Failed to fetch Gemini models list version=%s error=%s",
-                    version,
+                    "Failed to fetch Gemini models list scope=%s error=%s",
+                    cache_key,
                     exc,
                     exc_info=True,
                 )
-                self._loaded_versions.add(version)
+                self._loaded_versions.add(cache_key)
                 return
             for model in models:
                 name = getattr(model, "name", None) or getattr(model, "model", None)
@@ -163,7 +156,7 @@ class GeminiRouter:
                 short_name = _strip_model_prefix(name)
                 self._supported_methods[short_name] = normalised
                 self._supported_methods[name] = normalised
-            self._loaded_versions.add(version)
+            self._loaded_versions.add(cache_key)
 
     def _default_model_for_task(self, task: str) -> str:
         if task == "image":
@@ -235,9 +228,15 @@ class GeminiRouter:
         selected_model = (model or self._default_model_for_task(normalised_task)).strip()
         self._validate_task_model(normalised_task, selected_model)
         method = _TASK_METHOD[normalised_task]
-        api_version = _TASK_VERSION[normalised_task]
-        client = get_gemini_client(self._config, api_version=api_version)
-        self._load_catalog(client, api_version)
+        if normalised_task == "text":
+            api_version = "v1"
+            client = get_text_client(self._config)
+            cache_key = "text"
+        else:
+            api_version = "v1beta"
+            client = get_media_client(self._config)
+            cache_key = "media"
+        self._load_catalog(client, cache_key)
         self._ensure_supported(selected_model, method, normalised_task)
 
         processed_prompt = prompt

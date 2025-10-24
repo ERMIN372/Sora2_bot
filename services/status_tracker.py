@@ -18,12 +18,10 @@ if TYPE_CHECKING:  # pragma: no cover
 
 
 _DEFAULT_PHRASES: Sequence[str] = (
-    "⏳ Генерация идёт…",
-    "🔧 Подкручиваем детали…",
-    "🧪 Тестируем кадры…",
-    "🎬 Сцена почти готова…",
-    "✨ Полируем финальные штрихи…",
-    "🤖 Модель ещё думает…",
+    "Генерация идёт…",
+    "Ещё немного…",
+    "Подчищаю кадры…",
+    "Почти готово…",
 )
 
 _MAX_EDITS = 12
@@ -61,7 +59,7 @@ class StatusMessageManager:
         self,
         *,
         phrases: Sequence[str] = _DEFAULT_PHRASES,
-        edit_interval: tuple[float, float] = (7.0, 12.0),
+        edit_interval: tuple[float, float] = (5.0, 8.0),
         action_interval: tuple[float, float] = (6.0, 12.0),
         delete_interval: tuple[float, float] = (60.0, 300.0),
     ) -> None:

@@ -15,7 +15,7 @@ from uuid import uuid4
 from google.genai import Client as _GenAIClient, errors as _genai_errors, types as _genai_types
 
 from config import Config
-from services.gemini_client import get_gemini_client
+from services.gemini_client import get_media_client
 from services.gemini_key import ensure_gemini_key_logged
 from services.gemini_router import GeminiRoutingError, get_gemini_router
 
@@ -435,7 +435,7 @@ class VeoVideoClient(BaseProviderClient):
             api_key=config.gemini_api_key,
             provider_name="veo",
         )
-        self._client = get_gemini_client(config, api_version="v1beta")
+        self._client = get_media_client(config)
         self._router = get_gemini_router(config)
         self._operations: Dict[str, _genai_types.GenerateVideosOperation] = {}
         self._requests: Dict[str, Dict[str, Any]] = {}
