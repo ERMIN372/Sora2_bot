@@ -76,7 +76,7 @@ def list_veo_video_models(config: Config) -> List[str]:
         if cached and (now - cached[0]) < _CACHE_TTL_SECONDS:
             return list(cached[1])
 
-    client = get_gemini_client(config)
+    client = get_gemini_client(config, api_version="v1beta")
     try:
         response = client.models.list()
     except _genai_errors.APIError as exc:  # pragma: no cover - network guard

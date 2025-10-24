@@ -10,34 +10,44 @@ import os
 import re
 import time
 from fractions import Fraction
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 from uuid import uuid4
 
 from google.genai import errors as _genai_errors, types as _genai_types
 
 from config import Config
-from services.gemini_client import get_gemini_client
 from services.gemini_key import ensure_gemini_key_logged
+from services.gemini_router import (
+    GeminiRoutingError,
+    RouteDecision,
+    get_gemini_router,
+)
 
 from .base import BaseProviderClient, ProviderAPIError, ProviderJobStatus, ProviderJobSubmission
 
 log = logging.getLogger(__name__)
 
 
-def _default_safety_settings() -> List[_genai_types.SafetySetting]:
-    """Return a defensive Gemini safety configuration."""
+_SAFETY_CATEGORIES: Tuple[str, ...] = (
+    "HARASSMENT",
+    "HATE_SPEECH",
+    "SEXUALLY_EXPLICIT",
+    "DANGEROUS_CONTENT",
+    "CIVIC_INTEGRITY",
+)
 
-    threshold = "BLOCK_MEDIUM_AND_ABOVE"
-    categories = [
-        "HARM_CATEGORY_HATE_SPEECH",
-        "HARM_CATEGORY_HARASSMENT",
-        "HARM_CATEGORY_DANGEROUS_CONTENT",
-        "HARM_CATEGORY_SEXUALLY_EXPLICIT",
-        "HARM_CATEGORY_CIVIC_INTEGRITY",
-    ]
+_SAFETY_DEFAULT_THRESHOLD = "BLOCK_NONE"
+_SAFETY_FALLBACK_THRESHOLD = "BLOCK_ONLY_HIGH"
+
+
+def _default_safety_settings() -> List[_genai_types.SafetySetting]:
+    """Return a permissive Gemini safety configuration for text calls."""
+
     return [
-        _genai_types.SafetySetting(category=category, threshold=threshold)
-        for category in categories
+        _genai_types.SafetySetting(
+            category=category, threshold=_SAFETY_DEFAULT_THRESHOLD
+        )
+        for category in _SAFETY_CATEGORIES
     ]
 
 
@@ -187,6 +197,8 @@ class GeminiGenerativeClient(BaseProviderClient):
         api_key: str,
         model: str,
         provider_name: str,
+        task: str,
+        api_version: str,
         safety_settings: Optional[List[_genai_types.SafetySetting]] = None,
     ) -> None:
         super().__init__(
@@ -195,11 +207,13 @@ class GeminiGenerativeClient(BaseProviderClient):
             api_key=api_key,
             provider_name=provider_name,
         )
-        self._client = get_gemini_client(config)
         self._api_key = api_key
         parsed_safety = _convert_setting_list(safety_settings, _genai_types.SafetySetting)
         self._safety_settings = parsed_safety or _default_safety_settings()
         self._model = model
+        self._task = task
+        self._api_version = api_version
+        self._router = get_gemini_router(config)
         self._pending: Dict[str, Tuple[Dict[str, Any], int, int, Dict[str, Any]]] = {}
         self._environment = (config.environment or "dev").lower()
         self._key_mask = ensure_gemini_key_logged(
@@ -235,8 +249,13 @@ class GeminiGenerativeClient(BaseProviderClient):
     def _build_generation_config(
         self, settings: Optional[Dict[str, Any]]
     ) -> _genai_types.GenerateContentConfig:
-        kwargs: Dict[str, Any] = {"safety_settings": list(self._safety_settings)}
+        kwargs: Dict[str, Any] = {}
+        safety_settings: Optional[List[_genai_types.SafetySetting]] = None
+        if self._task == "text":
+            safety_settings = list(self._safety_settings)
         if not settings:
+            if safety_settings is not None:
+                kwargs["safety_settings"] = safety_settings
             return _genai_types.GenerateContentConfig(**kwargs)
 
         allowed_fields = set(_genai_types.GenerateContentConfig.model_fields.keys())
@@ -252,7 +271,7 @@ class GeminiGenerativeClient(BaseProviderClient):
             if key == "safety_settings":
                 parsed = _convert_setting_list(value, _genai_types.SafetySetting)
                 if parsed is not None:
-                    kwargs["safety_settings"] = parsed
+                    safety_settings = parsed if self._task == "text" else None
                 continue
             if key == "tools":
                 parsed = _convert_setting_list(value, _genai_types.Tool)
@@ -277,11 +296,14 @@ class GeminiGenerativeClient(BaseProviderClient):
                 continue
             kwargs[key] = value
 
+        if safety_settings is not None:
+            kwargs["safety_settings"] = safety_settings
         return _genai_types.GenerateContentConfig(**kwargs)
 
     def _prepare_generate_call(
         self,
         *,
+        decision: "RouteDecision",
         prompt: str,
         settings: Dict[str, Any],
         payload: Dict[str, Any],
@@ -293,21 +315,24 @@ class GeminiGenerativeClient(BaseProviderClient):
         if not isinstance(config, _genai_types.GenerateContentConfig):
             config = self._build_generation_config(settings)
         request_kwargs = {
-            "model": self._model,
+            "model": decision.model,
             "contents": contents,
             "config": config,
         }
         request_meta = {
             "mode": "generate_content",
+            "api_version": decision.api_version,
             "config": config.model_dump(mode="json") if hasattr(config, "model_dump") else config,
         }
-        return self._client.models.generate_content, request_kwargs, request_meta
+        generator = getattr(decision.client.models, decision.method)
+        return generator, request_kwargs, request_meta
 
     def _map_error(
         self,
         exc: Exception,
         *,
         duration_ms: int,
+        decision: Optional[RouteDecision] = None,
     ) -> ProviderAPIError:
         if isinstance(exc, _genai_errors.APIError):
             status_code = int(getattr(exc, "code", 0) or 0)
@@ -316,6 +341,26 @@ class GeminiGenerativeClient(BaseProviderClient):
             provider_message = getattr(exc, "details", None)
             if not provider_message and hasattr(exc, "response"):
                 provider_message = getattr(exc.response, "text", None)
+            status_name = str(getattr(exc, "status", "") or "")
+            provider_text = str(provider_message or "")
+            if status_code in {400, 404}:
+                message = (
+                    "Эта модель не поддерживает данный метод. Поменяй модель или метод."
+                )
+                if decision and decision.method in {"generate_images", "generate_videos"}:
+                    message = (
+                        "Для изображений и видео используй v1beta; для текста — v1."
+                    )
+            policy_trigger = (
+                "policy" in provider_text.lower()
+                or "safety" in provider_text.lower()
+                or "policy" in status_name.lower()
+                or "safety" in status_name.lower()
+            )
+            if policy_trigger:
+                message = (
+                    "Запрос отклонён политикой. Попробуем смягчить формулировку или уберём прямые названия брендов/фильмов."
+                )
             return ProviderAPIError(
                 provider=self.provider_name,
                 status_code=status_code,
@@ -346,6 +391,55 @@ class GeminiGenerativeClient(BaseProviderClient):
             duration_ms=duration_ms,
         )
 
+    def _extract_threshold_error_category(self, exc: Exception) -> Optional[str]:
+        if not isinstance(exc, _genai_errors.APIError):
+            return None
+        message = str(getattr(exc, "message", "") or "")
+        if not message:
+            message = str(getattr(exc, "details", "") or "")
+        if not message:
+            message = str(exc)
+        match = re.search(r"category\s+([A-Z_]+)", message, flags=re.IGNORECASE)
+        if match:
+            return match.group(1).upper()
+        return None
+
+    def _downgrade_safety_config(
+        self,
+        config: Any,
+        category: str,
+    ) -> Optional[_genai_types.GenerateContentConfig]:
+        if not isinstance(config, _genai_types.GenerateContentConfig):
+            return None
+        try:
+            dump = config.model_dump(mode="json")
+        except Exception:  # pragma: no cover - defensive
+            return None
+        settings = dump.get("safety_settings")
+        if not isinstance(settings, list):
+            return None
+        changed = False
+        target = category.upper()
+        for entry in settings:
+            if not isinstance(entry, dict):
+                continue
+            cat = str(entry.get("category") or "").upper()
+            if cat.endswith(target) or cat == target:
+                if entry.get("threshold") == _SAFETY_FALLBACK_THRESHOLD:
+                    return None
+                entry["threshold"] = _SAFETY_FALLBACK_THRESHOLD
+                changed = True
+                break
+        if not changed:
+            return None
+        try:
+            return _genai_types.GenerateContentConfig.model_validate(dump)
+        except Exception:  # pragma: no cover - defensive revalidation
+            log.warning(
+                "Failed to downgrade safety config for category=%s", category, exc_info=True
+            )
+            return None
+
     async def enqueue_job(
         self,
         *,
@@ -369,50 +463,89 @@ class GeminiGenerativeClient(BaseProviderClient):
         attempt = 0
         delay = self._config.retry_backoff
         last_error: Optional[ProviderAPIError] = None
+        downgraded_categories: Set[str] = set()
         while attempt <= self._config.request_retries:
+            model_override = request_settings.get("model") or self._model
+            try:
+                decision = self._router.route(
+                    task=self._task,
+                    model=model_override,
+                    prompt=prompt,
+                    assets=request_settings,
+                )
+            except GeminiRoutingError as exc:
+                raise ProviderAPIError(
+                    provider=self.provider_name,
+                    status_code=400,
+                    message=str(exc),
+                    error_type="routing",
+                    retryable=False,
+                ) from exc
+
             generator, request_kwargs, request_meta = self._prepare_generate_call(
-                prompt=prompt,
+                decision=decision,
+                prompt=decision.prompt,
                 settings=request_settings,
                 payload=payload_dict,
             )
+            request_meta.update(
+                {
+                    "mode": decision.method,
+                    "method": decision.method,
+                    "model": decision.model,
+                    "api_version": decision.api_version,
+                }
+            )
+            if decision.rewrite_notes:
+                request_meta["prompt_notes"] = decision.rewrite_notes
+            request_meta.setdefault("prompt", decision.prompt)
             start = time.monotonic()
             log.info(
-                "gemini.generate start model=%s env=%s key_mask=%s corr_id=%s mode=%s",
-                self._model,
+                "gemini.generate start model=%s method=%s version=%s env=%s key_mask=%s corr_id=%s",
+                decision.model,
+                decision.method,
+                decision.api_version,
                 self._environment,
                 self._key_mask or "",
                 idempotency_key or "",
-                request_meta.get("mode") if isinstance(request_meta, dict) else "generate_content",
             )
             try:
                 response = await asyncio.to_thread(generator, **request_kwargs)
                 duration_ms = int((time.monotonic() - start) * 1000)
-                payload_json = response.model_dump(mode="json")
+                if hasattr(response, "model_dump"):
+                    payload_json = response.model_dump(mode="json")
+                elif isinstance(response, dict):
+                    payload_json = response
+                else:
+                    payload_json = {"response": response}
                 job_id = idempotency_key or str(uuid4())
                 meta = {
-                    "prompt": prompt,
+                    "prompt": decision.prompt,
                     "settings": request_settings or {},
                     "payload": payload_json,
                     "assets_meta": {},
                     "request": request_meta,
-                    "request_mode": request_meta.get("mode"),
+                    "request_mode": decision.method,
                     "key_mask": self._key_mask,
                 }
                 self._pending[job_id] = (payload_json, 200, duration_ms, meta)
                 size = request_settings.get("size")
                 log.info(
-                    "gemini.call corr_id=%s provider=%s model=%s mode=%s size=%s status=%s latency_ms=%s",
+                    "gemini.call corr_id=%s provider=%s model=%s method=%s version=%s size=%s status=%s latency_ms=%s",
                     idempotency_key or job_id,
                     self.provider_name,
-                    self._model,
-                    request_meta.get("mode") or "generate_content",
+                    decision.model,
+                    decision.method,
+                    decision.api_version,
                     size or "",
                     200,
                     duration_ms,
                 )
                 log.info(
-                    "gemini.generate done model=%s env=%s key_mask=%s corr_id=%s latency_ms=%s",
-                    self._model,
+                    "gemini.generate done model=%s method=%s version=%s env=%s key_mask=%s corr_id=%s latency_ms=%s",
+                    decision.model,
+                    decision.method,
+                    decision.api_version,
                     self._environment,
                     self._key_mask or "",
                     idempotency_key or job_id,
@@ -424,12 +557,43 @@ class GeminiGenerativeClient(BaseProviderClient):
                     duration_ms=duration_ms,
                     data=payload_json,
                 )
-            except Exception as exc:  # pragma: no cover - network guard
+            except _genai_errors.APIError as exc:
                 duration_ms = int((time.monotonic() - start) * 1000)
-                provider_error = self._map_error(exc, duration_ms=duration_ms)
+                category = self._extract_threshold_error_category(exc)
+                if (
+                    category
+                    and category.upper() not in downgraded_categories
+                    and decision.method == "generate_content"
+                ):
+                    downgraded = self._downgrade_safety_config(
+                        request_kwargs.get("config"), category
+                    )
+                    if downgraded is not None:
+                        downgraded_categories.add(category.upper())
+                        request_kwargs["config"] = downgraded
+                        payload_dict["config"] = downgraded
+                        request_meta["config"] = (
+                            downgraded.model_dump(mode="json")
+                            if hasattr(downgraded, "model_dump")
+                            else downgraded
+                        )
+                        log.warning(
+                            "gemini.safety downgrade model=%s category=%s threshold=%s",
+                            decision.model,
+                            category,
+                            _SAFETY_FALLBACK_THRESHOLD,
+                        )
+                        continue
+                provider_error = self._map_error(
+                    exc,
+                    duration_ms=duration_ms,
+                    decision=decision,
+                )
                 log.warning(
-                    "gemini.generate error model=%s env=%s key_mask=%s corr_id=%s status=%s latency_ms=%s",
-                    self._model,
+                    "gemini.generate error model=%s method=%s version=%s env=%s key_mask=%s corr_id=%s status=%s latency_ms=%s",
+                    decision.model,
+                    decision.method,
+                    decision.api_version,
                     self._environment,
                     self._key_mask or "",
                     idempotency_key or "",
@@ -441,9 +605,44 @@ class GeminiGenerativeClient(BaseProviderClient):
                     raise provider_error
                 attempt += 1
                 log.warning(
-                    "Retrying Gemini request provider=%s model=%s attempt=%s/%s error=%s",
+                    "Retrying Gemini request provider=%s model=%s method=%s attempt=%s/%s error=%s",
                     self.provider_name,
-                    self._model,
+                    decision.model,
+                    decision.method,
+                    attempt + 1,
+                    self._config.request_retries + 1,
+                    provider_error,
+                )
+                await asyncio.sleep(delay)
+                delay *= self._config.retry_backoff
+                continue
+            except Exception as exc:  # pragma: no cover - network guard
+                duration_ms = int((time.monotonic() - start) * 1000)
+                provider_error = self._map_error(
+                    exc,
+                    duration_ms=duration_ms,
+                    decision=decision,
+                )
+                log.warning(
+                    "gemini.generate error model=%s method=%s version=%s env=%s key_mask=%s corr_id=%s status=%s latency_ms=%s",
+                    decision.model,
+                    decision.method,
+                    decision.api_version,
+                    self._environment,
+                    self._key_mask or "",
+                    idempotency_key or "",
+                    provider_error.status_code,
+                    duration_ms,
+                )
+                last_error = provider_error
+                if not provider_error.retryable or attempt == self._config.request_retries:
+                    raise provider_error
+                attempt += 1
+                log.warning(
+                    "Retrying Gemini request provider=%s model=%s method=%s attempt=%s/%s error=%s",
+                    self.provider_name,
+                    decision.model,
+                    decision.method,
                     attempt + 1,
                     self._config.request_retries + 1,
                     provider_error,
@@ -635,6 +834,8 @@ class GeminiTextClient(GeminiGenerativeClient):
             api_key=config.gemini_api_key,
             model=config.gemini_model_text,
             provider_name="gemini-text",
+            task="text",
+            api_version="v1",
         )
 
 
@@ -647,6 +848,8 @@ class GeminiImageClient(GeminiGenerativeClient):
             api_key=config.gemini_api_key,
             model=config.gemini_model_image,
             provider_name="gemini-image",
+            task="image",
+            api_version="v1beta",
         )
 
     def _build_images_config(
@@ -689,47 +892,52 @@ class GeminiImageClient(GeminiGenerativeClient):
         if isinstance(labels, dict):
             kwargs["labels"] = {str(k): str(v) for k, v in labels.items()}
 
+        references: List[_genai_types.Image] = []
+        raw_reference = settings.get("reference_inline_data")
+        for entry in _ensure_iterable(raw_reference):
+            if not isinstance(entry, dict):
+                continue
+            meta = _normalise_inline_blob(entry)
+            if not meta or not meta.get("base64"):
+                continue
+            try:
+                data = base64.b64decode(meta["base64"], validate=False)
+            except (ValueError, binascii.Error):  # pragma: no cover - defensive decode
+                continue
+            mime = meta.get("mime") or entry.get("mime_type") or "image/jpeg"
+            try:
+                references.append(
+                    _genai_types.Image(image_bytes=data, mime_type=mime)
+                )
+            except Exception:  # pragma: no cover - defensive instantiation
+                log.debug("Failed to encode reference image", exc_info=True)
+        if references:
+            kwargs["reference_images"] = references
+
         return _genai_types.GenerateImagesConfig(**kwargs)
 
     def _prepare_generate_call(
         self,
         *,
+        decision: "RouteDecision",
         prompt: str,
         settings: Dict[str, Any],
         payload: Dict[str, Any],
     ) -> Tuple[Any, Dict[str, Any], Dict[str, Any]]:
-        reference = settings.get("reference_inline_data")
-        force_content = bool(payload.get("contents"))
-        if reference or force_content:
-            contents = payload.get("contents")
-            if contents is None:
-                contents = self._build_contents(prompt=prompt, settings=settings)
-            config = payload.get("config")
-            if not isinstance(config, _genai_types.GenerateContentConfig):
-                config = self._build_generation_config(settings)
-            request_kwargs = {
-                "model": self._model,
-                "contents": contents,
-                "config": config,
-            }
-            request_meta = {
-                "mode": "generate_content",
-                "config": config.model_dump(mode="json") if hasattr(config, "model_dump") else config,
-            }
-            return self._client.models.generate_content, request_kwargs, request_meta
-
         config = payload.get("config")
         images_config = self._build_images_config(settings, existing=config)
         request_kwargs = {
-            "model": self._model,
+            "model": decision.model,
             "prompt": prompt,
             "config": images_config,
         }
         request_meta = {
             "mode": "generate_images",
+            "api_version": decision.api_version,
             "config": images_config.model_dump(mode="json") if hasattr(images_config, "model_dump") else images_config,
         }
-        return self._client.models.generate_images, request_kwargs, request_meta
+        generator = getattr(decision.client.models, decision.method)
+        return generator, request_kwargs, request_meta
 
     def _extract_result(
         self, payload: Dict[str, Any]

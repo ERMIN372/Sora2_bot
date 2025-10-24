@@ -12,11 +12,12 @@ from fractions import Fraction
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 from uuid import uuid4
 
-from google.genai import errors as _genai_errors, types as _genai_types
+from google.genai import Client as _GenAIClient, errors as _genai_errors, types as _genai_types
 
 from config import Config
 from services.gemini_client import get_gemini_client
 from services.gemini_key import ensure_gemini_key_logged
+from services.gemini_router import GeminiRoutingError, get_gemini_router
 
 from .base import (
     BaseProviderClient,
@@ -434,7 +435,8 @@ class VeoVideoClient(BaseProviderClient):
             api_key=config.gemini_api_key,
             provider_name="veo",
         )
-        self._client = get_gemini_client(config)
+        self._client = get_gemini_client(config, api_version="v1beta")
+        self._router = get_gemini_router(config)
         self._operations: Dict[str, _genai_types.GenerateVideosOperation] = {}
         self._requests: Dict[str, Dict[str, Any]] = {}
         self._lock = asyncio.Lock()
@@ -462,22 +464,40 @@ class VeoVideoClient(BaseProviderClient):
 
         request_settings = dict(settings or {})
         model_name = request_settings.get("model") or self._config.gemini_model_video
-        source = self._build_source(prompt, request_settings)
+        try:
+            decision = self._router.route(
+                task="video",
+                model=model_name,
+                prompt=prompt,
+                assets=request_settings,
+            )
+        except GeminiRoutingError as exc:
+            raise ProviderAPIError(
+                provider=self.provider_name,
+                status_code=400,
+                message=str(exc),
+                error_type="routing",
+                retryable=False,
+            ) from exc
+
+        source = self._build_source(decision.prompt, request_settings)
         config_obj, config_meta = self._build_config(request_settings)
 
         start = time.perf_counter()
         corr_label = idempotency_key or ""
         log.info(
-            "gemini.veo.submit start corr_id=%s env=%s key_mask=%s model=%s",
+            "gemini.veo.submit start corr_id=%s env=%s key_mask=%s model=%s version=%s",
             corr_label or "n/a",
             self._environment,
             self._key_mask or "",
-            model_name,
+            decision.model,
+            decision.api_version,
         )
         try:
             operation = await asyncio.to_thread(
                 self._generate_videos_operation,
-                model_name,
+                decision.client,
+                decision.model,
                 source,
                 config_obj,
             )
@@ -495,15 +515,20 @@ class VeoVideoClient(BaseProviderClient):
         async with self._lock:
             self._operations[job_id] = operation
             self._requests[job_id] = {
-                "model": model_name,
+                "model": decision.model,
                 "config": config_meta,
                 "key_mask": self._key_mask,
+                "api_version": decision.api_version,
             }
+            if decision.rewrite_notes:
+                self._requests[job_id]["prompt_notes"] = decision.rewrite_notes
         log.info(
-            "gemini.veo.submit done corr_id=%s env=%s key_mask=%s latency_ms=%s",
+            "gemini.veo.submit done corr_id=%s env=%s key_mask=%s model=%s version=%s latency_ms=%s",
             corr_label or job_id,
             self._environment,
             self._key_mask or "",
+            decision.model,
+            decision.api_version,
             duration_ms,
         )
         return ProviderJobSubmission(
@@ -705,11 +730,12 @@ class VeoVideoClient(BaseProviderClient):
 
     def _generate_videos_operation(
         self,
+        client: _GenAIClient,
         model: str,
         source: Optional[_genai_types.GenerateVideosSource],
         config: Optional[_genai_types.GenerateVideosConfig],
     ) -> _genai_types.GenerateVideosOperation:
-        models = self._client.models
+        models = client.models
         if hasattr(models, "generate_videos"):
             return models.generate_videos(model=model, source=source, config=config)
         return models._generate_videos(model=model, source=source, config=config)
