@@ -200,7 +200,11 @@ def render_error_json(summary: Optional[Any]) -> Optional[str]:
 
 
 def run_preflight(prompt: str) -> PreflightResult:
-    """Allow every prompt without additional moderation."""
+    """Allow every prompt without modification or moderation."""
 
-    text = (prompt or "").strip()
+    # Preserve the prompt exactly as provided so that no preflight sanitisation
+    # logic can accidentally strip or change the user's text. This keeps the
+    # preflight stage effectively disabled while still returning a consistent
+    # ``PreflightResult`` structure for the rest of the pipeline.
+    text = prompt if isinstance(prompt, str) else str(prompt or "")
     return PreflightResult(blocked=False, sanitized_prompt=text)
