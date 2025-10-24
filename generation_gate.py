@@ -69,6 +69,27 @@ def _stable_hash(payload: Any) -> str:
     return sha256(serialised.encode("utf-8")).hexdigest()
 
 
+def compute_generation_idempotency_key(
+    *,
+    user_id: int,
+    prompt: str,
+    size: Optional[str],
+    model: Optional[str],
+    content_type: str = "video",
+) -> str:
+    """Return deterministic idempotency key for generation request."""
+
+    normalized_prompt = normalize_prompt(prompt)
+    material = {
+        "user_id": int(user_id),
+        "prompt": normalized_prompt,
+        "size": (size or "").strip(),
+        "model": (model or "").strip(),
+        "content_type": (content_type or "video").strip() or "video",
+    }
+    return _stable_hash(material)
+
+
 @dataclass(slots=True)
 class _StatusLock:
     idempotency_key: str
@@ -142,14 +163,17 @@ class GenerationRequestGate:
             now = time.time()
             state.cleanup_recent(now, self._duplicate_ttl)
             normalized_prompt_hash = sha256(normalized_prompt.encode("utf-8")).hexdigest()
+            base_idempotency_key = compute_generation_idempotency_key(
+                user_id=user_id,
+                prompt=normalized_prompt,
+                size=str(options.get("size")) if isinstance(options, dict) else None,
+                model=model,
+                content_type=str(options.get("content_type"))
+                if isinstance(options, dict)
+                else "video",
+            )
             options_hash = _stable_hash(options)
-            idempotency_payload = {
-                "model": model,
-                "prompt": normalized_prompt,
-                "options": options,
-                "user_id": user_id,
-            }
-            idempotency_key = _stable_hash(idempotency_payload)
+            idempotency_key = base_idempotency_key
 
             decision = GateDecision.ALLOW
             dedup_result = "new"

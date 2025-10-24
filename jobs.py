@@ -17,7 +17,7 @@ from db import Database, ErrorLogRecord, GenerationJobRecord
 from moderation import classify_safety_response, policy_message, render_error_json
 from observability import increment_metric, log_event
 from services.gemini_key import current_key_mask, ensure_gemini_key_logged
-from generation_gate import GenerationRequestGate
+from generation_gate import GenerationRequestGate, compute_generation_idempotency_key
 from providers import BaseProviderClient, ProviderAPIError, ProviderJobStatus, ProviderJobSubmission
 
 log = logging.getLogger(__name__)
@@ -566,6 +566,24 @@ class JobQueue:
         if image_file_id:
             request_settings.setdefault("image_file_id", image_file_id)
         effective_prompt = sanitized_prompt or prompt
+        content_type_value = content_type or "video"
+        stable_idempotency_key = idempotency_key or compute_generation_idempotency_key(
+            user_id=user_id,
+            prompt=effective_prompt,
+            size=size,
+            model=model_key,
+            content_type=content_type_value,
+        )
+        existing_job = await self._db.find_job_by_idempotency_key(stable_idempotency_key)
+        if existing_job is not None:
+            log.info(
+                "Duplicate submission suppressed corr_id=%s user_id=%s existing_job_id=%s status=%s",
+                corr_id,
+                user_id,
+                existing_job.id,
+                existing_job.status,
+            )
+            return existing_job
         prompt_hash = hashlib.sha256(effective_prompt.encode("utf-8")).hexdigest()
         log.debug(
             "Submitting provider job corr_id=%s user_id=%s provider=%s model=%s settings=%s prompt_hash=%s",
@@ -581,7 +599,7 @@ class JobQueue:
             settings=request_settings or None,
             preset=preset,
             payload=payload,
-            idempotency_key=idempotency_key or corr_id,
+            idempotency_key=stable_idempotency_key,
         )
         job_id = submission.job_id
         now = datetime.utcnow()
@@ -600,7 +618,8 @@ class JobQueue:
             cost_credits=self._config.generation_cost_credits,
             username=username,
             corr_id=corr_id,
-            content_type=content_type or "video",
+            content_type=content_type_value,
+            idempotency_key=stable_idempotency_key,
         )
         await self._db.create_job(record)
         await self.enqueue(

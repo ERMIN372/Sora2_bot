@@ -36,6 +36,7 @@ class GenerationJobRecord:
     cost_credits: Optional[int] = None
     username: Optional[str] = None
     corr_id: Optional[str] = None
+    idempotency_key: Optional[str] = None
     content_type: str = "video"
     status_message_id: Optional[int] = None
     status_message_index: int = 0
@@ -64,12 +65,23 @@ class FakeDB:
         self.update_calls: list[tuple] = []
         self.added_credits: list[int] = []
         self.logged_errors: list[Any] = []
+        self.idempotency_index: Dict[str, str] = {}
 
     async def init(self) -> None:  # pragma: no cover - not used
         return None
 
     async def create_job(self, job: GenerationJobRecord) -> None:  # pragma: no cover
         self.jobs[job.id] = job
+        if job.idempotency_key:
+            self.idempotency_index[job.idempotency_key] = job.id
+
+    async def find_job_by_idempotency_key(
+        self, key: str
+    ) -> Optional[GenerationJobRecord]:  # pragma: no cover - tests override
+        job_id = self.idempotency_index.get(key)
+        if job_id is None:
+            return None
+        return self.jobs.get(job_id)
 
     async def update_job(
         self,
@@ -178,7 +190,9 @@ def fake_db(config: Config) -> FakeDB:
         username="tester",
         corr_id="corr-1",
     )
+    job.idempotency_key = "stub-idemp"
     db.jobs[job.id] = job
+    db.idempotency_index[job.idempotency_key] = job.id
     return db
 
 

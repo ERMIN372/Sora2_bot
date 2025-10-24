@@ -42,6 +42,7 @@ class GenerationJobRecord:
     cost_credits: Optional[int] = None
     username: Optional[str] = None
     corr_id: Optional[str] = None
+    idempotency_key: Optional[str] = None
     content_type: str = "video"
     status_message_id: Optional[int] = None
     status_message_index: int = 0
@@ -130,6 +131,7 @@ def _job_from_dict(data: Dict[str, Any]) -> GenerationJobRecord:
         cost_credits = int(cost_raw) if cost_raw not in (None, "") else None
     except (TypeError, ValueError):
         cost_credits = None
+    idempotency_key = data.get("idempotency_key") or None
     status_message_id_raw = data.get("status_message_id")
     try:
         status_message_id = (
@@ -168,6 +170,7 @@ def _job_from_dict(data: Dict[str, Any]) -> GenerationJobRecord:
         cost_credits=cost_credits,
         username=str(data.get("username", "")) or None,
         corr_id=str(data.get("corr_id", "")) or None,
+        idempotency_key=idempotency_key,
         content_type=content_type or "video",
         status_message_id=status_message_id,
         status_message_index=status_message_index,
@@ -462,7 +465,18 @@ class Database:
             job.corr_id,
             username=job.username,
             content_type=job.content_type,
+            idempotency_key=job.idempotency_key or "",
         )
+
+    async def find_job_by_idempotency_key(
+        self, idempotency_key: str
+    ) -> Optional[GenerationJobRecord]:
+        if not idempotency_key:
+            return None
+        record = await gsheets_db.get_job_by_idempotency_key(idempotency_key)
+        if not record:
+            return None
+        return _job_from_dict(record)
 
     async def update_job(
         self,
