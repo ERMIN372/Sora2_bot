@@ -15,7 +15,6 @@ from uuid import uuid4
 from google.genai import errors as _genai_errors, types as _genai_types
 
 from config import Config
-from services import gemini_safety
 from services.gemini_client import get_gemini_client
 from services.gemini_key import ensure_gemini_key_logged
 
@@ -448,20 +447,6 @@ class VeoVideoClient(BaseProviderClient):
         )
         self._schema_logged = False
         self._asset_recovery_attempted: Set[str] = set()
-        self._force_none_enabled = bool(getattr(config, "gemini_safety_force_none", False))
-        order, thresholds, configured = gemini_safety.current_configuration()
-        if not configured:
-            order, thresholds = gemini_safety.initialise(
-                force_none=self._force_none_enabled,
-                settings=[],
-                key_mask=self._key_mask or "",
-                logger=log,
-            )
-        self._safety_order: List[str] = list(order)
-        self._safety_thresholds: Dict[str, str] = dict(thresholds)
-        self._safety_settings = gemini_safety.build_safety_settings(
-            self._safety_order, self._safety_thresholds
-        )
 
     async def enqueue_job(
         self,
@@ -489,65 +474,21 @@ class VeoVideoClient(BaseProviderClient):
             self._key_mask or "",
             model_name,
         )
-        fallback_override: Optional[List[_genai_types.SafetySetting]] = None
-        fallback_attempted = False
-        while True:
-            safety_settings = list(fallback_override or self._safety_settings)
-            fallback_override = None
-            try:
-                operation = await asyncio.to_thread(
-                    self._generate_videos_operation,
-                    model_name,
-                    source,
-                    config_obj,
-                    safety_settings,
-                )
-                break
-            except _genai_errors.APIError as exc:  # pragma: no cover - network guard
-                conflict_category: Optional[str] = None
-                if not fallback_attempted:
-                    conflict_category = gemini_safety.extract_conflict_category(exc)
-                if conflict_category:
-                    override_map = gemini_safety.build_override(
-                        self._safety_thresholds,
-                        conflict_category,
-                        threshold=gemini_safety.FALLBACK_THRESHOLD,
-                    )
-                    fallback_override = gemini_safety.build_safety_settings(
-                        self._safety_order,
-                        override_map,
-                    )
-                    fallback_attempted = True
-                    label = (
-                        conflict_category
-                        if conflict_category in self._safety_thresholds
-                        else None
-                    )
-                    gemini_safety.record_fallback(
-                        label,
-                        key_mask=self._key_mask or "",
-                        provider=self.provider_name,
-                        logger=log,
-                    )
-                    log.debug(
-                        "Retrying Veo request with fallback safety category=%s", conflict_category
-                    )
-                    continue
-                raise ProviderAPIError(
-                    provider=self.provider_name,
-                    status_code=getattr(exc, "code", 500) or 500,
-                    message=str(exc),
-                    error_type=getattr(exc, "status", None),
-                    provider_message=str(getattr(exc, "response", exc)),
-                ) from exc
-            except Exception as exc:  # pragma: no cover - network guard
-                raise ProviderAPIError(
-                    provider=self.provider_name,
-                    status_code=500,
-                    message=str(exc),
-                    error_type="error",
-                    provider_message=str(exc),
-                ) from exc
+        try:
+            operation = await asyncio.to_thread(
+                self._generate_videos_operation,
+                model_name,
+                source,
+                config_obj,
+            )
+        except _genai_errors.APIError as exc:  # pragma: no cover - network guard
+            raise ProviderAPIError(
+                provider=self.provider_name,
+                status_code=getattr(exc, "code", 500) or 500,
+                message=str(exc),
+                error_type=getattr(exc, "status", None),
+                provider_message=str(getattr(exc, "response", exc)),
+            ) from exc
         duration_ms = int((time.perf_counter() - start) * 1000)
         job_id = operation.name or str(uuid4())
         data = operation.model_dump(exclude_none=True)
@@ -767,15 +708,11 @@ class VeoVideoClient(BaseProviderClient):
         model: str,
         source: Optional[_genai_types.GenerateVideosSource],
         config: Optional[_genai_types.GenerateVideosConfig],
-        safety_settings: Optional[List[_genai_types.SafetySetting]] = None,
     ) -> _genai_types.GenerateVideosOperation:
         models = self._client.models
-        kwargs = {"model": model, "source": source, "config": config}
-        if safety_settings is not None:
-            kwargs["safety_settings"] = list(safety_settings)
         if hasattr(models, "generate_videos"):
-            return models.generate_videos(**kwargs)
-        return models._generate_videos(**kwargs)
+            return models.generate_videos(model=model, source=source, config=config)
+        return models._generate_videos(model=model, source=source, config=config)
 
     async def _get_operation(self, job_id: str) -> _genai_types.GenerateVideosOperation:
         async with self._lock:
