@@ -4,7 +4,8 @@ from __future__ import annotations
 import logging
 import re
 import threading
-from typing import Dict, List, Mapping, Optional, Sequence, Tuple
+import time
+from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 from google.genai import types as _genai_types
 
@@ -18,13 +19,6 @@ _FORCE_CATEGORIES: Tuple[str, ...] = (
     "HARM_CATEGORY_CIVIC_INTEGRITY",
     "HARM_CATEGORY_VIOLENCE",
 )
-_DEFAULT_CATEGORIES: Tuple[str, ...] = (
-    "HARM_CATEGORY_HATE_SPEECH",
-    "HARM_CATEGORY_HARASSMENT",
-    "HARM_CATEGORY_DANGEROUS_CONTENT",
-    "HARM_CATEGORY_SEXUALLY_EXPLICIT",
-    "HARM_CATEGORY_CIVIC_INTEGRITY",
-)
 
 FORCE_THRESHOLD = "BLOCK_NONE"
 DEFAULT_THRESHOLD = "BLOCK_MEDIUM_AND_ABOVE"
@@ -36,7 +30,7 @@ _STATE: Dict[str, object] = {
     "force_none": False,
     "thresholds": {},
     "order": (),
-    "last_fallback": None,
+    "last_fallback": {},
     "key_mask": "",
 }
 
@@ -77,11 +71,17 @@ def _settings_to_pairs(
 
 
 def _ensure_thresholds(
-    categories: Sequence[str],
+    categories: Iterable[str],
     default_threshold: str,
 ) -> Tuple[List[str], Dict[str, str]]:
-    order = [category for category in categories if category]
-    thresholds = {category: default_threshold for category in order}
+    order: List[str] = []
+    thresholds: Dict[str, str] = {}
+    for category in categories:
+        if not category:
+            continue
+        if category not in order:
+            order.append(category)
+        thresholds[category] = default_threshold
     return order, thresholds
 
 
@@ -94,15 +94,14 @@ def initialise(
 ) -> Tuple[List[str], Dict[str, str]]:
     """Prepare thresholds and update shared state."""
 
-    if force_none:
-        order, thresholds = _ensure_thresholds(_FORCE_CATEGORIES, FORCE_THRESHOLD)
-    else:
+    default_threshold = FORCE_THRESHOLD if force_none else DEFAULT_THRESHOLD
+    order, thresholds = _ensure_thresholds(_FORCE_CATEGORIES, default_threshold)
+    if not force_none:
         pairs = _settings_to_pairs(settings, default_threshold=DEFAULT_THRESHOLD)
-        if not pairs:
-            order, thresholds = _ensure_thresholds(_DEFAULT_CATEGORIES, DEFAULT_THRESHOLD)
-        else:
-            order = [category for category, _ in pairs]
-            thresholds = {category: threshold for category, threshold in pairs}
+        for category, threshold in pairs:
+            if category not in order:
+                order.append(category)
+            thresholds[category] = threshold
 
     _configure_state(force_none, order, thresholds, key_mask, logger)
     return order, thresholds
@@ -144,18 +143,28 @@ def _configure_state(
 
 
 def build_safety_settings(
-    order: Sequence[str],
-    thresholds: Mapping[str, str],
+    *,
+    force_none: bool = True,
+    thresholds: Optional[Mapping[str, str]] = None,
+    order: Optional[Sequence[str]] = None,
 ) -> List[_genai_types.SafetySetting]:
-    if _SAFETY_SETTING_CLS is None:
-        return [
-            {"category": category, "threshold": thresholds.get(category, FORCE_THRESHOLD)}
-            for category in order
-        ]
-    return [
-        _SAFETY_SETTING_CLS(category=category, threshold=thresholds.get(category, FORCE_THRESHOLD))
-        for category in order
-    ]
+    """Build a list of :class:`SafetySetting` objects for Gemini models."""
+
+    categories = list(order or _FORCE_CATEGORIES)
+    if thresholds is None:
+        default_threshold = FORCE_THRESHOLD if force_none else DEFAULT_THRESHOLD
+        _, thresholds = _ensure_thresholds(categories, default_threshold)
+    default_threshold = FORCE_THRESHOLD if force_none else DEFAULT_THRESHOLD
+    payload: List[_genai_types.SafetySetting] = []
+    for category in categories:
+        threshold = thresholds.get(category, default_threshold) if thresholds else default_threshold
+        if _SAFETY_SETTING_CLS is None:
+            payload.append({"category": category, "threshold": threshold})
+        else:
+            payload.append(
+                _SAFETY_SETTING_CLS(category=category, threshold=threshold)
+            )
+    return payload
 
 
 def build_override(
@@ -165,7 +174,7 @@ def build_override(
     threshold: str,
 ) -> Dict[str, str]:
     updated = {key: value for key, value in base_thresholds.items()}
-    if category in updated:
+    if category:
         updated[category] = threshold
     return updated
 
@@ -185,8 +194,11 @@ def record_fallback(
         provider,
         key_mask or "",
     )
+    timestamp = time.time()
     with _STATE_LOCK:
-        _STATE["last_fallback"] = label
+        current: Dict[str, float] = dict(_STATE.get("last_fallback", {}))  # type: ignore[arg-type]
+        current[label] = timestamp
+        _STATE["last_fallback"] = current
 
 
 def extract_conflict_category(exc: Exception) -> Optional[str]:
@@ -214,19 +226,20 @@ def health_snapshot() -> Dict[str, object]:
     with _STATE_LOCK:
         order = tuple(_STATE.get("order", ()))
         thresholds: Mapping[str, str] = _STATE.get("thresholds", {})  # type: ignore[assignment]
-        last_fallback = _STATE.get("last_fallback")
+        last_fallback = dict(_STATE.get("last_fallback", {}))  # type: ignore[arg-type]
     return {
         "thresholds": [(category, thresholds.get(category, "n/a")) for category in order],
         "last_fallback": last_fallback,
     }
 
 
-def current_configuration() -> Tuple[List[str], Dict[str, str], bool]:
+def current_configuration() -> Tuple[List[str], Dict[str, str], bool, bool]:
     with _STATE_LOCK:
         order = list(_STATE.get("order", ()))
         thresholds: Dict[str, str] = dict(_STATE.get("thresholds", {}))  # type: ignore[arg-type]
         configured = bool(_STATE.get("configured"))
-    return order, thresholds, configured
+        force_none = bool(_STATE.get("force_none"))
+    return order, thresholds, configured, force_none
 
 
 __all__ = [
