@@ -144,7 +144,6 @@ class Config:
     database_path: str = "./bot.db"
     jobs_concurrency: int = 2
     max_jobs_per_user: int = 3
-    gemini_safety_force_none: bool = False
     request_timeout: float = 20.0
     request_connect_timeout: float = 10.0
     request_read_timeout: float = 20.0
@@ -459,9 +458,6 @@ def load_config() -> Config:
         yookassa_shop_id=os.getenv("YOOKASSA_SHOP_ID"),
         yookassa_secret_key=os.getenv("YOOKASSA_SECRET_KEY"),
         yookassa_test_mode=_get_env_bool("YOOKASSA_TEST_MODE", Config.yookassa_test_mode),
-        gemini_safety_force_none=_get_env_bool(
-            "GEMINI_SAFETY_FORCE_NONE", Config.gemini_safety_force_none
-        ),
         public_base_url=os.getenv("PUBLIC_BASE_URL", Config.public_base_url),
         yookassa_return_path=os.getenv("YOOKASSA_RETURN_PATH", Config.yookassa_return_path),
         yookassa_webhook_path=os.getenv("YOOKASSA_WEBHOOK_PATH", Config.yookassa_webhook_path),
