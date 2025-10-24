@@ -51,6 +51,7 @@ Veo и изображений через Google Gemini. Он управляет 
 | `TELEGRAM_SECRET_TOKEN` | Секрет, проверяемый в заголовке `X-Telegram-Bot-Api-Secret-Token`. |
 | `HOST` | Адрес, на котором Uvicorn слушает локальные подключения (обычно `0.0.0.0`). |
 | `PORT` | Порт HTTP-сервера FastAPI/Uvicorn. |
+| `GEMINI_API_VERSION` | Версия API Gemini, используемая SDK (по умолчанию `v1`). |
 | `GEMINI_MODEL_TEXT` | Модель Gemini для текстовых ответов (по умолчанию `gemini-2.0-flash`). |
 | `GEMINI_MODEL_IMAGE` | Модель Gemini для изображений (по умолчанию `gemini-2.5-flash-image`). |
 | `GEMINI_MODEL_VIDEO` | Модель Gemini (Veo) для видеогенерации (по умолчанию `veo-3.0-generate-001`). |

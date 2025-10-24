@@ -14,7 +14,7 @@ from services.gemini_key import ensure_gemini_key_logged
 
 log = logging.getLogger(__name__)
 
-_CLIENT_CACHE: Dict[Tuple[str, int], _GenAIClient] = {}
+_CLIENT_CACHE: Dict[Tuple[str, str, Tuple[int, int, int]], _GenAIClient] = {}
 _CACHE_LOCK = threading.Lock()
 
 
@@ -34,7 +34,8 @@ def _build_http_options(config: Config) -> _HttpOptions:
     if candidates:
         timeout_seconds = max(candidates)
     timeout_ms = int(timeout_seconds * 1000) if timeout_seconds else None
-    return _HttpOptions(timeout=timeout_ms)
+    api_version = (config.gemini_api_version or "").strip()
+    return _HttpOptions(timeout=timeout_ms, api_version=api_version or None)
 
 
 def get_gemini_client(config: Config) -> _GenAIClient:
@@ -51,6 +52,7 @@ def get_gemini_client(config: Config) -> _GenAIClient:
     )
     cache_key = (
         api_key,
+        (config.gemini_api_version or "v1").strip() or "v1",
         (
             int((config.request_timeout or 0) * 1000),
             int((config.request_read_timeout or 0) * 1000),
