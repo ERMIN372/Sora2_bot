@@ -111,6 +111,21 @@ except ModuleNotFoundError:  # pragma: no cover - test environment shim
         def __init__(self, name: str = "", done: bool = False, error=None, result=None, response=None):
             super().__init__(name=name, done=done, error=error, result=result, response=response)
 
+    class HarmCategory:
+        HARM_CATEGORY_HARASSMENT = "HARASSMENT"
+        HARM_CATEGORY_HATE_SPEECH = "HATE_SPEECH"
+        HARM_CATEGORY_SEXUALLY_EXPLICIT = "SEXUALLY_EXPLICIT"
+        HARM_CATEGORY_DANGEROUS_CONTENT = "DANGEROUS_CONTENT"
+        HARM_CATEGORY_CIVIC_INTEGRITY = "CIVIC_INTEGRITY"
+
+    class HarmBlockThreshold:
+        BLOCK_NONE = "BLOCK_NONE"
+        BLOCK_ONLY_HIGH = "BLOCK_ONLY_HIGH"
+
+    class SafetySetting(_BaseModel):
+        def __init__(self, category=None, threshold=None):
+            super().__init__(category=category, threshold=threshold)
+
     types_mod = types.ModuleType("google.genai.types")
     types_mod.Image = Image
     types_mod.Video = Video
@@ -119,6 +134,9 @@ except ModuleNotFoundError:  # pragma: no cover - test environment shim
     types_mod.GenerateVideosSource = GenerateVideosSource
     types_mod.GenerateVideosConfig = GenerateVideosConfig
     types_mod.GenerateVideosOperation = GenerateVideosOperation
+    types_mod.HarmCategory = HarmCategory
+    types_mod.HarmBlockThreshold = HarmBlockThreshold
+    types_mod.SafetySetting = SafetySetting
     sys.modules["google.genai.types"] = types_mod
 
     oauth2_mod = types.ModuleType("google.oauth2")

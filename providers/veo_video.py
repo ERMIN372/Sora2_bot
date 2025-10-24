@@ -519,16 +519,19 @@ class VeoVideoClient(BaseProviderClient):
                 "config": config_meta,
                 "key_mask": self._key_mask,
                 "api_version": decision.api_version,
+                "corr_id": corr_label or job_id,
             }
             if decision.rewrite_notes:
                 self._requests[job_id]["prompt_notes"] = decision.rewrite_notes
         log.info(
-            "gemini.veo.submit done corr_id=%s env=%s key_mask=%s model=%s version=%s latency_ms=%s",
+            "gemini.veo.submit done corr_id=%s job_id=%s env=%s key_mask=%s model=%s version=%s status=%s latency_ms=%s",
             corr_label or job_id,
+            job_id,
             self._environment,
             self._key_mask or "",
             decision.model,
             decision.api_version,
+            200,
             duration_ms,
         )
         return ProviderJobSubmission(
@@ -541,11 +544,19 @@ class VeoVideoClient(BaseProviderClient):
     async def get_job_status(self, job_id: str) -> ProviderJobStatus:
         operation = await self._get_operation(job_id)
         start = time.perf_counter()
+        async with self._lock:
+            request_info = self._requests.get(job_id, {}).copy()
+        corr_id = request_info.get("corr_id") or job_id
+        model_name = request_info.get("model") or ""
+        api_version = request_info.get("api_version") or ""
         log.info(
-            "gemini.veo.poll start job_id=%s env=%s key_mask=%s",
+            "gemini.veo.poll start corr_id=%s job_id=%s env=%s key_mask=%s model=%s version=%s",
+            corr_id,
             job_id,
             self._environment,
             self._key_mask or "",
+            model_name,
+            api_version,
         )
         try:
             refreshed = await asyncio.to_thread(self._client.operations.get, operation)
@@ -559,11 +570,15 @@ class VeoVideoClient(BaseProviderClient):
             ) from exc
         duration_ms = int((time.perf_counter() - start) * 1000)
         log.info(
-            "gemini.veo.poll done job_id=%s env=%s key_mask=%s status=%s latency_ms=%s",
+            "gemini.veo.poll done corr_id=%s job_id=%s env=%s key_mask=%s model=%s version=%s status=%s status_code=%s latency_ms=%s",
+            corr_id,
             job_id,
             self._environment,
             self._key_mask or "",
+            model_name,
+            api_version,
             getattr(refreshed, "done", False),
+            200,
             duration_ms,
         )
 
@@ -736,9 +751,15 @@ class VeoVideoClient(BaseProviderClient):
         config: Optional[_genai_types.GenerateVideosConfig],
     ) -> _genai_types.GenerateVideosOperation:
         models = client.models
+        prompt_text = None
+        if source is not None:
+            prompt_text = getattr(source, "prompt", None) or None
+        if prompt_text is None:
+            raise RuntimeError("Prompt is required for video generation")
+        kwargs = {"model": model, "prompt": prompt_text, "config": config}
         if hasattr(models, "generate_videos"):
-            return models.generate_videos(model=model, source=source, config=config)
-        return models._generate_videos(model=model, source=source, config=config)
+            return models.generate_videos(**{k: v for k, v in kwargs.items() if v is not None})
+        return models._generate_videos(**{k: v for k, v in kwargs.items() if v is not None})
 
     async def _get_operation(self, job_id: str) -> _genai_types.GenerateVideosOperation:
         async with self._lock:
