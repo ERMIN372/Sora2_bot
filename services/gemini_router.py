@@ -22,7 +22,7 @@ _TASK_METHOD: Mapping[str, str] = {
 
 _TASK_VERSION: Mapping[str, str] = {
     "text": "v1",
-    "image": "v1beta",
+    "image": "v1",
     "video": "v1beta",
 }
 

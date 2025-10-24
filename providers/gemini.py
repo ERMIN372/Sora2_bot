@@ -864,7 +864,7 @@ class GeminiImageClient(GeminiGenerativeClient):
             model=config.gemini_model_image,
             provider_name="gemini-image",
             task="image",
-            api_version="v1beta",
+            api_version="v1",
         )
 
     async def enqueue_job(
@@ -1181,7 +1181,7 @@ class GeminiImageClient(GeminiGenerativeClient):
             kwargs = {}
 
         allowed_fields = set(_genai_types.GenerateImagesConfig.model_fields.keys())
-        skip_fields = {"http_options"}
+        skip_fields = {"http_options", "safety_settings"}
         for raw_key, value in settings.items():
             if value is None:
                 continue

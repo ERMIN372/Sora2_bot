@@ -1,5 +1,4 @@
 import asyncio
-import io
 import logging
 import math
 import mimetypes
@@ -11,7 +10,6 @@ from typing import Literal, Optional
 
 import aiohttp
 from aiogram import Bot
-from aiogram.types import InputFile
 from aiogram.utils import exceptions as aiogram_exceptions
 
 BadRequest = aiogram_exceptions.BadRequest
@@ -28,6 +26,7 @@ CantTalkWithBot = getattr(aiogram_exceptions, "CantTalkWithBot", TelegramAPIErro
 from config import Config
 from db import ArchiveLogRecord, Database
 from observability import log_event
+from telegram_files import BufferedInputFile
 
 log = logging.getLogger(__name__)
 
@@ -353,7 +352,7 @@ class ArchivePublisher:
             )
 
         data, filename = await self._prepare_input(payload)
-        input_file = InputFile(data, filename=filename)
+        input_file = BufferedInputFile(data, filename=filename, mime_type=payload.mime_type)
         if payload.content_type == "video":
             log.debug(
                 "Sending archive video corr_id=%s filename=%s duration=%s", payload.corr_id, filename, payload.duration_seconds
@@ -374,13 +373,11 @@ class ArchivePublisher:
             parse_mode="MarkdownV2",
         )
 
-    async def _prepare_input(self, payload: ArchivePayload) -> tuple[io.BytesIO, str]:
+    async def _prepare_input(self, payload: ArchivePayload) -> tuple[bytes, str]:
         filename = payload.filename or self._build_filename(payload)
         if payload.file_bytes is not None:
             log.debug("Preparing archive payload from bytes corr_id=%s filename=%s", payload.corr_id, filename)
-            buffer = io.BytesIO(payload.file_bytes)
-            buffer.seek(0)
-            return buffer, filename
+            return bytes(payload.file_bytes), filename
         if payload.file_path:
             log.debug(
                 "Preparing archive payload from path corr_id=%s path=%s filename=%s",
@@ -389,7 +386,7 @@ class ArchivePublisher:
                 filename,
             )
             data = await asyncio.to_thread(self._read_file, payload.file_path)
-            return io.BytesIO(data), filename
+            return data, filename
         if payload.file_url:
             log.debug(
                 "Preparing archive payload from url corr_id=%s url=%s filename=%s",
@@ -398,7 +395,7 @@ class ArchivePublisher:
                 filename,
             )
             data = await self._download(payload.file_url)
-            return io.BytesIO(data), filename
+            return data, filename
         raise RuntimeError("Archive payload has no source data")
 
     async def _download(self, url: str) -> bytes:

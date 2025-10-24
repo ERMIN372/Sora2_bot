@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import threading
 import time
 from typing import Iterable, List
@@ -56,11 +57,110 @@ def _iter_models(response: object) -> Iterable[object]:
     return (response,)
 
 
+def _iter_response(obj: object) -> Iterable[object]:
+    if obj is None:
+        return ()
+    if hasattr(obj, "pages"):
+        try:
+            pages = getattr(obj, "pages")
+            for page in pages:
+                for entry in _iter_models(page):
+                    yield entry
+            return
+        except Exception:  # pragma: no cover - defensive against SDK quirks
+            log.debug("Failed to iterate Gemini model pages", exc_info=True)
+    if isinstance(obj, (list, tuple)):
+        yield from obj
+        return
+    if isinstance(obj, dict):
+        yield from _iter_models(obj)
+        return
+    if isinstance(obj, str):
+        yield obj
+        return
+    try:
+        iterator = iter(obj)  # type: ignore[arg-type]
+    except TypeError:
+        yield from _iter_models(obj)
+        return
+    for entry in iterator:
+        yield entry
+
+
 def _normalise_model_name(name: str) -> str:
     cleaned = (name or "").strip()
     if "/" in cleaned:
         cleaned = cleaned.rsplit("/", 1)[-1]
     return cleaned
+
+
+def _normalise_method_name(method: object) -> str:
+    if not isinstance(method, str):
+        method = str(method or "")
+    text = method.strip()
+    if not text:
+        return ""
+    if text.startswith("generate") and any(char.isupper() for char in text[8:]):
+        text = re.sub(r"([A-Z])", r"_\1", text).lower()
+    return text.replace("-", "_").strip().lower()
+
+
+def list_models_with_capability(
+    config: Config,
+    *,
+    capability: str,
+    api_version: str | None = None,
+) -> List[str]:
+    """Return model names that advertise *capability* in the catalog."""
+
+    capability_key = _normalise_method_name(capability)
+    if not capability_key:
+        return []
+
+    try:
+        client = get_gemini_client(config, api_version=api_version or "v1")
+    except Exception:
+        log.warning("Gemini client initialisation failed for capability=%s", capability_key, exc_info=True)
+        return []
+
+    try:
+        response = client.models.list()
+    except _genai_errors.APIError as exc:  # pragma: no cover - network guard
+        log.warning("Gemini models.list failed capability=%s: %s", capability_key, exc, exc_info=True)
+        return []
+    except Exception as exc:  # pragma: no cover - defensive
+        log.warning("Unexpected error listing Gemini models capability=%s", capability_key, exc_info=True)
+        return []
+
+    names: List[str] = []
+    seen: set[str] = set()
+
+    def _register(name: str) -> None:
+        if not name:
+            return
+        if name not in seen:
+            names.append(name)
+            seen.add(name)
+
+    for entry in _iter_response(response):
+        supported = getattr(entry, "supported_generation_methods", None)
+        if supported is None and isinstance(entry, dict):
+            supported = entry.get("supported_generation_methods")
+        method_names = {
+            _normalise_method_name(value)
+            for value in (supported or [])
+        }
+        if capability_key not in method_names:
+            continue
+        raw_name = _extract_model_name(entry)
+        if not raw_name:
+            continue
+        short = _normalise_model_name(raw_name)
+        if short:
+            _register(short)
+        _register(raw_name)
+
+    return names
 
 
 def list_veo_video_models(config: Config) -> List[str]:
@@ -76,59 +176,21 @@ def list_veo_video_models(config: Config) -> List[str]:
         if cached and (now - cached[0]) < _CACHE_TTL_SECONDS:
             return list(cached[1])
 
-    client = get_gemini_client(config, api_version="v1beta")
-    try:
-        response = client.models.list()
-    except _genai_errors.APIError as exc:  # pragma: no cover - network guard
-        log.warning("Failed to list Gemini models: %s", exc, exc_info=True)
-        return []
-    except Exception as exc:  # pragma: no cover - defensive
-        log.warning("Unexpected error listing Gemini models", exc_info=True)
-        return []
-
-    def _iter_response(obj: object) -> Iterable[object]:
-        if obj is None:
-            return ()
-        # The google-genai SDK returns a pager object that is already iterable.
-        if hasattr(obj, "pages"):
-            try:
-                pages = getattr(obj, "pages")
-                for page in pages:
-                    for entry in _iter_models(page):
-                        yield entry
-                return
-            except Exception:  # pragma: no cover - defensive against SDK quirks
-                log.debug("Failed to iterate Gemini model pages", exc_info=True)
-        if isinstance(obj, (list, tuple)):
-            yield from obj
-            return
-        if isinstance(obj, dict):
-            yield from _iter_models(obj)
-            return
-        if isinstance(obj, str):
-            yield obj
-            return
-        try:
-            iterator = iter(obj)  # type: ignore[arg-type]
-        except TypeError:
-            yield from _iter_models(obj)
-            return
-        for entry in iterator:
-            yield entry
-
-    names: List[str] = []
-    for item in _iter_response(response):
-        name = _extract_model_name(item)
-        if not name:
-            continue
+    names = list_models_with_capability(
+        config,
+        capability="generateVideos",
+        api_version="v1beta",
+    )
+    filtered: List[str] = []
+    for name in names:
         normalised = _normalise_model_name(name)
-        if _is_supported_model(normalised):
-            names.append(normalised)
+        if _is_supported_model(normalised) and normalised not in filtered:
+            filtered.append(normalised)
 
-    unique_sorted = sorted(dict.fromkeys(names))
+    unique_sorted = sorted(filtered)
     with _CACHE_LOCK:
         _CACHE[cache_key] = (now, unique_sorted)
     return list(unique_sorted)
 
 
-__all__ = ["list_veo_video_models"]
+__all__ = ["list_models_with_capability", "list_veo_video_models"]
