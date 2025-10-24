@@ -602,9 +602,15 @@ class VeoVideoClient(BaseProviderClient):
                     self._asset_recovery_attempted.add(job_id)
                     recovery_attempted = True
                     try:
+                        refreshed_name = getattr(refreshed, "name", None) or job_id
+                        operation_arg = (
+                            _genai_types.GenerateVideosOperation(name=refreshed_name)
+                            if refreshed_name
+                            else refreshed
+                        )
                         secondary = await asyncio.to_thread(
                             self._client.operations.get,
-                            getattr(refreshed, "name", None) or job_id,
+                            operation_arg,
                         )
                     except Exception:  # pragma: no cover - defensive logging
                         log.warning(

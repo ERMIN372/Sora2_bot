@@ -1490,12 +1490,28 @@ def _select_remote_video_asset(job: GenerationJobRecord) -> Optional[Dict[str, A
             continue
         mime = str(asset.get("mime") or "")
         asset_type = str(asset.get("type") or "")
-        if mime.startswith("video/") or asset_type == "video":
+        asset_kind = str(asset.get("kind") or "")
+        if (
+            mime.startswith("video/")
+            or asset_type.lower() == "video"
+            or asset_kind.lower() == "video"
+        ):
             score = 1
             if asset.get("preferred"):
                 score += 10
             candidates.append((score, asset))
     if not candidates:
+        fallback = job.video_url if isinstance(job.video_url, str) else None
+        if fallback:
+            candidate = fallback.strip()
+            if candidate and not candidate.startswith("["):
+                if candidate.startswith(("http://", "https://", "files/", "file-")):
+                    return {
+                        "key": "video_url",
+                        "url": candidate,
+                        "kind": "video",
+                        "fallback": True,
+                    }
         return None
     candidates.sort(key=lambda item: item[0], reverse=True)
     return candidates[0][1]
