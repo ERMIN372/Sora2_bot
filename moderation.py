@@ -9,23 +9,9 @@ from typing import Any, Optional
 PolicyScope = str
 
 
-_POLICY_MESSAGES: dict[str, str] = {
-    "unknown": (
-        "Запрос отклонён по соображениям безопасности. Попробуйте переформулировать "
-        "описание."
-    ),
-    "policy.sexual": "Мы не можем создавать откровенный сексуальный контент.",
-    "policy.violence": "Запрос содержит сцены насилия, которые запрещены политикой.",
-    "policy.hate": "Мы не можем генерировать контент с призывами к ненависти.",
-    "policy.self_harm": "Мы не поддерживаем запросы, связанные с саморазрушением.",
-    "policy.weapons": "Мы не можем создавать инструкции или рекламу оружия.",
-    "policy.drugs": "Мы не можем распространять информацию о запрещённых веществах.",
-    "policy.terrorism": "Контент с поддержкой терроризма запрещён.",
-    "policy.brand": (
-        "Мы не можем использовать зарегистрированные товарные знаки. Опишите идею без "
-        "упоминания брендов."
-    ),
-}
+_POLICY_MESSAGES: dict[str, str] = {}
+
+NEUTRAL_POLICY_MESSAGE = "Запрос отклонён политикой контента"
 
 
 @dataclass(slots=True)
@@ -102,8 +88,7 @@ def _extract_scope(payload: Mapping[str, Any]) -> Optional[str]:
 def policy_message(scope: PolicyScope) -> str:
     """Return a short, user-facing description for a policy scope."""
 
-    key = (scope or "unknown").strip().lower()
-    return _POLICY_MESSAGES.get(key, _POLICY_MESSAGES["unknown"])
+    return NEUTRAL_POLICY_MESSAGE
 
 
 def classify_safety_response(

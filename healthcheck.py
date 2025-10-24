@@ -12,6 +12,7 @@ from google.genai import Client as _GenAIClient, errors as _genai_errors
 
 from config import Config
 from observability import HealthCheckResult, record_healthcheck
+from services import gemini_safety
 
 log = logging.getLogger(__name__)
 
@@ -145,6 +146,16 @@ async def run_startup_healthcheck(*, config: Config, mode: str) -> HealthCheckRe
 
     gemini_ok, gemini_detail = await _probe_gemini_models(config)
     add_check("Gemini models", gemini_ok, gemini_detail)
+    safety_state = gemini_safety.health_snapshot()
+    thresholds_detail = [
+        f"{category}={threshold}"
+        for category, threshold in safety_state.get("thresholds", [])
+        if category
+    ]
+    last_fallback = safety_state.get("last_fallback")
+    if last_fallback:
+        thresholds_detail.append(f"fallback seen: {last_fallback}")
+    add_check("Gemini safety", True, ", ".join(thresholds_detail) if thresholds_detail else "n/a")
 
     details: Dict[str, Any] = {"mode": mode, "checks": checks}
     ok = all(item.get("ok") for item in checks)
