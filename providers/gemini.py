@@ -188,7 +188,6 @@ class GeminiGenerativeClient(BaseProviderClient):
         api_key: str,
         model: str,
         provider_name: str,
-        profile: str,
         safety_settings: Optional[List[_genai_types.SafetySetting]] = None,
     ) -> None:
         super().__init__(
@@ -203,7 +202,6 @@ class GeminiGenerativeClient(BaseProviderClient):
         self._model = model
         self._pending: Dict[str, Tuple[Dict[str, Any], int, int, Dict[str, Any]]] = {}
         self._environment = (config.environment or "dev").lower()
-        self._profile = profile
         self._key_mask = ensure_gemini_key_logged(
             config,
             context="gemini_generative_client",
@@ -213,7 +211,6 @@ class GeminiGenerativeClient(BaseProviderClient):
         self._force_none_enabled = bool(getattr(config, "gemini_safety_force_none", False))
         base_settings = parsed_safety or _default_safety_settings()
         order, thresholds = gemini_safety.initialise(
-            profile=self._profile,
             force_none=self._force_none_enabled,
             settings=base_settings,
             key_mask=self._key_mask or "",
@@ -221,16 +218,11 @@ class GeminiGenerativeClient(BaseProviderClient):
         )
         self._safety_order: List[str] = list(order)
         self._safety_thresholds: Dict[str, str] = dict(thresholds)
-        self._safety_settings = gemini_safety.build_profile_settings(
-            self._profile,
+        self._safety_settings = gemini_safety.build_safety_settings(
+            force_none=self._force_none_enabled,
+            order=self._safety_order,
             thresholds=self._safety_thresholds,
         )
-        self._safety_settings, _ = gemini_safety.filter_profile_settings(
-            self._profile,
-            self._safety_settings,
-        )
-        _, base_threshold_map = gemini_safety.describe_settings(self._safety_settings)
-        self._safety_thresholds.update(base_threshold_map)
 
     def _build_contents(
         self,
@@ -307,49 +299,6 @@ class GeminiGenerativeClient(BaseProviderClient):
 
         return _genai_types.GenerateContentConfig(**kwargs)
 
-    def _apply_safety_profile(
-        self,
-        config: Any,
-        *,
-        mode: str,
-    ) -> Tuple[Any, Dict[str, Any]]:
-        raw_settings = getattr(config, "safety_settings", None)
-        parsed = _convert_setting_list(raw_settings, _genai_types.SafetySetting)
-        if not parsed:
-            parsed = list(self._safety_settings)
-        filtered, dropped = gemini_safety.filter_profile_settings(self._profile, parsed)
-        categories, threshold_map = gemini_safety.describe_settings(filtered)
-        downgraded = [
-            category
-            for category, value in threshold_map.items()
-            if value != gemini_safety.FORCE_THRESHOLD
-        ]
-        if hasattr(config, "model_copy"):
-            config = config.model_copy(update={"safety_settings": filtered})
-        elif isinstance(config, dict):  # pragma: no cover - defensive path
-            data = dict(config)
-            data["safety_settings"] = filtered
-            config = data
-        else:  # pragma: no cover - defensive path
-            data = getattr(config, "model_dump", lambda **_: {})(exclude_none=True) or {}
-            data["safety_settings"] = filtered
-            try:
-                config = config.__class__(**data)
-            except Exception:
-                config = data
-        safety_meta = {
-            "profile": self._profile,
-            "mode": mode,
-            "categories": categories,
-            "thresholds": [
-                (category, threshold_map.get(category, gemini_safety.FORCE_THRESHOLD))
-                for category in categories
-            ],
-            "dropped": dropped,
-            "downgraded": downgraded,
-        }
-        return config, safety_meta
-
     def _prepare_generate_call(
         self,
         *,
@@ -374,7 +323,6 @@ class GeminiGenerativeClient(BaseProviderClient):
             config = self._build_generation_config(
                 settings, safety_override=safety_override
             )
-        config, safety_meta = self._apply_safety_profile(config, mode="generate_content")
         request_kwargs = {
             "model": self._model,
             "contents": contents,
@@ -383,7 +331,6 @@ class GeminiGenerativeClient(BaseProviderClient):
         request_meta = {
             "mode": "generate_content",
             "config": config.model_dump(mode="json") if hasattr(config, "model_dump") else config,
-            "safety": safety_meta,
         }
         return self._client.models.generate_content, request_kwargs, request_meta
 
@@ -465,35 +412,6 @@ class GeminiGenerativeClient(BaseProviderClient):
                 payload=payload_dict,
                 safety_override=safety_for_attempt,
             )
-            safety_meta = (
-                request_meta.get("safety")
-                if isinstance(request_meta, dict)
-                else None
-            )
-            if isinstance(safety_meta, dict):
-                thresholds_entries = safety_meta.get("thresholds") or []
-                if isinstance(thresholds_entries, Mapping):
-                    thresholds_entries = list(thresholds_entries.items())
-                thresholds_label = ", ".join(
-                    f"{category}={threshold}"
-                    for category, threshold in thresholds_entries
-                    if category
-                )
-                dropped = safety_meta.get("dropped") or []
-                downgraded = safety_meta.get("downgraded") or []
-                dropped_label = ", ".join(dropped) if dropped else "none"
-                downgraded_label = ", ".join(downgraded) if downgraded else "none"
-                log.info(
-                    "gemini.safety profile=%s provider=%s key_mask=%s mode=%s categories=%s thresholds=%s dropped=%s downgraded=%s",
-                    self._profile,
-                    self.provider_name,
-                    self._key_mask or "",
-                    request_meta.get("mode") if isinstance(request_meta, dict) else "generate_content",
-                    ", ".join(safety_meta.get("categories") or []) or "none",
-                    thresholds_label or "none",
-                    dropped_label,
-                    downgraded_label,
-                )
             start = time.monotonic()
             log.info(
                 "gemini.generate start model=%s env=%s key_mask=%s corr_id=%s mode=%s",
@@ -550,18 +468,17 @@ class GeminiGenerativeClient(BaseProviderClient):
                     conflict_category = gemini_safety.extract_conflict_category(exc)
                 if conflict_category:
                     override_map = gemini_safety.build_override(
-                        self._profile,
                         self._safety_thresholds,
                         conflict_category,
                         threshold=gemini_safety.FALLBACK_THRESHOLD,
                     )
-                    fallback_override = gemini_safety.build_profile_settings(
-                        self._profile,
+                    override_order = list(self._safety_order)
+                    if conflict_category and conflict_category not in override_order:
+                        override_order.append(conflict_category)
+                    fallback_override = gemini_safety.build_safety_settings(
+                        force_none=self._force_none_enabled,
+                        order=override_order,
                         thresholds=override_map,
-                    )
-                    fallback_override, dropped = gemini_safety.filter_profile_settings(
-                        self._profile,
-                        fallback_override,
                     )
                     fallback_attempted = True
                     label = (
@@ -570,19 +487,16 @@ class GeminiGenerativeClient(BaseProviderClient):
                         else None
                     )
                     gemini_safety.record_fallback(
-                        self._profile,
                         label,
                         key_mask=self._key_mask or "",
                         provider=self.provider_name,
                         logger=log,
                     )
                     log.warning(
-                        "Retrying Gemini request with fallback safety provider=%s profile=%s category=%s threshold=%s dropped=%s",
+                        "Retrying Gemini request with fallback safety provider=%s category=%s threshold=%s",
                         self.provider_name,
-                        self._profile,
                         conflict_category,
                         gemini_safety.FALLBACK_THRESHOLD,
-                        ", ".join(dropped) if dropped else "none",
                     )
                     continue
                 provider_error = self._map_error(exc, duration_ms=duration_ms)
@@ -810,7 +724,6 @@ class GeminiTextClient(GeminiGenerativeClient):
             api_key=config.gemini_api_key,
             model=config.gemini_model_text,
             provider_name="gemini-text",
-            profile="text",
         )
 
 
@@ -823,7 +736,6 @@ class GeminiImageClient(GeminiGenerativeClient):
             api_key=config.gemini_api_key,
             model=config.gemini_model_image,
             provider_name="gemini-image",
-            profile="image",
         )
 
     def _build_images_config(
@@ -896,10 +808,6 @@ class GeminiImageClient(GeminiGenerativeClient):
             existing=config,
             safety_override=safety_override,
         )
-        images_config, safety_meta = self._apply_safety_profile(
-            images_config,
-            mode="generate_images",
-        )
         request_kwargs = {
             "model": self._model,
             "prompt": prompt,
@@ -908,7 +816,6 @@ class GeminiImageClient(GeminiGenerativeClient):
         request_meta = {
             "mode": "generate_images",
             "config": images_config.model_dump(mode="json") if hasattr(images_config, "model_dump") else images_config,
-            "safety": safety_meta,
         }
         return self._client.models.generate_images, request_kwargs, request_meta
 

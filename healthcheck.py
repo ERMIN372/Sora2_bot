@@ -5,7 +5,7 @@ import asyncio
 import json
 import logging
 import time
-from typing import Any, Dict, List, Mapping, Tuple
+from typing import Any, Dict, List, Tuple
 
 import gsheets_db
 from google.genai import Client as _GenAIClient, errors as _genai_errors
@@ -147,37 +147,22 @@ async def run_startup_healthcheck(*, config: Config, mode: str) -> HealthCheckRe
     gemini_ok, gemini_detail = await _probe_gemini_models(config)
     add_check("Gemini models", gemini_ok, gemini_detail)
     safety_state = gemini_safety.health_snapshot()
-    profiles_info = safety_state.get("profiles", {})
-    thresholds_detail: List[str] = []
-    if isinstance(profiles_info, Mapping):
-        for profile, info in profiles_info.items():
-            if not isinstance(info, Mapping):
-                continue
-            thresholds = info.get("thresholds") or []
-            dropped = info.get("dropped") or []
-            label_parts = [
-                f"{category}={threshold}"
-                for category, threshold in thresholds
-                if category
-            ]
-            if dropped:
-                label_parts.append(f"dropped({', '.join(str(item) for item in dropped)})")
-            thresholds_detail.append(
-                f"{profile}: {'; '.join(label_parts) if label_parts else 'n/a'}"
-            )
+    thresholds_detail = [
+        f"{category}={threshold}"
+        for category, threshold in safety_state.get("thresholds", [])
+        if category
+    ]
     last_fallback = safety_state.get("last_fallback") or {}
-    if isinstance(last_fallback, Mapping):
-        for profile, items in last_fallback.items():
-            if isinstance(items, Mapping):
-                for category, ts in items.items():
-                    label = str(category or "n/a")
-                    if isinstance(ts, (int, float)) and ts > 0:
-                        timestamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(ts))
-                        thresholds_detail.append(f"fallback {profile}:{label}@{timestamp}")
-                    else:
-                        thresholds_detail.append(f"fallback {profile}:{label}")
-            elif items:
-                thresholds_detail.append(f"fallback {profile}:{items}")
+    if isinstance(last_fallback, dict):
+        for category, ts in last_fallback.items():
+            if not category:
+                category = "n/a"
+            label = str(category)
+            if isinstance(ts, (int, float)) and ts > 0:
+                timestamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(ts))
+                thresholds_detail.append(f"fallback {label}@{timestamp}")
+            else:
+                thresholds_detail.append(f"fallback {label}")
     elif last_fallback:
         thresholds_detail.append(f"fallback seen: {last_fallback}")
     add_check("Gemini safety", True, ", ".join(thresholds_detail) if thresholds_detail else "n/a")
