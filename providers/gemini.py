@@ -219,9 +219,7 @@ class GeminiGenerativeClient(BaseProviderClient):
         self._safety_order: List[str] = list(order)
         self._safety_thresholds: Dict[str, str] = dict(thresholds)
         self._safety_settings = gemini_safety.build_safety_settings(
-            force_none=self._force_none_enabled,
-            order=self._safety_order,
-            thresholds=self._safety_thresholds,
+            self._safety_order, self._safety_thresholds
         )
 
     def _build_contents(
@@ -327,6 +325,7 @@ class GeminiGenerativeClient(BaseProviderClient):
             "model": self._model,
             "contents": contents,
             "config": config,
+            "safety_settings": safety_settings,
         }
         request_meta = {
             "mode": "generate_content",
@@ -472,13 +471,9 @@ class GeminiGenerativeClient(BaseProviderClient):
                         conflict_category,
                         threshold=gemini_safety.FALLBACK_THRESHOLD,
                     )
-                    override_order = list(self._safety_order)
-                    if conflict_category and conflict_category not in override_order:
-                        override_order.append(conflict_category)
                     fallback_override = gemini_safety.build_safety_settings(
-                        force_none=self._force_none_enabled,
-                        order=override_order,
-                        thresholds=override_map,
+                        self._safety_order,
+                        override_map,
                     )
                     fallback_attempted = True
                     label = (
@@ -492,11 +487,10 @@ class GeminiGenerativeClient(BaseProviderClient):
                         provider=self.provider_name,
                         logger=log,
                     )
-                    log.warning(
-                        "Retrying Gemini request with fallback safety provider=%s category=%s threshold=%s",
+                    log.debug(
+                        "Retrying Gemini request with fallback safety provider=%s category=%s",
                         self.provider_name,
                         conflict_category,
-                        gemini_safety.FALLBACK_THRESHOLD,
                     )
                     continue
                 provider_error = self._map_error(exc, duration_ms=duration_ms)
@@ -812,6 +806,7 @@ class GeminiImageClient(GeminiGenerativeClient):
             "model": self._model,
             "prompt": prompt,
             "config": images_config,
+            "safety_settings": list(safety_override or self._safety_settings),
         }
         request_meta = {
             "mode": "generate_images",
