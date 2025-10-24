@@ -6,5 +6,5 @@ fastapi
 uvicorn[standard]
 gspread
 google-auth
-google-genai>=1.46.0
+google-genai==1.46.0
 tenacity

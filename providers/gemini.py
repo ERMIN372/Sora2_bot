@@ -28,16 +28,28 @@ from .base import BaseProviderClient, ProviderAPIError, ProviderJobStatus, Provi
 log = logging.getLogger(__name__)
 
 
-_SAFETY_CATEGORIES: Tuple[str, ...] = (
-    "HARASSMENT",
-    "HATE_SPEECH",
-    "SEXUALLY_EXPLICIT",
-    "DANGEROUS_CONTENT",
-    "CIVIC_INTEGRITY",
+_SAFETY_CATEGORIES: Tuple[_genai_types.HarmCategory, ...] = (
+    _genai_types.HarmCategory.HARM_CATEGORY_HARASSMENT,
+    _genai_types.HarmCategory.HARM_CATEGORY_HATE_SPEECH,
+    _genai_types.HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT,
+    _genai_types.HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT,
+    _genai_types.HarmCategory.HARM_CATEGORY_CIVIC_INTEGRITY,
 )
 
-_SAFETY_DEFAULT_THRESHOLD = "BLOCK_NONE"
-_SAFETY_FALLBACK_THRESHOLD = "BLOCK_ONLY_HIGH"
+_SAFETY_DEFAULT_THRESHOLD = _genai_types.HarmBlockThreshold.BLOCK_NONE
+_SAFETY_FALLBACK_THRESHOLD = _genai_types.HarmBlockThreshold.BLOCK_ONLY_HIGH
+
+
+def _enum_code(value: Any) -> str:
+    """Return a stable string representation for Gemini enums."""
+
+    if value is None:
+        return ""
+    if hasattr(value, "value") and isinstance(value.value, str):
+        return value.value
+    if hasattr(value, "name"):
+        return str(value.name)
+    return str(value)
 
 
 def _default_safety_settings() -> List[_genai_types.SafetySetting]:
@@ -420,14 +432,16 @@ class GeminiGenerativeClient(BaseProviderClient):
             return None
         changed = False
         target = category.upper()
+        fallback_value = _enum_code(_SAFETY_FALLBACK_THRESHOLD)
         for entry in settings:
             if not isinstance(entry, dict):
                 continue
             cat = str(entry.get("category") or "").upper()
             if cat.endswith(target) or cat == target:
-                if entry.get("threshold") == _SAFETY_FALLBACK_THRESHOLD:
+                current = str(entry.get("threshold") or "").upper()
+                if current == fallback_value.upper():
                     return None
-                entry["threshold"] = _SAFETY_FALLBACK_THRESHOLD
+                entry["threshold"] = fallback_value
                 changed = True
                 break
         if not changed:
@@ -581,7 +595,7 @@ class GeminiGenerativeClient(BaseProviderClient):
                             "gemini.safety downgrade model=%s category=%s threshold=%s",
                             decision.model,
                             category,
-                            _SAFETY_FALLBACK_THRESHOLD,
+                            _enum_code(_SAFETY_FALLBACK_THRESHOLD),
                         )
                         continue
                 provider_error = self._map_error(

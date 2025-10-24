@@ -18,6 +18,16 @@ from services.gemini_router import GeminiRoutingError, get_gemini_router
 log = logging.getLogger(__name__)
 
 
+def _enum_name(value: Any) -> str:
+    if value is None:
+        return ""
+    if hasattr(value, "value") and isinstance(value.value, str):
+        return value.value
+    if hasattr(value, "name"):
+        return str(value.name)
+    return str(value)
+
+
 async def _probe_gemini_models(config: Config) -> Tuple[bool, str]:
     if not config.gemini_enabled:
         return True, "disabled"
@@ -71,7 +81,10 @@ async def _probe_gemini_models(config: Config) -> Tuple[bool, str]:
         }
         if task == "text":
             entry["safety_settings"] = [
-                {"category": category, "threshold": _SAFETY_DEFAULT_THRESHOLD}
+                {
+                    "category": _enum_name(category),
+                    "threshold": _enum_name(_SAFETY_DEFAULT_THRESHOLD),
+                }
                 for category in _SAFETY_CATEGORIES
             ]
         if task == "image":
