@@ -1307,6 +1307,8 @@ class SentMediaInfo:
     file_size: int
     duration_seconds: Optional[int] = None
     mime_type: Optional[str] = None
+    file_bytes: Optional[bytes] = None
+    filename: Optional[str] = None
 
 
 async def _send_job_update(
@@ -1621,6 +1623,8 @@ async def _send_inline_image(
         file_size=size,
         duration_seconds=None,
         mime_type=mime,
+        file_bytes=payload,
+        filename=filename,
     )
 
 
@@ -1709,6 +1713,8 @@ async def _send_inline_assets(
             file_size=file_size or size,
             duration_seconds=None,
             mime_type=mime,
+            file_bytes=payload,
+            filename=filename,
         )
     return None
 
@@ -1905,6 +1911,8 @@ async def _deliver_remote_video(
         file_size=file_size,
         duration_seconds=duration_seconds,
         mime_type=mime_type,
+        file_bytes=downloaded.content,
+        filename=downloaded.filename,
     )
 
 
@@ -2017,11 +2025,12 @@ async def _handle_delivery_failure(
 def _build_archive_payload_from_sent(
     job: GenerationJobRecord, sent: SentMediaInfo
 ) -> Optional[ArchivePayload]:
-    if not sent.file_id:
+    file_bytes = sent.file_bytes if sent.file_bytes is not None else None
+    if file_bytes is None and not sent.file_id:
         return None
     content_type = "image" if (job.content_type or "video") == "image" else "video"
     duration = sent.duration_seconds if content_type == "video" else None
-    return ArchivePayload(
+    payload = ArchivePayload(
         corr_id=job.corr_id or job.id,
         prompt=job.prompt,
         model_name=job.model,
@@ -2029,12 +2038,15 @@ def _build_archive_payload_from_sent(
         user_id=job.user_id,
         content_type=content_type,
         mime_type=sent.mime_type,
-        file_id=sent.file_id,
-        file_size=sent.file_size,
+        file_bytes=bytes(file_bytes) if file_bytes is not None else None,
+        file_id=None if file_bytes is not None else sent.file_id,
+        file_size=len(file_bytes) if file_bytes is not None else sent.file_size,
+        filename=sent.filename,
         duration_seconds=duration,
         delivery_method=sent.method,
         sent_at=datetime.utcnow(),
     )
+    return payload
 
 
 async def start_command(
