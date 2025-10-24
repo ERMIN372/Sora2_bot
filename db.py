@@ -73,6 +73,7 @@ class ErrorLogRecord:
     reason: Optional[str] = None
     provider_error_code: Optional[str] = None
     provider_error_message: Optional[str] = None
+    stage: str = "submit"
 
 
 @dataclass
@@ -557,6 +558,7 @@ class Database:
                 reason=record.reason or "",
                 provider_error_code=record.provider_error_code or "",
                 provider_error_message=record.provider_error_message or "",
+                stage=record.stage or "",
             )
         except Exception:  # pragma: no cover - external dependency
             log.warning("Failed to append error record", exc_info=True)

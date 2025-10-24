@@ -146,6 +146,7 @@ _ERRORS_HEADERS = [
     "reason",
     "provider_error_code",
     "provider_error_message",
+    "stage",
 ]
 
 _ARCHIVE_HEADERS = [

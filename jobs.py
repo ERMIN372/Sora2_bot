@@ -454,6 +454,7 @@ class JobQueue:
             reason=reason_code,
             provider_error_code=provider_error_code,
             provider_error_message=provider_error_message,
+            stage="poll",
         )
         sheet_ok = await self._db.log_error_record(error_record)
         log_event(
@@ -1248,6 +1249,7 @@ class JobQueue:
                     reason=reason_code,
                     provider_error_code=provider_error_code,
                     provider_error_message=provider_error_message,
+                    stage="poll",
                 )
                 sheet_ok = await self._db.log_error_record(error_record)
                 log_event(
@@ -1416,6 +1418,7 @@ class JobQueue:
             reason="no_media_assets",
             provider_error_code=None,
             provider_error_message=None,
+            stage="poll",
         )
         sheet_ok = await self._db.log_error_record(error_record)
 

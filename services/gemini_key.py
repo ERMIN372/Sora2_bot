@@ -17,19 +17,10 @@ def mask_gemini_key(api_key: str) -> str:
     key = (api_key or "").strip()
     if not key:
         return ""
-    length = len(key)
     prefix = key[:4]
     if len(prefix) < 4:
         prefix = (prefix + "****")[:4]
-    if length <= 4:
-        prefix = f"{prefix[0]}***" if length else "****"
-    if length <= 10:
-        suffix = "*" * min(6, max(length - 1, 1))
-    else:
-        suffix = key[-6:]
-    if len(suffix) < 6:
-        suffix = ("*" * 6)[:6]
-    return f"{prefix}…{suffix}"
+    return f"{prefix}…XXXX"
 
 
 def ensure_gemini_key_logged(
