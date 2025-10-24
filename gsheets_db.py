@@ -117,6 +117,7 @@ _JOBS_HEADERS = [
     "cost_credits",
     "username",
     "corr_id",
+    "idempotency_key",
     "content_type",
     "status_message_id",
     "status_message_index",
@@ -432,6 +433,7 @@ def _normalise_job(row: Dict[str, Any]) -> Dict[str, Any]:
         "cost_credits": _parse_int(row.get("cost_credits")),
         "username": _parse_str(row.get("username")),
         "corr_id": _parse_str(row.get("corr_id")),
+        "idempotency_key": _parse_str(row.get("idempotency_key")),
         "content_type": _parse_str(row.get("content_type")) or "video",
         "status_message_id": _parse_int(row.get("status_message_id")),
         "status_message_index": _parse_int(row.get("status_message_index")),
@@ -1057,8 +1059,10 @@ async def create_job(
     model: str,
     cost_credits: int,
     corr_id: Optional[str],
+    *,
     username: Optional[str] = None,
     content_type: str = "video",
+    idempotency_key: str = "",
 ) -> None:
     state = await _ensure_jobs_state()
     async with state.lock:
@@ -1084,6 +1088,7 @@ async def create_job(
             "cost_credits": cost_credits,
             "username": username_clean,
             "corr_id": corr_id or "",
+            "idempotency_key": idempotency_key or "",
             "content_type": (content_type or "video"),
             "status_message_id": "",
             "status_message_index": 0,
@@ -1093,6 +1098,21 @@ async def create_job(
         state.index[job_id] = row_index
         state.rows[job_id] = record
         state.next_row = row_index + 1
+
+
+async def get_job_by_idempotency_key(key: str) -> Optional[Dict[str, Any]]:
+    state = await _ensure_jobs_state()
+    if not key:
+        return None
+    lookup = key.strip()
+    if not lookup:
+        return None
+    async with state.lock:
+        for record in state.rows.values():
+            stored = str(record.get("idempotency_key") or "").strip()
+            if stored and stored == lookup:
+                return dict(record)
+    return None
 
 
 async def update_job_status(job_id: str, status: str, **fields: Any) -> None:
