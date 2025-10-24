@@ -18,7 +18,7 @@ _CLIENT_CACHE: Dict[Tuple[str, str, Tuple[int, int, int]], _GenAIClient] = {}
 _CACHE_LOCK = threading.Lock()
 
 
-def _build_http_options(config: Config) -> _HttpOptions:
+def _build_http_options(config: Config, *, api_version: str | None = None) -> _HttpOptions:
     timeout_seconds: float | None = None
     candidates = []
     for value in (
@@ -34,11 +34,11 @@ def _build_http_options(config: Config) -> _HttpOptions:
     if candidates:
         timeout_seconds = max(candidates)
     timeout_ms = int(timeout_seconds * 1000) if timeout_seconds else None
-    api_version = (config.gemini_api_version or "").strip()
-    return _HttpOptions(timeout=timeout_ms, api_version=api_version or None)
+    version = (api_version or config.gemini_api_version or "").strip()
+    return _HttpOptions(timeout=timeout_ms, api_version=version or None)
 
 
-def get_gemini_client(config: Config) -> _GenAIClient:
+def get_gemini_client(config: Config, *, api_version: str | None = None) -> _GenAIClient:
     """Return a cached :class:`google.genai.Client` instance."""
 
     api_key = (config.gemini_api_key or "").strip()
@@ -50,9 +50,10 @@ def get_gemini_client(config: Config) -> _GenAIClient:
         process_id=f"pid={os.getpid()}",
         logger=log,
     )
+    version = (api_version or config.gemini_api_version or "v1").strip() or "v1"
     cache_key = (
         api_key,
-        (config.gemini_api_version or "v1").strip() or "v1",
+        version,
         (
             int((config.request_timeout or 0) * 1000),
             int((config.request_read_timeout or 0) * 1000),
@@ -62,7 +63,7 @@ def get_gemini_client(config: Config) -> _GenAIClient:
     with _CACHE_LOCK:
         client = _CLIENT_CACHE.get(cache_key)
         if client is None:
-            http_options = _build_http_options(config)
+            http_options = _build_http_options(config, api_version=version)
             client = _GenAIClient(api_key=api_key, http_options=http_options)
             _CLIENT_CACHE[cache_key] = client
     return client

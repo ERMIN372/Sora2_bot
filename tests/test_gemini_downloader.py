@@ -63,7 +63,9 @@ def _make_config() -> Config:
 
 def test_download_asset_success(monkeypatch: pytest.MonkeyPatch) -> None:
     files = _SuccessfulFiles()
-    monkeypatch.setattr(downloader, "get_gemini_client", lambda _cfg: _DummyClient(files))
+    monkeypatch.setattr(
+        downloader, "get_gemini_client", lambda _cfg, **__: _DummyClient(files)
+    )
     config = _make_config()
 
     result = asyncio.run(
@@ -85,7 +87,9 @@ def test_download_asset_success(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_download_asset_uses_hints_when_metadata_missing(monkeypatch: pytest.MonkeyPatch) -> None:
     files = _DownloadOnlyFiles()
-    monkeypatch.setattr(downloader, "get_gemini_client", lambda _cfg: _DummyClient(files))
+    monkeypatch.setattr(
+        downloader, "get_gemini_client", lambda _cfg, **__: _DummyClient(files)
+    )
     config = _make_config()
 
     result = asyncio.run(
@@ -108,7 +112,9 @@ def test_download_asset_uses_hints_when_metadata_missing(monkeypatch: pytest.Mon
 
 def test_download_asset_permission_denied(monkeypatch: pytest.MonkeyPatch) -> None:
     files = _ForbiddenFiles()
-    monkeypatch.setattr(downloader, "get_gemini_client", lambda _cfg: _DummyClient(files))
+    monkeypatch.setattr(
+        downloader, "get_gemini_client", lambda _cfg, **__: _DummyClient(files)
+    )
 
     async def _instant_sleep(*_args, **_kwargs) -> None:
         return None

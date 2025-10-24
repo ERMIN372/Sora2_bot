@@ -8,10 +8,12 @@ import time
 from typing import Any, Dict, List, Tuple
 
 import gsheets_db
-from google.genai import Client as _GenAIClient, errors as _genai_errors
+from google.genai import errors as _genai_errors
 
 from config import Config
 from observability import HealthCheckResult, record_healthcheck
+from providers.gemini import _SAFETY_CATEGORIES, _SAFETY_DEFAULT_THRESHOLD
+from services.gemini_router import GeminiRoutingError, get_gemini_router
 
 log = logging.getLogger(__name__)
 
@@ -21,87 +23,107 @@ async def _probe_gemini_models(config: Config) -> Tuple[bool, str]:
         return True, "disabled"
     if not config.gemini_api_key:
         return False, "missing api key"
-    client = _GenAIClient(api_key=config.gemini_api_key)
-    model_names = [
-        name
-        for name in (
-            config.gemini_model_text,
-            config.gemini_model_image,
-            config.gemini_model_video,
-        )
-        if name
+    router = get_gemini_router(config)
+    summary: Dict[str, Dict[str, Any]] = {}
+    tasks: List[Tuple[str, str]] = [
+        ("text", config.gemini_model_text),
+        ("image", config.gemini_model_image),
+        ("video", config.gemini_model_video),
     ]
-    checked: List[str] = []
-    for model_name in model_names:
+    for task, model_name in tasks:
+        if not model_name:
+            continue
         try:
-            response = await asyncio.to_thread(
-                client.models.get, model=model_name
+            decision = router.route(
+                task=task,
+                model=model_name,
+                prompt="healthcheck ping",
             )
+        except GeminiRoutingError as exc:
+            log.warning("Gemini routing failed task=%s", task, exc_info=True)
+            return False, f"{task}: {exc}"
+        client = decision.client
+        try:
+            await asyncio.to_thread(client.models.get, model=decision.model)
         except _genai_errors.APIError as exc:  # pragma: no cover - external API
             detail = f"{getattr(exc, 'code', 0)}:{getattr(exc, 'status', '')}".strip(":")
             log.warning(
-                "Gemini model probe failed name=%s error=%s", model_name, exc, exc_info=True
+                "Gemini model probe failed task=%s model=%s error=%s",
+                task,
+                decision.model,
+                exc,
+                exc_info=True,
             )
             return False, detail or str(exc)
         except Exception as exc:  # pragma: no cover - network guard
-            log.warning("Gemini model probe failed name=%s", model_name, exc_info=True)
-            return False, str(exc)
-        else:
-            display = getattr(response, "name", None) or model_name
-            checked.append(display)
-
-    try:
-        image_response = await asyncio.to_thread(
-            client.models.generate_images,
-            model=config.gemini_model_image,
-            prompt="ping",
-        )
-    except _genai_errors.APIError as exc:  # pragma: no cover - external API
-        detail = f"{getattr(exc, 'code', 0)}:{getattr(exc, 'status', '')}".strip(":")
-        log.warning("Gemini image ping failed error=%s", exc, exc_info=True)
-        return False, detail or str(exc)
-    except Exception as exc:  # pragma: no cover - network guard
-        log.warning("Gemini image ping failed", exc_info=True)
-        return False, str(exc)
-    else:
-        binary_ok = False
-        if isinstance(image_response, (bytes, bytearray)):
-            binary_ok = True
-        else:
-            generated = getattr(image_response, "generated_images", None)
-            if not generated:
-                generated = getattr(image_response, "generatedImages", None)
-            if generated:
-                candidates = generated if isinstance(generated, (list, tuple)) else [generated]
-                for item in candidates:
-                    image_obj = None
-                    if hasattr(item, "image"):
-                        image_obj = getattr(item, "image")
-                    elif isinstance(item, dict):
-                        image_obj = item.get("image")
-                    if image_obj is None and isinstance(item, dict):
-                        image_obj = item.get("inlineData") or item.get("inline_data")
-                    if image_obj is None:
-                        continue
-                    data = None
-                    if hasattr(image_obj, "image_bytes"):
-                        data = getattr(image_obj, "image_bytes")
-                    elif isinstance(image_obj, dict):
-                        data = image_obj.get("image_bytes") or image_obj.get("data")
-                    elif isinstance(image_obj, (bytes, bytearray)):
-                        data = image_obj
-                    if isinstance(data, (bytes, bytearray)) and data:
-                        binary_ok = True
-                        break
-        if not binary_ok:
             log.warning(
-                "Gemini image ping produced invalid payload type=%s", type(image_response)
+                "Gemini model probe failed task=%s model=%s",
+                task,
+                decision.model,
+                exc_info=True,
             )
-            return False, "invalid image payload"
-        checked.append("generate_images")
-    detail = ", ".join(dict.fromkeys(checked)) if checked else "ok"
-    log.info("Gemini models: ok %s", detail)
-    return True, detail
+            return False, str(exc)
+
+        entry: Dict[str, Any] = {
+            "model": decision.model,
+            "api_version": decision.api_version,
+            "methods": list(decision.supported_methods),
+        }
+        if task == "text":
+            entry["safety_settings"] = [
+                {"category": category, "threshold": _SAFETY_DEFAULT_THRESHOLD}
+                for category in _SAFETY_CATEGORIES
+            ]
+        if task == "image":
+            try:
+                image_response = await asyncio.to_thread(
+                    client.models.generate_images,
+                    model=decision.model,
+                    prompt="ping",
+                )
+            except _genai_errors.APIError as exc:  # pragma: no cover - external API
+                detail = f"{getattr(exc, 'code', 0)}:{getattr(exc, 'status', '')}".strip(":")
+                log.warning("Gemini image ping failed", exc_info=True)
+                return False, detail or str(exc)
+            except Exception as exc:  # pragma: no cover - network guard
+                log.warning("Gemini image ping failed", exc_info=True)
+                return False, str(exc)
+            else:
+                binary_ok = False
+                generated = getattr(image_response, "generated_images", None)
+                if not generated:
+                    generated = getattr(image_response, "generatedImages", None)
+                if generated:
+                    candidates = generated if isinstance(generated, (list, tuple)) else [generated]
+                    for item in candidates:
+                        if not isinstance(item, dict):
+                            continue
+                        image_obj = item.get("image") or {}
+                        meta = image_obj
+                        if not isinstance(meta, dict):
+                            meta = getattr(image_obj, "model_dump", lambda **_: {})()
+                        data = None
+                        if isinstance(meta, dict):
+                            data = meta.get("image_bytes") or meta.get("data")
+                        if isinstance(data, (bytes, bytearray)) and data:
+                            binary_ok = True
+                            break
+                if not binary_ok:
+                    log.warning(
+                        "Gemini image ping produced invalid payload type=%s",
+                        type(image_response),
+                    )
+                    return False, "invalid image payload"
+                entry["image_ping"] = "ok"
+        summary[task] = entry
+
+    detail_payload = {
+        "routes": summary,
+        "catalog": router.supported_models,
+    }
+    detail_json = json.dumps(detail_payload, ensure_ascii=False)
+    log.info("Gemini models: ok %s", detail_json)
+    return True, detail_json
 
 
 async def run_startup_healthcheck(*, config: Config, mode: str) -> HealthCheckResult:
