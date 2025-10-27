@@ -18,7 +18,7 @@ _CLIENT_CACHE: Dict[Tuple[str, str, Tuple[int, int, int]], _GenAIClient] = {}
 _CACHE_LOCK = threading.Lock()
 
 
-def _build_http_options(config: Config, *, api_version: str) -> _genai_types.HTTPOptions:
+def _build_http_options(config: Config, *, api_version: str) -> _genai_types.HttpOptions:
     timeout_seconds: float | None = None
     candidates = []
     for value in (
@@ -35,7 +35,7 @@ def _build_http_options(config: Config, *, api_version: str) -> _genai_types.HTT
         timeout_seconds = max(candidates)
     timeout_ms = int(timeout_seconds * 1000) if timeout_seconds else None
     version = (api_version or "").strip() or None
-    return _genai_types.HTTPOptions(timeout=timeout_ms, api_version=version)
+    return _genai_types.HttpOptions(timeout=timeout_ms, api_version=version)
 
 
 def _get_client(config: Config, *, api_version: str) -> _GenAIClient:

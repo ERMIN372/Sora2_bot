@@ -89,8 +89,11 @@ async def _probe_gemini_models(config: Config) -> Tuple[bool, str]:
     if image_model:
         if image_model not in supported:
             return False, f"image model {image_model} missing"
-        if not _supports_method(supported, image_model, "generate_images"):
-            return False, f"image model {image_model} lacks generate_images"
+        if not (
+            _supports_method(supported, image_model, "generate_content")
+            or _supports_method(supported, image_model, "generate_images")
+        ):
+            return False, f"image model {image_model} lacks generate_content"
         image_scope = _resolve_scope(image_model, "media")
         image_client = clients.get(image_scope) or clients.get("media")
         if image_client is None:
@@ -99,10 +102,13 @@ async def _probe_gemini_models(config: Config) -> Tuple[bool, str]:
         try:
             response = await asyncio.wait_for(
                 asyncio.to_thread(
-                    image_client.models.generate_images,
+                    image_client.models.generate_content,
                     model=image_model,
-                    prompt="ping",
-                    config=_genai_types.GenerateImagesConfig(mime_type="image/png"),
+                    contents="ping",
+                    config=_genai_types.GenerateContentConfig(
+                        response_mime_type="image/png",
+                        image_config={"aspect_ratio": "1:1"},
+                    ),
                 ),
                 timeout=60.0,
             )
@@ -114,55 +120,57 @@ async def _probe_gemini_models(config: Config) -> Tuple[bool, str]:
             log.warning("Gemini image ping crashed model=%s", image_model, exc_info=True)
             return False, str(exc)
         duration_ms = int((time.perf_counter() - start) * 1000)
-        image_candidates: List[Any] = []
-        for attr in ("images", "generated_images", "generatedImages"):
-            value = getattr(response, attr, None)
-            if value is None and isinstance(response, dict):
-                value = response.get(attr)
-            if value:
-                image_candidates = list(value) if isinstance(value, (list, tuple)) else [value]
-                break
+        payload: Dict[str, Any]
+        if hasattr(response, "model_dump"):
+            try:
+                payload = response.model_dump(mode="json")
+            except Exception:  # pragma: no cover - defensive
+                payload = {}
+        elif isinstance(response, dict):
+            payload = dict(response)
+        else:
+            payload = {}
 
         image_found = False
-        for candidate in image_candidates:
-            data_field: Any = None
-            if hasattr(candidate, "data"):
-                data_field = getattr(candidate, "data")
-            elif hasattr(candidate, "image_bytes"):
-                data_field = getattr(candidate, "image_bytes")
-            elif isinstance(candidate, dict):
-                data_field = candidate.get("data") or candidate.get("image_bytes")
-            if data_field is None:
-                inline_candidate = getattr(candidate, "inline_data", None) or getattr(
-                    candidate, "inlineData", None
-                )
-                if hasattr(inline_candidate, "data"):
-                    data_field = getattr(inline_candidate, "data")
-                elif isinstance(inline_candidate, dict):
-                    data_field = (
-                        inline_candidate.get("data")
-                        or inline_candidate.get("data_base64")
-                        or inline_candidate.get("dataBase64")
-                    )
-            if isinstance(data_field, str):
-                try:
-                    decoded = base64.b64decode(data_field)
-                except (binascii.Error, ValueError):
-                    decoded = b""
-                if decoded:
+        candidates = payload.get("candidates") or []
+        for candidate in candidates:
+            if not isinstance(candidate, dict):
+                continue
+            content = candidate.get("content") or {}
+            parts = content.get("parts") if isinstance(content, dict) else []
+            if not parts and isinstance(content, list):
+                parts = content
+            for part in parts:
+                if not isinstance(part, dict):
+                    continue
+                inline_data = part.get("inline_data") or part.get("inlineData")
+                if not inline_data and isinstance(part.get("video"), dict):  # pragma: no cover - guard
+                    inline_data = part.get("video")
+                if isinstance(inline_data, dict):
+                    data_field = inline_data.get("data") or inline_data.get("data_base64")
+                    if isinstance(data_field, str):
+                        try:
+                            decoded = base64.b64decode(data_field)
+                        except (binascii.Error, ValueError):
+                            decoded = b""
+                        if decoded:
+                            image_found = True
+                            break
+                    elif isinstance(inline_data.get("data"), (bytes, bytearray, memoryview)):
+                        if inline_data.get("data"):
+                            image_found = True
+                            break
+                uri = part.get("file_data") or part.get("fileData")
+                if isinstance(uri, dict):
+                    file_uri = uri.get("file_uri") or uri.get("fileUri")
+                    if file_uri:
+                        image_found = True
+                        break
+                uri_value = part.get("inline_data", {}).get("uri") if isinstance(part.get("inline_data"), dict) else None
+                if uri_value:
                     image_found = True
                     break
-            elif isinstance(data_field, (bytes, bytearray, memoryview)):
-                if data_field:
-                    image_found = True
-                    break
-            uri = None
-            if isinstance(candidate, dict):
-                uri = candidate.get("uri") or candidate.get("url")
-            else:
-                uri = getattr(candidate, "uri", None) or getattr(candidate, "url", None)
-            if uri:
-                image_found = True
+            if image_found:
                 break
         if not image_found:
             log.warning("Gemini image ping returned no binary data model=%s", image_model)

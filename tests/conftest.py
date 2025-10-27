@@ -143,6 +143,7 @@ except ModuleNotFoundError:  # pragma: no cover - test environment shim
     types_mod.HarmBlockThreshold = HarmBlockThreshold
     types_mod.SafetySetting = SafetySetting
     types_mod.HTTPOptions = HttpOptions
+    types_mod.HttpOptions = HttpOptions
     sys.modules["google.genai.types"] = types_mod
 
     oauth2_mod = types.ModuleType("google.oauth2")
