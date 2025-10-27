@@ -16,12 +16,12 @@ log = logging.getLogger(__name__)
 
 _TASK_METHOD: Mapping[str, str] = {
     "text": "generate_content",
-    "image": "generate_images",
+    "image": "generate_content",
     "video": "generate_videos",
 }
 
 _METHOD_HUMAN: Mapping[str, str] = {
-    "generate_content": "text",
+    "generate_content": "content",
     "generate_images": "image",
     "generate_videos": "video",
 }
@@ -203,7 +203,12 @@ class GeminiRouter:
 
     def _ensure_supported(self, model: str, method: str, task: str) -> None:
         supported = self._resolve_supported_methods(model)
-        if supported and method not in supported:
+        if not supported:
+            return
+        if method not in supported:
+            if method == "generate_content" and task == "image":
+                if "generate_images" in supported:
+                    return
             human_methods = [
                 _METHOD_HUMAN.get(item, item.replace("generate_", ""))
                 for item in supported
