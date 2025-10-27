@@ -318,8 +318,9 @@ class GeminiGenerativeClient(BaseProviderClient):
             if aspect:
                 image_config.setdefault("aspect_ratio", aspect)
             mime = settings.get("mime_type") or settings.get("response_mime_type")
-            if mime:
-                kwargs.setdefault("response_mime_type", mime)
+            if not mime:
+                mime = "image/png"
+            kwargs.setdefault("response_mime_type", mime)
             if image_config:
                 existing_config = kwargs.get("image_config")
                 if isinstance(existing_config, dict):
