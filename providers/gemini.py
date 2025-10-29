@@ -22,6 +22,8 @@ from services.gemini_router import (
     RouteDecision,
     get_gemini_router,
 )
+from services.payload_sanitize import log_removed_keys, sanitize_payload
+from services.payload_whitelists import GEMINI_IMAGE_ALLOWED, GEMINI_TEXT_ALLOWED
 
 from .base import BaseProviderClient, ProviderAPIError, ProviderJobStatus, ProviderJobSubmission
 
@@ -354,6 +356,10 @@ class GeminiGenerativeClient(BaseProviderClient):
             "contents": contents,
             "config": config,
         }
+        if "tools" in payload:
+            request_kwargs["tools"] = payload["tools"]
+        if "system_instruction" in payload:
+            request_kwargs["system_instruction"] = payload["system_instruction"]
         request_meta = {
             "mode": "generate_content",
             "api_version": decision.api_version,
@@ -505,6 +511,17 @@ class GeminiGenerativeClient(BaseProviderClient):
 
         request_settings = dict(settings or {})
         payload_dict = dict(payload or {})
+        allowed_keys: Optional[Set[str]] = None
+        if self.provider_name == "gemini-image":
+            allowed_keys = GEMINI_IMAGE_ALLOWED
+        elif self.provider_name == "gemini-text":
+            allowed_keys = GEMINI_TEXT_ALLOWED
+        if allowed_keys is not None:
+            cleaned_payload = sanitize_payload(payload_dict, allowed_keys)
+            log_removed_keys(
+                f"{self.provider_name}", payload_dict, cleaned_payload, logger=log
+            )
+            payload_dict = cleaned_payload
 
         attempt = 0
         delay = self._config.retry_backoff

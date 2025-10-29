@@ -39,8 +39,11 @@ def test_enqueue_job_builds_payload(sora_config: Config) -> None:
             assert call_args.args[1] == "/responses"
             payload = call_args.kwargs["json"]
             assert payload["model"] == "sora-2"
-            assert payload["modalities"] == ["video"]
             assert payload["input"][0]["content"][0]["text"] == "Make a cool video"
+            assert "modalities" not in payload
+            assert "tools" not in payload
+            assert "tool_choice" not in payload
+            assert "response_format" not in payload
             assert payload["metadata"]["aspect_ratio"] == "16:9"
 
     asyncio.run(scenario())
