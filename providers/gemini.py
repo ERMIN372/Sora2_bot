@@ -15,15 +15,22 @@ from uuid import uuid4
 
 from google.genai import errors as _genai_errors, types as _genai_types
 
-from config import Config
+from config import Config, SafetyCfg
 from services.gemini_key import ensure_gemini_key_logged
 from services.gemini_router import (
     GeminiRoutingError,
     RouteDecision,
     get_gemini_router,
 )
+from services.logging_safety import extract_block_info
 from services.payload_sanitize import log_removed_keys, sanitize_payload
 from services.payload_whitelists import GEMINI_IMAGE_ALLOWED, GEMINI_TEXT_ALLOWED
+from services.prompt_filters import (
+    attach_negative_prompt,
+    default_rephraser,
+    scrub_brands_and_persons,
+)
+from services.retry_policy import RetryDecision, next_attempt
 
 from .base import BaseProviderClient, ProviderAPIError, ProviderJobStatus, ProviderJobSubmission
 
@@ -492,7 +499,7 @@ class GeminiGenerativeClient(BaseProviderClient):
             )
             return None
 
-    async def enqueue_job(
+    async def _submit_single_attempt(
         self,
         *,
         prompt: str,
@@ -592,6 +599,8 @@ class GeminiGenerativeClient(BaseProviderClient):
                     "request_mode": decision.method,
                     "task": decision.task,
                     "key_mask": self._key_mask,
+                    "model": decision.model,
+                    "api_version": decision.api_version,
                 }
                 self._pending[job_id] = (payload_json, 200, duration_ms, meta)
                 size = request_settings.get("size")
@@ -716,6 +725,131 @@ class GeminiGenerativeClient(BaseProviderClient):
                 delay *= self._config.retry_backoff
         assert last_error is not None  # pragma: no cover
         raise last_error
+
+    async def enqueue_job(
+        self,
+        *,
+        prompt: str,
+        settings: Optional[Dict[str, Any]] = None,
+        payload: Optional[Dict[str, Any]] = None,
+        idempotency_key: Optional[str] = None,
+        **_: Any,
+    ) -> ProviderJobSubmission:
+        if self._task not in {"image", "video"}:
+            return await self._submit_single_attempt(
+                prompt=prompt,
+                settings=settings,
+                payload=payload,
+                idempotency_key=idempotency_key,
+            )
+
+        original_prompt = prompt
+        current_prompt = (
+            attach_negative_prompt(prompt, SafetyCfg.NEGATIVE_PROMPT_BASE)
+            if SafetyCfg.ENABLE_NEGATIVE_PROMPT
+            else prompt
+        )
+        attempt = 0
+        rephraser_fn = (
+            default_rephraser(self._api_key)
+            if SafetyCfg.ENABLE_AUTO_REPHRASE
+            else (lambda text: text)
+        )
+
+        while True:
+            submission = await self._submit_single_attempt(
+                prompt=current_prompt,
+                settings=settings,
+                payload=payload,
+                idempotency_key=idempotency_key,
+            )
+
+            pending_record = self._pending.get(submission.job_id)
+            payload_json: Dict[str, Any] = {}
+            meta: Dict[str, Any] = {}
+            if pending_record:
+                stored_payload, _, _, stored_meta = pending_record
+                if isinstance(stored_payload, dict):
+                    payload_json = stored_payload
+                if isinstance(stored_meta, dict):
+                    meta = stored_meta
+            else:
+                if isinstance(submission.data, dict):
+                    payload_json = submission.data
+
+            info = extract_block_info(payload_json)
+            blocked = bool(info.get("reason"))
+            if not blocked and isinstance(payload_json, dict):
+                candidates = payload_json.get("candidates")
+                if isinstance(candidates, list):
+                    for candidate in candidates:
+                        if not isinstance(candidate, dict):
+                            continue
+                        finish = (
+                            candidate.get("finishReason")
+                            or candidate.get("finish_reason")
+                            or ""
+                        )
+                        finish_text = str(finish).upper()
+                        if finish_text in {"STOP", "SAFETY"}:
+                            blocked = True
+                            if not info.get("reason"):
+                                info["reason"] = finish_text
+                            break
+
+            if not blocked:
+                return submission
+
+            if pending_record:
+                self._pending.pop(submission.job_id, None)
+
+            model_name = meta.get("model") or self._model
+            api_version = meta.get("api_version") or self._api_version
+            log.warning(
+                "gemini.safety block provider=%s model=%s api_version=%s attempt=%s reason=%s categories=%s original_prompt=%r sanitized_prompt=%r",
+                self.provider_name,
+                model_name,
+                api_version,
+                attempt + 1,
+                info.get("reason"),
+                info.get("categories"),
+                original_prompt,
+                current_prompt,
+            )
+
+            if attempt >= SafetyCfg.MAX_RETRIES:
+                raise ProviderAPIError(
+                    provider=self.provider_name,
+                    status_code=400,
+                    message="Запрос отклонён политиками Gemini", 
+                    error_type="safety",
+                    provider_message=str(info.get("reason")),
+                    retryable=False,
+                )
+
+            decision: RetryDecision = await asyncio.to_thread(
+                next_attempt,
+                original_prompt=original_prompt,
+                last_prompt=current_prompt,
+                last_response_json=payload_json or {},
+                cfg=SafetyCfg,
+                rephraser=rephraser_fn,
+                scrubber=scrub_brands_and_persons,
+                attach_neg=attach_negative_prompt,
+            )
+
+            if not decision.do_retry:
+                raise ProviderAPIError(
+                    provider=self.provider_name,
+                    status_code=400,
+                    message="Gemini заблокировал запрос", 
+                    error_type="safety",
+                    provider_message=str(info.get("reason")),
+                    retryable=False,
+                )
+
+            current_prompt = decision.next_prompt
+            attempt += 1
 
     async def get_job_status(self, job_id: str) -> ProviderJobStatus:
         record = self._pending.pop(job_id, None)

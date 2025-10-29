@@ -14,10 +14,17 @@ from uuid import uuid4
 
 from google.genai import Client as _GenAIClient, errors as _genai_errors, types as _genai_types
 
-from config import Config
+from config import Config, SafetyCfg
 from services.gemini_client import get_media_client
 from services.gemini_key import ensure_gemini_key_logged
 from services.gemini_router import GeminiRoutingError, get_gemini_router
+from services.logging_safety import extract_block_info
+from services.prompt_filters import (
+    attach_negative_prompt,
+    default_rephraser,
+    scrub_brands_and_persons,
+)
+from services.retry_policy import RetryDecision, next_attempt
 
 from .base import (
     BaseProviderClient,
@@ -450,7 +457,7 @@ class VeoVideoClient(BaseProviderClient):
         self._schema_logged = False
         self._asset_recovery_attempted: Set[str] = set()
 
-    async def enqueue_job(
+    async def _submit_single_attempt(
         self,
         *,
         prompt: str,
@@ -542,6 +549,106 @@ class VeoVideoClient(BaseProviderClient):
             duration_ms=duration_ms,
             data={"operation": data, "operation_name": operation_name},
         )
+
+    async def enqueue_job(
+        self,
+        *,
+        prompt: str,
+        settings: Optional[Dict[str, Any]] = None,
+        payload: Optional[Dict[str, Any]] = None,
+        idempotency_key: Optional[str] = None,
+        **_: Any,
+    ) -> ProviderJobSubmission:
+        original_prompt = prompt
+        current_prompt = (
+            attach_negative_prompt(prompt, SafetyCfg.NEGATIVE_PROMPT_BASE)
+            if SafetyCfg.ENABLE_NEGATIVE_PROMPT
+            else prompt
+        )
+        attempt = 0
+        api_key = self._config.gemini_api_key
+        rephraser_fn = (
+            default_rephraser(api_key)
+            if api_key and SafetyCfg.ENABLE_AUTO_REPHRASE
+            else (lambda text: text)
+        )
+
+        while True:
+            submission = await self._submit_single_attempt(
+                prompt=current_prompt,
+                settings=settings,
+                payload=payload,
+                idempotency_key=idempotency_key,
+            )
+
+            data = submission.data or {}
+            operation_data = data.get("operation") if isinstance(data, dict) else {}
+            info = extract_block_info(operation_data if isinstance(operation_data, dict) else {})
+            if not info.get("reason") and isinstance(operation_data, dict):
+                metadata = operation_data.get("metadata")
+                if isinstance(metadata, dict):
+                    meta_info = extract_block_info(metadata)
+                    if meta_info.get("reason"):
+                        info = meta_info
+
+            blocked = bool(info.get("reason"))
+            if not blocked:
+                return submission
+
+            async with self._lock:
+                request_meta = dict(self._requests.get(submission.job_id, {}))
+                self._operations.pop(submission.job_id, None)
+                self._requests.pop(submission.job_id, None)
+                self._asset_recovery_attempted.discard(submission.job_id)
+
+            model_name = request_meta.get("model") or self._config.gemini_model_video
+            api_version = request_meta.get("api_version") or ""
+
+            log.warning(
+                "veo.safety block provider=%s model=%s api_version=%s attempt=%s reason=%s categories=%s original_prompt=%r sanitized_prompt=%r",
+                self.provider_name,
+                model_name,
+                api_version,
+                attempt + 1,
+                info.get("reason"),
+                info.get("categories"),
+                original_prompt,
+                current_prompt,
+            )
+
+            if attempt >= SafetyCfg.MAX_RETRIES:
+                raise ProviderAPIError(
+                    provider=self.provider_name,
+                    status_code=400,
+                    message="Запрос отклонён политиками Veo",
+                    error_type="safety",
+                    provider_message=str(info.get("reason")),
+                    retryable=False,
+                )
+
+            decision: RetryDecision = await asyncio.to_thread(
+                next_attempt,
+                original_prompt=original_prompt,
+                last_prompt=current_prompt,
+                last_response_json=operation_data or {},
+                cfg=SafetyCfg,
+                rephraser=rephraser_fn,
+                scrubber=scrub_brands_and_persons,
+                attach_neg=attach_negative_prompt,
+            )
+
+            if not decision.do_retry:
+                raise ProviderAPIError(
+                    provider=self.provider_name,
+                    status_code=400,
+                    message="Veo заблокировал запрос",
+                    error_type="safety",
+                    provider_message=str(info.get("reason")),
+                    retryable=False,
+                )
+
+            current_prompt = decision.next_prompt
+            attempt += 1
 
     async def get_job_status(self, job_id: str) -> ProviderJobStatus:
         operation = await self._get_operation(job_id)
