@@ -28,6 +28,7 @@ from providers import (
     VeoVideoClient,
 )
 from services.gemini_key import ensure_gemini_key_logged
+from services.error_reporter import ErrorReporter
 import yookassa_client
 
 _LOG_LEVEL_NAME = os.getenv("LOG_LEVEL", "INFO").upper()
@@ -62,6 +63,7 @@ class ApplicationState:
     uvicorn_task: Optional[asyncio.Task[Any]] = None
     uvicorn_server: Optional[uvicorn.Server] = None
     archive_publisher: Optional[ArchivePublisher] = None
+    error_reporter: Optional[ErrorReporter] = None
 
 
 def _parse_args() -> argparse.Namespace:
@@ -79,6 +81,7 @@ def _init_application(config: Config) -> ApplicationState:
     dp = Dispatcher(bot, storage=MemoryStorage())
     db = Database()
     gate = GenerationRequestGate()
+    error_reporter = ErrorReporter(bot=bot, config=config)
     providers: Dict[str, BaseProviderClient] = {}
 
     if config.gemini_enabled:
@@ -115,14 +118,15 @@ def _init_application(config: Config) -> ApplicationState:
             default_provider = next(iter(providers))
         else:
             default_provider = ""
+    archive_publisher = ArchivePublisher(bot=bot, config=config, db=db)
     job_queue = JobQueue(
         db=db,
         providers=providers,
         default_provider=default_provider,
         config=config,
         gate=gate,
+        error_reporter=error_reporter,
     )
-    archive_publisher = ArchivePublisher(bot=bot, config=config, db=db)
     register_handlers(
         dp,
         db=db,
@@ -130,6 +134,7 @@ def _init_application(config: Config) -> ApplicationState:
         job_queue=job_queue,
         gate=gate,
         archive_publisher=archive_publisher,
+        error_reporter=error_reporter,
     )
 
     app, yookassa_processor = create_app(config=config, dp=dp, bot=bot, db=db)
@@ -144,6 +149,7 @@ def _init_application(config: Config) -> ApplicationState:
         app=app,
         yookassa_processor=yookassa_processor,
         archive_publisher=archive_publisher,
+        error_reporter=error_reporter,
     )
 
 

@@ -17,6 +17,7 @@ from db import Database, ErrorLogRecord, GenerationJobRecord
 from moderation import classify_safety_response, policy_message, render_error_json
 from observability import increment_metric, log_event
 from services.gemini_key import current_key_mask, ensure_gemini_key_logged
+from services.error_reporter import ErrorReporter
 from generation_gate import GenerationRequestGate, compute_generation_idempotency_key
 from providers import BaseProviderClient, ProviderAPIError, ProviderJobStatus, ProviderJobSubmission
 
@@ -292,6 +293,7 @@ class JobQueue:
         default_provider: str,
         config: Config,
         gate: Optional[GenerationRequestGate] = None,
+        error_reporter: Optional[ErrorReporter] = None,
     ) -> None:
         self._db = db
         self._providers = providers
@@ -303,6 +305,7 @@ class JobQueue:
         self._stopped = asyncio.Event()
         self._notification_callbacks: Dict[str, Callable[[GenerationJobRecord], Awaitable[None]]] = {}
         self._environment = (config.environment or "dev").lower()
+        self._error_reporter = error_reporter
         self._gemini_key_mask = ensure_gemini_key_logged(
             config,
             context="job_queue",
@@ -383,6 +386,20 @@ class JobQueue:
     def _reset_operation_tracker(self, job_id: str) -> None:
         self._operation_trackers.pop(job_id, None)
 
+    async def _report_error(
+        self,
+        record: ErrorLogRecord,
+        *,
+        context: str,
+        extra: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        if not self._error_reporter:
+            return
+        try:
+            await self._error_reporter.report(record, context=context, extra=extra)
+        except Exception:  # pragma: no cover - defensive
+            log.exception("Failed to publish error notification context=%s", context)
+
     async def _handle_operation_timeout(
         self,
         *,
@@ -457,6 +474,17 @@ class JobQueue:
             stage="poll",
         )
         sheet_ok = await self._db.log_error_record(error_record)
+        await self._report_error(
+            error_record,
+            context="job_timeout",
+            extra={
+                "gsheets_ok": sheet_ok,
+                "provider": provider_key,
+                "timeout_kind": timeout_kind,
+                "reason_message": reason_message,
+                "operation_tracker": tracker.snapshot(),
+            },
+        )
         log_event(
             level="ERROR",
             event="error",
@@ -1256,6 +1284,17 @@ class JobQueue:
                     stage="poll",
                 )
                 sheet_ok = await self._db.log_error_record(error_record)
+                await self._report_error(
+                    error_record,
+                    context="job_failed",
+                    extra={
+                        "gsheets_ok": sheet_ok,
+                        "provider": provider_key,
+                        "reason_message": error_message,
+                        "provider_message": raw_error_text,
+                        "safety_categories": categories,
+                    },
+                )
                 log_event(
                     level="ERROR",
                     event="error",
@@ -1425,6 +1464,23 @@ class JobQueue:
             stage="poll",
         )
         sheet_ok = await self._db.log_error_record(error_record)
+        await self._report_error(
+            error_record,
+            context="no_media_assets",
+            extra={
+                "gsheets_ok": sheet_ok,
+                "provider": provider_key,
+                "operation_snippet": operation_snippet,
+                "assets_recovery_attempted": provider_data.get(
+                    "assets_recovery_attempted"
+                )
+                if isinstance(provider_data, dict)
+                else None,
+                "no_media_confirmed": provider_data.get("no_media_confirmed")
+                if isinstance(provider_data, dict)
+                else None,
+            },
+        )
 
         log_event(
             level="ERROR",
