@@ -23,6 +23,7 @@ SORA_VIDEO_ALLOWED: Final[Set[str]] = {
     "duration_sec",
     "format",
     "seed",
+    "metadata",
 }
 
 __all__ = [
