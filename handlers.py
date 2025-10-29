@@ -50,6 +50,7 @@ from services.gemini_downloader import (
     GeminiKeyMismatchError,
     download_asset,
 )
+from services.sora_downloader import SoraDownloadError, download_sora_asset
 from services.status_tracker import StatusMessageManager
 from telegram_files import BufferedInputFile
 from utils import build_inline_data_from_telegram_file
@@ -97,6 +98,12 @@ _PRO_REQUEST_PATTERN = re.compile(
 )
 
 _SUPPORTED_VEO_PREFIXES: Tuple[str, ...] = ("veo-3.0-", "veo-3.1-")
+_SUPPORTED_SORA_PREFIXES: Tuple[str, ...] = (
+    "sora-",
+    "sora2",
+    "gpt-4.1-sora",
+    "gpt-4.2-sora",
+)
 
 
 class GenerationStates(StatesGroup):
@@ -162,10 +169,18 @@ def _normalise_video_model_name(name: str) -> str:
     return value
 
 
-def _is_supported_video_model_name(name: str) -> bool:
+def _is_veo_video_model_name(name: str) -> bool:
     normalised = _normalise_video_model_name(name)
     lowered = normalised.lower()
     return any(lowered.startswith(prefix) for prefix in _SUPPORTED_VEO_PREFIXES)
+
+
+def _is_sora_video_model_name(name: str) -> bool:
+    normalised = _normalise_video_model_name(name)
+    lowered = normalised.lower()
+    if lowered in {"sora", "sora-2", "sora2"}:
+        return True
+    return any(lowered.startswith(prefix) for prefix in _SUPPORTED_SORA_PREFIXES)
 
 
 def _make_model_option_key(name: str, used: Set[str]) -> str:
@@ -181,42 +196,43 @@ def _make_model_option_key(name: str, used: Set[str]) -> str:
 
 
 def _video_model_options(config: Config) -> list[VideoModelOption]:
-    if not config.gemini_video_enabled:
-        return []
-
-    names: list[str] = []
-    default_name = _normalise_video_model_name(config.gemini_model_video)
-    if default_name and _is_supported_video_model_name(default_name):
-        names.append(default_name)
-
-    for candidate in list_veo_video_models(config):
-        normalised = _normalise_video_model_name(candidate)
-        if normalised and _is_supported_video_model_name(normalised) and normalised not in names:
-            names.append(normalised)
-
-    if not names:
-        fallback_label = i18n.t("video.models.veo")
-        return [
-            VideoModelOption(
-                key="veo",
-                model=default_name if _is_supported_video_model_name(default_name) else "veo-3.0-generate-001",
-                provider="veo",
-                label=fallback_label,
-            )
-        ]
-
     used_keys: Set[str] = set()
+    seen_models: Set[str] = set()
     options: list[VideoModelOption] = []
-    for model_name in names:
-        key = _make_model_option_key(model_name, used_keys)
+
+    def _register(model_name: str, provider: str, label: str) -> None:
+        normalised = _normalise_video_model_name(model_name)
+        if not normalised or normalised in seen_models:
+            return
+        seen_models.add(normalised)
+        key = _make_model_option_key(normalised, used_keys)
         options.append(
             VideoModelOption(
                 key=key,
-                model=model_name,
-                provider="veo",
-                label=model_name,
+                model=normalised,
+                provider=provider,
+                label=label,
             )
         )
+
+    if config.gemini_video_enabled:
+        fallback_label = i18n.t("video.models.veo")
+        default_name = _normalise_video_model_name(config.gemini_model_video)
+        if default_name:
+            label = default_name if _is_veo_video_model_name(default_name) else fallback_label
+            _register(default_name, "veo", label)
+        for candidate in list_veo_video_models(config):
+            normalised = _normalise_video_model_name(candidate)
+            if _is_veo_video_model_name(normalised):
+                _register(normalised, "veo", normalised)
+
+    if config.sora_video_enabled:
+        fallback_label = i18n.t("video.models.sora")
+        default_sora = _normalise_video_model_name(config.sora_model_video)
+        if default_sora:
+            label = fallback_label or default_sora
+            _register(default_sora, "sora", label)
+
     return options
 
 
@@ -227,6 +243,28 @@ def _find_video_model_option(config: Config, key: str) -> Optional[VideoModelOpt
     return None
 
 
+def _provider_for_model(model: Optional[str], config: Config) -> str:
+    name = _normalise_video_model_name(model or "")
+    if name and _is_veo_video_model_name(name):
+        return "veo"
+    if name and _is_sora_video_model_name(name):
+        return "sora"
+    if name and config.sora_model_video and name == _normalise_video_model_name(config.sora_model_video):
+        return "sora"
+    if name and config.gemini_model_video and name == _normalise_video_model_name(config.gemini_model_video):
+        return "veo"
+    lowered = (model or "").strip().lower()
+    if lowered in {"sora", "sora-video", "openai-video"}:
+        return "sora"
+    if lowered in {"veo", "veo2", "gemini-video"}:
+        return "veo"
+    if config.sora_video_enabled and not config.gemini_video_enabled:
+        return "sora"
+    if config.gemini_video_enabled:
+        return "veo"
+    return "video"
+
+
 def _resolve_model_label(model: str, config: Config) -> str:
     for option in _video_model_options(config):
         if option.model == model or option.label == model:
@@ -235,6 +273,8 @@ def _resolve_model_label(model: str, config: Config) -> str:
             return option.label
     if model in {config.gemini_model_video, "veo", "veo2", "gemini-video"}:
         return i18n.t("video.models.veo")
+    if model in {config.sora_model_video, "sora", "sora-video", "openai-video"}:
+        return i18n.t("video.models.sora")
     if model in {config.gemini_model_image, "gemini-image", "gemini"}:
         return i18n.t("image.model.gemini")
     return model
@@ -1747,16 +1787,28 @@ async def _deliver_remote_video(
         )
         return None
     expected_mask = _expected_key_mask(job)
+    provider_key = _provider_for_model(job.model, config)
     try:
-        downloaded = await download_asset(
-            asset_url=str(asset_reference),
-            config=config,
-            corr_id=corr_id or "",
-            asset_name=asset_name,
-            expected_mask=expected_mask,
-            mime_hint=mime_hint,
-            filename_hint=filename_hint,
-        )
+        if provider_key == "sora":
+            downloaded = await download_sora_asset(
+                asset_url=str(asset_reference),
+                config=config,
+                corr_id=corr_id or "",
+                asset_name=asset_name,
+                expected_mask=expected_mask,
+                mime_hint=mime_hint,
+                filename_hint=filename_hint,
+            )
+        else:
+            downloaded = await download_asset(
+                asset_url=str(asset_reference),
+                config=config,
+                corr_id=corr_id or "",
+                asset_name=asset_name,
+                expected_mask=expected_mask,
+                mime_hint=mime_hint,
+                filename_hint=filename_hint,
+            )
     except GeminiKeyMismatchError as exc:
         log.error(
             "Gemini key mismatch corr_id=%s expected=%s actual=%s",
@@ -1792,6 +1844,21 @@ async def _deliver_remote_video(
             key_mask=expected_mask,
         )
         return None
+    except SoraDownloadError as exc:
+        log.warning(
+            "Sora download failed corr_id=%s status=%s", corr_id, getattr(exc, "status_code", 0)
+        )
+        await _handle_delivery_failure(
+            dp,
+            job,
+            config,
+            db,
+            message=i18n.t("status.delivery_generic"),
+            reason="download_error",
+            extra_log={"status_code": getattr(exc, "status_code", 0)},
+            key_mask=None,
+        )
+        return None
     except GeminiDownloadError as exc:
         log.warning(
             "Gemini download failed corr_id=%s status=%s error=%s",
@@ -1811,7 +1878,7 @@ async def _deliver_remote_video(
                 "error_status": exc.error_status,
             },
             key_mask=expected_mask,
-        )
+            )
         return None
 
     method: Literal["video", "document"] = "video"
@@ -1900,7 +1967,7 @@ async def _deliver_remote_video(
         user_id=job.user_id,
         username=job.username,
         model=job.model,
-        provider="veo",
+        provider=provider_key,
         size=job.size,
         extra={
             "delivery_method": method,
@@ -1966,6 +2033,7 @@ async def _handle_delivery_failure(
         stage = "poll"
     status_code_value = None
     provider_error_code = ""
+    provider_key = _provider_for_model(job.model, config)
     if isinstance(extra_log, dict):
         raw_status = extra_log.get("status_code")
         if isinstance(raw_status, int):
@@ -2008,7 +2076,7 @@ async def _handle_delivery_failure(
         user_id=job.user_id,
         username=job.username,
         model=job.model,
-        provider="veo",
+        provider=provider_key,
         size=job.size,
         extra=extra_payload,
     )
@@ -2020,7 +2088,7 @@ async def _handle_delivery_failure(
         user_id=job.user_id,
         username=job.username,
         model=job.model,
-        provider="veo",
+        provider=provider_key,
         size=job.size,
         credits_cost=config.generation_cost_credits,
         refund_done=refunded,

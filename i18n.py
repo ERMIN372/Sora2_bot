@@ -131,6 +131,7 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "chips.horizontal": "Горизонталь",
         "video.models.prompt": "Выберите модель видеогенерации:",
         "video.models.veo": "Gemini Veo 3.x",
+        "video.models.sora": "OpenAI Sora 2",
         "video.models.unavailable": "недоступно",
         "video.mode.prompt": "Как будем генерировать видео?",
         "video.mode.text": "По тексту",
