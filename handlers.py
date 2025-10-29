@@ -51,6 +51,7 @@ from services.gemini_downloader import (
     download_asset,
 )
 from services.sora_downloader import SoraDownloadError, download_sora_asset
+from services.error_reporter import ErrorReporter
 from services.status_tracker import StatusMessageManager
 from telegram_files import BufferedInputFile
 from utils import build_inline_data_from_telegram_file
@@ -869,6 +870,7 @@ async def _launch_order(
     job_queue: JobQueue,
     config: Config,
     gate: GenerationRequestGate,
+    error_reporter: ErrorReporter,
 ) -> None:
     user = callback.from_user
     if user is None:  # pragma: no cover - defensive
@@ -912,27 +914,35 @@ async def _launch_order(
                 "preflight_scope": preflight.scope,
             },
         )
-        await db.log_error_record(
-            ErrorLogRecord(
-                ts=datetime.utcnow(),
-                user_id=user_id,
-                username=user.username,
-                corr_id=corr_id,
-                job_id="",
-                model=order.model,
-                size=order.size,
-                status_code=0,
-                error_type="preflight_blocked",
-                error_msg_short=_shorten(explanation),
-                refunded=False,
-                preflight_blocked=True,
-                preflight_reason=preflight.reason or "",
-                auto_sanitized=False,
-                sanitized_prompt=preflight.sanitized_prompt,
-                error_scope=preflight.scope or "unknown",
-                error_json="",
-                stage="submit",
-            )
+        error_record = ErrorLogRecord(
+            ts=datetime.utcnow(),
+            user_id=user_id,
+            username=user.username,
+            corr_id=corr_id,
+            job_id="",
+            model=order.model,
+            size=order.size,
+            status_code=0,
+            error_type="preflight_blocked",
+            error_msg_short=_shorten(explanation),
+            refunded=False,
+            preflight_blocked=True,
+            preflight_reason=preflight.reason or "",
+            auto_sanitized=False,
+            sanitized_prompt=preflight.sanitized_prompt,
+            error_scope=preflight.scope or "unknown",
+            error_json="",
+            stage="submit",
+        )
+        sheet_ok = await db.log_error_record(error_record)
+        await error_reporter.report(
+            error_record,
+            context="preflight_block",
+            extra={
+                "gsheets_ok": sheet_ok,
+                "provider": order.provider or order.model,
+                "preflight_scope": preflight.scope,
+            },
         )
         session.pending_order = None
         await callback.message.answer(explanation)
@@ -1112,27 +1122,35 @@ async def _launch_order(
         except Exception:  # pragma: no cover - external dependency
             log.exception("Failed to refund credits after configuration error")
         await _release_lock("submit_failed", "provider_unavailable")
-        sheet_ok = await db.log_error_record(
-            ErrorLogRecord(
-                ts=datetime.utcnow(),
-                user_id=user_id,
-                username=user.username,
-                corr_id=corr_id,
-                job_id="",
-                model=order.model,
-                size=order.size,
-                status_code=0,
-                error_type="provider_unavailable",
-                error_msg_short=_shorten(str(exc)),
-                refunded=refunded,
-                preflight_blocked=False,
-                preflight_reason=preflight.reason or "",
-                auto_sanitized=preflight.auto_sanitized,
-                sanitized_prompt=order.prompt,
-                error_scope=preflight.scope or "provider_unavailable",
-                error_json="",
-                stage="submit",
-            )
+        error_record = ErrorLogRecord(
+            ts=datetime.utcnow(),
+            user_id=user_id,
+            username=user.username,
+            corr_id=corr_id,
+            job_id="",
+            model=order.model,
+            size=order.size,
+            status_code=0,
+            error_type="provider_unavailable",
+            error_msg_short=_shorten(str(exc)),
+            refunded=refunded,
+            preflight_blocked=False,
+            preflight_reason=preflight.reason or "",
+            auto_sanitized=preflight.auto_sanitized,
+            sanitized_prompt=order.prompt,
+            error_scope=preflight.scope or "provider_unavailable",
+            error_json="",
+            stage="submit",
+        )
+        sheet_ok = await db.log_error_record(error_record)
+        await error_reporter.report(
+            error_record,
+            context="provider_unavailable",
+            extra={
+                "gsheets_ok": sheet_ok,
+                "provider": provider_key,
+                "refunded": refunded,
+            },
         )
         await callback.message.answer(i18n.t("errors.video_models_unavailable"))
         log_event(
@@ -1183,27 +1201,36 @@ async def _launch_order(
         except Exception:  # pragma: no cover - external dependency
             log.exception("Failed to refund credits after submit error")
         await _release_lock("submit_failed", exc.error_type or "submit_failed")
-        sheet_ok = await db.log_error_record(
-            ErrorLogRecord(
-                ts=datetime.utcnow(),
-                user_id=user_id,
-                username=user.username,
-                corr_id=corr_id,
-                job_id="",
-                model=order.model,
-                size=order.size,
-                status_code=exc.status_code,
-                error_type=exc.error_type or "submit_failed",
-                error_msg_short=short,
-                refunded=refunded,
-                preflight_blocked=False,
-                preflight_reason=preflight.reason or "",
-                auto_sanitized=preflight.auto_sanitized,
-                sanitized_prompt=order.prompt,
-                error_scope=preflight.scope or hint,
-                error_json="",
-                stage="submit",
-            )
+        error_record = ErrorLogRecord(
+            ts=datetime.utcnow(),
+            user_id=user_id,
+            username=user.username,
+            corr_id=corr_id,
+            job_id="",
+            model=order.model,
+            size=order.size,
+            status_code=exc.status_code,
+            error_type=exc.error_type or "submit_failed",
+            error_msg_short=short,
+            refunded=refunded,
+            preflight_blocked=False,
+            preflight_reason=preflight.reason or "",
+            auto_sanitized=preflight.auto_sanitized,
+            sanitized_prompt=order.prompt,
+            error_scope=preflight.scope or hint,
+            error_json="",
+            stage="submit",
+        )
+        sheet_ok = await db.log_error_record(error_record)
+        await error_reporter.report(
+            error_record,
+            context=exc.error_type or "submit_failed",
+            extra={
+                "gsheets_ok": sheet_ok,
+                "provider": provider_key,
+                "refunded": refunded,
+                "notify_support": notify_support,
+            },
         )
         log_event(
             level="ERROR",
@@ -1265,27 +1292,35 @@ async def _launch_order(
             log.exception("Failed to refund credits after unexpected error")
         await _release_lock("submit_failed", "unexpected_error")
         short = _shorten(str(exc) or "Неизвестная ошибка")
-        sheet_ok = await db.log_error_record(
-            ErrorLogRecord(
-                ts=datetime.utcnow(),
-                user_id=user_id,
-                username=user.username,
-                corr_id=corr_id,
-                job_id="",
-                model=order.model,
-                size=order.size,
-                status_code=None,
-                error_type="internal",
-                error_msg_short=short,
-                refunded=refunded,
-                preflight_blocked=False,
-                preflight_reason=preflight.reason or "",
-                auto_sanitized=preflight.auto_sanitized,
-                sanitized_prompt=order.prompt,
-                error_scope=preflight.scope or "unknown",
-                error_json="",
-                stage="submit",
-            )
+        error_record = ErrorLogRecord(
+            ts=datetime.utcnow(),
+            user_id=user_id,
+            username=user.username,
+            corr_id=corr_id,
+            job_id="",
+            model=order.model,
+            size=order.size,
+            status_code=None,
+            error_type="internal",
+            error_msg_short=short,
+            refunded=refunded,
+            preflight_blocked=False,
+            preflight_reason=preflight.reason or "",
+            auto_sanitized=preflight.auto_sanitized,
+            sanitized_prompt=order.prompt,
+            error_scope=preflight.scope or "unknown",
+            error_json="",
+            stage="submit",
+        )
+        sheet_ok = await db.log_error_record(error_record)
+        await error_reporter.report(
+            error_record,
+            context="internal_error",
+            extra={
+                "gsheets_ok": sheet_ok,
+                "provider": provider_key,
+                "refunded": refunded,
+            },
         )
         log_event(
             level="ERROR",
@@ -1357,6 +1392,7 @@ async def _send_job_update(
     archive: Optional[ArchivePublisher],
     config: Config,
     db: Database,
+    error_reporter: ErrorReporter,
 ) -> None:
     try:
         await STATUS_MESSAGES.ensure_started(bot=dp.bot, db=db, job=job)
@@ -1423,11 +1459,15 @@ async def _send_job_update(
         sent_info: Optional[SentMediaInfo] = None
         inline_assets = _collect_inline_assets(job)
         if inline_assets:
-            sent_info = await _send_inline_assets(dp, job, inline_assets, config, db)
+            sent_info = await _send_inline_assets(
+                dp, job, inline_assets, config, db, error_reporter
+            )
         if sent_info is None and job.video_url:
             inline_image = _parse_inline_image(job.video_url)
             if inline_image:
-                sent_info = await _send_inline_image(dp, job, inline_image, config, db)
+                sent_info = await _send_inline_image(
+                    dp, job, inline_image, config, db, error_reporter
+                )
         if sent_info is None:
             remote_asset = _select_remote_video_asset(job)
             if remote_asset and remote_asset.get("url"):
@@ -1437,6 +1477,7 @@ async def _send_job_update(
                     asset=remote_asset,
                     config=config,
                     db=db,
+                    error_reporter=error_reporter,
                 )
 
         if sent_info is None:
@@ -1445,6 +1486,7 @@ async def _send_job_update(
                 job,
                 config,
                 db,
+                error_reporter=error_reporter,
                 message=i18n.t("status.delivery_generic"),
                 reason="no_media",
                 extra_log={"stage": "no_media_assets"},
@@ -1630,6 +1672,7 @@ async def _send_inline_image(
     inline_image: tuple[str, bytes],
     config: Config,
     db: Database,
+    error_reporter: ErrorReporter,
 ) -> Optional[SentMediaInfo]:
     mime, payload = inline_image
     filename = "image.png"
@@ -1643,6 +1686,7 @@ async def _send_inline_image(
             job,
             config,
             db,
+            error_reporter=error_reporter,
             message=i18n.t("status.delivery_generic"),
             reason="telegram_error",
             extra_log={"stage": "inline_image"},
@@ -1673,6 +1717,7 @@ async def _send_inline_assets(
     assets: List[Dict[str, Any]],
     config: Config,
     db: Database,
+    error_reporter: ErrorReporter,
 ) -> Optional[SentMediaInfo]:
     send_as_photo = (job.content_type or "video") == "image"
     for index, asset in enumerate(assets):
@@ -1686,6 +1731,7 @@ async def _send_inline_assets(
                 job,
                 config,
                 db,
+                error_reporter=error_reporter,
                 message=i18n.t("status.inline_decode_failed"),
                 reason="inline_decode",
                 extra_log={"asset_index": index},
@@ -1699,6 +1745,7 @@ async def _send_inline_assets(
                 job,
                 config,
                 db,
+                error_reporter=error_reporter,
                 message=i18n.t(
                     "status.inline_too_large",
                     mime=mime,
@@ -1734,6 +1781,7 @@ async def _send_inline_assets(
                 job,
                 config,
                 db,
+                error_reporter=error_reporter,
                 message=i18n.t("status.delivery_generic"),
                 reason="telegram_error",
                 extra_log={"stage": "inline_asset", "asset_index": index},
@@ -1767,6 +1815,7 @@ async def _deliver_remote_video(
     asset: Dict[str, Any],
     config: Config,
     db: Database,
+    error_reporter: ErrorReporter,
 ) -> Optional[SentMediaInfo]:
     corr_id = job.corr_id or job.id
     asset_name = str(asset.get("key") or "video")
@@ -1780,6 +1829,7 @@ async def _deliver_remote_video(
             job,
             config,
             db,
+            error_reporter=error_reporter,
             message=i18n.t("status.delivery_generic"),
             reason="missing_asset",
             extra_log={"asset": asset},
@@ -1821,6 +1871,7 @@ async def _deliver_remote_video(
             job,
             config,
             db,
+            error_reporter=error_reporter,
             message=i18n.t("status.delivery_key_mismatch"),
             reason="key_mismatch",
             extra_log={"expected_mask": exc.expected, "actual_mask": exc.actual},
@@ -1838,6 +1889,7 @@ async def _deliver_remote_video(
             job,
             config,
             db,
+            error_reporter=error_reporter,
             message=i18n.t("status.delivery_config_error"),
             reason="config_error",
             extra_log={"error_status": exc.error_status},
@@ -1853,6 +1905,7 @@ async def _deliver_remote_video(
             job,
             config,
             db,
+            error_reporter=error_reporter,
             message=i18n.t("status.delivery_generic"),
             reason="download_error",
             extra_log={"status_code": getattr(exc, "status_code", 0)},
@@ -1871,6 +1924,7 @@ async def _deliver_remote_video(
             job,
             config,
             db,
+            error_reporter=error_reporter,
             message=i18n.t("status.delivery_generic"),
             reason="download_error",
             extra_log={
@@ -1878,7 +1932,7 @@ async def _deliver_remote_video(
                 "error_status": exc.error_status,
             },
             key_mask=expected_mask,
-            )
+        )
         return None
 
     method: Literal["video", "document"] = "video"
@@ -1915,6 +1969,7 @@ async def _deliver_remote_video(
                 job,
                 config,
                 db,
+                error_reporter=error_reporter,
                 message=i18n.t("status.delivery_too_large"),
                 reason="too_large",
                 extra_log={"asset_bytes": downloaded.size},
@@ -1928,6 +1983,7 @@ async def _deliver_remote_video(
             job,
             config,
             db,
+            error_reporter=error_reporter,
             message=i18n.t("status.delivery_generic"),
             reason="telegram_error",
             extra_log={"asset_bytes": downloaded.size},
@@ -1995,6 +2051,7 @@ async def _handle_delivery_failure(
     config: Config,
     db: Database,
     *,
+    error_reporter: ErrorReporter,
     message: str,
     reason: str,
     extra_log: Optional[Dict[str, Any]] = None,
@@ -2042,31 +2099,40 @@ async def _handle_delivery_failure(
         provider_error_message = str(extra_log.get("error_status") or extra_log.get("reason_message") or "")
     else:
         provider_error_message = ""
-    await db.log_error_record(
-        ErrorLogRecord(
-            ts=datetime.utcnow(),
-            user_id=job.user_id,
-            username=job.username,
-            corr_id=job.corr_id,
-            job_id=job.id,
-            model=job.model,
-            size=job.size,
-            status_code=status_code_value,
-            error_type=reason,
-            error_msg_short=message[:240],
-            refunded=refunded,
-            preflight_blocked=False,
-            preflight_reason="",
-            auto_sanitized=False,
-            sanitized_prompt=job.prompt,
-            error_scope="delivery",
-            error_json="",
-            job_status="failed",
-            reason=reason,
-            provider_error_code=provider_error_code[:120],
-            provider_error_message=provider_error_message[:240],
-            stage=stage,
-        )
+    error_record = ErrorLogRecord(
+        ts=datetime.utcnow(),
+        user_id=job.user_id,
+        username=job.username,
+        corr_id=job.corr_id,
+        job_id=job.id,
+        model=job.model,
+        size=job.size,
+        status_code=status_code_value,
+        error_type=reason,
+        error_msg_short=message[:240],
+        refunded=refunded,
+        preflight_blocked=False,
+        preflight_reason="",
+        auto_sanitized=False,
+        sanitized_prompt=job.prompt,
+        error_scope="delivery",
+        error_json="",
+        job_status="failed",
+        reason=reason,
+        provider_error_code=provider_error_code[:120],
+        provider_error_message=provider_error_message[:240],
+        stage=stage,
+    )
+    sheet_ok = await db.log_error_record(error_record)
+    await error_reporter.report(
+        error_record,
+        context=f"delivery_{reason}",
+        extra={
+            **extra_payload,
+            "gsheets_ok": sheet_ok,
+            "provider": provider_key,
+            "refunded": refunded,
+        },
     )
     log_event(
         level="ERROR",
@@ -2479,6 +2545,7 @@ async def order_callback_handler(
     job_queue: JobQueue,
     config: Config,
     gate: GenerationRequestGate,
+    error_reporter: ErrorReporter,
 ) -> None:
     await callback.answer()
     action = (callback.data or "").split(":", maxsplit=1)[-1]
@@ -2533,6 +2600,7 @@ async def order_callback_handler(
             job_queue=job_queue,
             config=config,
             gate=gate,
+            error_reporter=error_reporter,
         )
 
 
@@ -2786,10 +2854,18 @@ def register_handlers(
     job_queue: JobQueue,
     gate: GenerationRequestGate,
     archive_publisher: ArchivePublisher,
+    error_reporter: ErrorReporter,
 ) -> None:
     job_queue.register_notification_callback(
         name="telegram",
-        callback=lambda job: _send_job_update(dp, job, archive_publisher, config, db),
+        callback=lambda job: _send_job_update(
+            dp,
+            job,
+            archive_publisher,
+            config,
+            db,
+            error_reporter,
+        ),
     )
 
     dp.register_message_handler(
@@ -2903,7 +2979,9 @@ def register_handlers(
         state="*",
     )
     dp.register_callback_query_handler(
-        lambda call, state: order_callback_handler(call, state, db, job_queue, config, gate),
+        lambda call, state: order_callback_handler(
+            call, state, db, job_queue, config, gate, error_reporter
+        ),
         lambda call: call.data and call.data.startswith("order:"),
         state="*",
     )
