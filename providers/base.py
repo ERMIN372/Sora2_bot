@@ -397,12 +397,13 @@ class BaseProviderClient:
                 )
                 if status >= 400:
                     log.warning(
-                        "Provider responded with error provider=%s method=%s url=%s status=%s duration_ms=%s",
+                        "Provider responded with error provider=%s method=%s url=%s status=%s duration_ms=%s body=%s",
                         self._provider_name,
                         method,
                         url,
                         status,
                         duration_ms,
+                        _truncate(text, limit=2048),
                     )
                     raise self._build_error(status, text, duration_ms)
                 if not text:
@@ -454,11 +455,57 @@ class BaseProviderClient:
         error_type = None
         error_code = None
         retryable = status >= 500
+        error_context: Dict[str, Any] = {}
         if isinstance(payload, dict):
             message = payload.get("message") or payload.get("error") or message
             error_type = payload.get("type") or payload.get("error_type")
             error_code = payload.get("code") or payload.get("error_code")
             retryable = bool(payload.get("retryable", retryable))
+            nested_error = payload.get("error")
+            if isinstance(nested_error, dict):
+                message = nested_error.get("message") or message
+                error_type = (
+                    nested_error.get("type")
+                    or nested_error.get("error_type")
+                    or error_type
+                )
+                error_code = (
+                    nested_error.get("code")
+                    or nested_error.get("error_code")
+                    or error_code
+                )
+                for key in ("param", "detail", "details", "help", "url"):
+                    value = nested_error.get(key)
+                    if value:
+                        error_context[key] = value
+                extra_fields = {
+                    key: value
+                    for key, value in nested_error.items()
+                    if key
+                    not in {
+                        "message",
+                        "type",
+                        "error_type",
+                        "code",
+                        "error_code",
+                        "param",
+                        "detail",
+                        "details",
+                        "help",
+                        "url",
+                    }
+                }
+                if extra_fields:
+                    error_context.setdefault("extra", extra_fields)
+        if error_context:
+            log.warning(
+                "Provider error details provider=%s status=%s type=%s code=%s context=%s",
+                self._provider_name,
+                status,
+                error_type,
+                error_code,
+                _serialise_for_log(error_context, limit=2048),
+            )
         return ProviderAPIError(
             provider=self._provider_name,
             status_code=status,
