@@ -264,9 +264,9 @@ class SoraVideoClient(BaseProviderClient):
             or cleaned_payload.get("duration_sec")
         )
         if isinstance(duration, (int, float)) and duration > 0:
-            metadata["duration_sec"] = int(duration)
+            metadata["duration_sec"] = str(int(duration))
         elif isinstance(duration, str) and duration.isdigit():
-            metadata["duration_sec"] = int(duration)
+            metadata["duration_sec"] = str(int(duration))
         if cleaned_payload.get("format"):
             metadata["format"] = cleaned_payload["format"]
         if cleaned_payload.get("seed") is not None:

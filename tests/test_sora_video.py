@@ -28,7 +28,7 @@ def test_enqueue_job_builds_payload(sora_config: Config) -> None:
         ) as mock_request:
             submission = await client.enqueue_job(
                 prompt="Make a cool video",
-                settings={"size": "1280x720"},
+                settings={"size": "1280x720", "duration_sec": 6},
                 idempotency_key="idem-1",
             )
 
@@ -45,6 +45,7 @@ def test_enqueue_job_builds_payload(sora_config: Config) -> None:
             assert "tool_choice" not in payload
             assert "response_format" not in payload
             assert payload["metadata"]["aspect_ratio"] == "16:9"
+            assert payload["metadata"]["duration_sec"] == "6"
 
     asyncio.run(scenario())
 
