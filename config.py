@@ -588,3 +588,26 @@ __all__ = [
     "CFG",
     "load_config",
 ]
+
+
+class SafetyCfg:
+    ENABLE_AUTO_REPHRASE: bool = True
+    ENABLE_NEGATIVE_PROMPT: bool = True
+    MAX_RETRIES: int = 2
+    ENABLE_PRE_CLEAN: bool = True
+    NEGATIVE_PROMPT_BASE: str = (
+        "no nudity; no violence; no blood; no gore; no hate; no drugs; "
+        "family-friendly; safe; neutral; no brand logos; no trademarks; "
+        "no real persons; no celebrities; prevent sensitive content"
+    )
+
+
+class RoutingCfg:
+    TEXT_API_VERSION = "v1"
+    MEDIA_API_VERSION = "v1beta"
+
+
+class Models:
+    TEXT_MODEL = "gemini-2.5-flash"
+    IMAGE_MODEL = "gemini-2.5-flash-image"
+    VIDEO_MODEL = "veo-3.0-generate-001"

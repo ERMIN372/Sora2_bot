@@ -9,7 +9,7 @@ from typing import Dict, Tuple
 from google.genai import Client as _GenAIClient
 from google.genai import types as _genai_types
 
-from config import Config
+from config import Config, RoutingCfg
 from services.gemini_key import ensure_gemini_key_logged
 
 log = logging.getLogger(__name__)
@@ -72,13 +72,13 @@ def _get_client(config: Config, *, api_version: str) -> _GenAIClient:
 def get_text_client(config: Config) -> _GenAIClient:
     """Return a Gemini client configured for text models (v1)."""
 
-    return _get_client(config, api_version="v1")
+    return _get_client(config, api_version=RoutingCfg.TEXT_API_VERSION)
 
 
 def get_media_client(config: Config) -> _GenAIClient:
     """Return a Gemini client configured for media models (v1beta)."""
 
-    return _get_client(config, api_version="v1beta")
+    return _get_client(config, api_version=RoutingCfg.MEDIA_API_VERSION)
 
 
 def get_gemini_client(config: Config, *, api_version: str | None = None) -> _GenAIClient:
