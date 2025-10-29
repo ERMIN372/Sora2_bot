@@ -14,7 +14,11 @@ from .base import (
     ProviderJobStatus,
     ProviderJobSubmission,
 )
-from services.payload_sanitize import log_removed_keys, sanitize_payload
+from services.payload_sanitize import (
+    log_removed_keys,
+    normalize_sora_payload,
+    sanitize_payload,
+)
 from services.payload_whitelists import SORA_VIDEO_ALLOWED
 
 log = logging.getLogger(__name__)
@@ -195,8 +199,9 @@ class SoraVideoClient(BaseProviderClient):
     ) -> Dict[str, Any]:
         if not prompt:
             raise ValueError("prompt must not be empty")
-        cleaned_payload = sanitize_payload(payload, SORA_VIDEO_ALLOWED)
-        log_removed_keys("sora-video", payload, cleaned_payload, logger=log)
+        normalized_payload = normalize_sora_payload(payload or {})
+        cleaned_payload = sanitize_payload(normalized_payload, SORA_VIDEO_ALLOWED)
+        log_removed_keys("sora-video", normalized_payload, cleaned_payload, logger=log)
         prompt_value = cleaned_payload.get("prompt")
         if isinstance(prompt_value, str) and prompt_value.strip():
             prompt_text = prompt_value.strip()
