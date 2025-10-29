@@ -14,6 +14,8 @@ from .base import (
     ProviderJobStatus,
     ProviderJobSubmission,
 )
+from services.payload_sanitize import log_removed_keys, sanitize_payload
+from services.payload_whitelists import SORA_VIDEO_ALLOWED
 
 log = logging.getLogger(__name__)
 
@@ -131,9 +133,11 @@ class SoraVideoClient(BaseProviderClient):
             settings=settings or {},
             payload=payload or {},
         )
+        endpoint = "/responses"
+        log.info("sora.request endpoint=%s method=%s", endpoint, "POST")
         data, status_code, duration_ms = await self._request(
             "POST",
-            "/responses",
+            endpoint,
             json=request_payload,
             idempotency_key=idempotency_key,
         )
@@ -161,7 +165,9 @@ class SoraVideoClient(BaseProviderClient):
             status_code = 200
             duration_ms = 0
         else:
-            data, status_code, duration_ms = await self._request("GET", f"/responses/{job_id}")
+            endpoint = f"/responses/{job_id}"
+            log.info("sora.request endpoint=%s method=%s", endpoint, "GET")
+            data, status_code, duration_ms = await self._request("GET", endpoint)
             self._cache[job_id] = data
         status = self._extract_status(data)
         error = self._extract_error(data)
@@ -189,9 +195,16 @@ class SoraVideoClient(BaseProviderClient):
     ) -> Dict[str, Any]:
         if not prompt:
             raise ValueError("prompt must not be empty")
+        cleaned_payload = sanitize_payload(payload, SORA_VIDEO_ALLOWED)
+        log_removed_keys("sora-video", payload, cleaned_payload, logger=log)
+        prompt_value = cleaned_payload.get("prompt")
+        if isinstance(prompt_value, str) and prompt_value.strip():
+            prompt_text = prompt_value.strip()
+        else:
+            prompt_text = prompt
         model_name = (settings.get("model") or self._default_model or "sora-2").strip()
         content: list[Dict[str, Any]] = [
-            {"type": "input_text", "text": prompt},
+            {"type": "input_text", "text": prompt_text},
         ]
         reference_url = settings.get("reference_image_url") or settings.get("reference_url")
         if isinstance(reference_url, str) and reference_url.strip():
@@ -224,7 +237,6 @@ class SoraVideoClient(BaseProviderClient):
                     content.append(item)
         request: Dict[str, Any] = {
             "model": model_name,
-            "modalities": ["video"],
             "input": [
                 {
                     "role": "user",
@@ -232,32 +244,30 @@ class SoraVideoClient(BaseProviderClient):
                 }
             ],
         }
-        response_format = settings.get("response_format") or payload.get("response_format")
-        if response_format:
-            request["response_format"] = response_format
         metadata: Dict[str, Any] = {}
-        aspect_ratio = settings.get("aspect_ratio") or _infer_aspect_ratio(str(settings.get("size") or ""))
+        aspect_ratio = (
+            settings.get("aspect_ratio")
+            or cleaned_payload.get("aspect_ratio")
+            or _infer_aspect_ratio(str(settings.get("size") or ""))
+        )
         if aspect_ratio:
             metadata["aspect_ratio"] = aspect_ratio
         duration = (
             settings.get("duration")
             or settings.get("duration_sec")
             or settings.get("duration_seconds")
+            or cleaned_payload.get("duration_sec")
         )
         if isinstance(duration, (int, float)) and duration > 0:
             metadata["duration_sec"] = int(duration)
         elif isinstance(duration, str) and duration.isdigit():
             metadata["duration_sec"] = int(duration)
-        if payload.get("metadata") and isinstance(payload["metadata"], dict):
-            metadata.update({k: v for k, v in payload["metadata"].items() if v is not None})
+        if cleaned_payload.get("format"):
+            metadata["format"] = cleaned_payload["format"]
+        if cleaned_payload.get("seed") is not None:
+            metadata["seed"] = cleaned_payload["seed"]
         if metadata:
             request["metadata"] = metadata
-        tools = payload.get("tools")
-        if isinstance(tools, list):
-            request["tools"] = tools
-        tool_choice = payload.get("tool_choice")
-        if tool_choice is not None:
-            request["tool_choice"] = tool_choice
         return request
 
     def _resolve_job_id(self, payload: Dict[str, Any]) -> Optional[str]:
