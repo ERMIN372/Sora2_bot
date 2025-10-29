@@ -141,6 +141,10 @@ class Config:
     gemini_model_text: str = "gemini-2.0-flash"
     gemini_model_image: str = "gemini-2.5-flash-image"
     gemini_model_video: str = "veo-3.0-generate-001"
+    openai_api_key: str = ""
+    sora_api_key: str = ""
+    sora_model_video: str = "sora-2"
+    openai_api_base: str = "https://api.openai.com/v1"
     default_video_model: str = "veo-3.0-generate-001"
     database_path: str = "./bot.db"
     jobs_concurrency: int = 2
@@ -210,6 +214,22 @@ class Config:
         """Return ``True`` if Gemini video generation can be used."""
 
         return self.gemini_enabled and bool(self.gemini_model_video)
+
+    @property
+    def openai_key(self) -> str:
+        return (self.sora_api_key or self.openai_api_key or "").strip()
+
+    @property
+    def sora_enabled(self) -> bool:
+        """Return ``True`` if Sora (OpenAI) API key is configured."""
+
+        return bool(self.openai_key)
+
+    @property
+    def sora_video_enabled(self) -> bool:
+        """Return ``True`` if Sora video generation can be used."""
+
+        return self.sora_enabled and bool((self.sora_model_video or "").strip())
 
     @property
     def allowed_package_ids(self) -> Tuple[str, ...]:
@@ -396,6 +416,20 @@ def load_config() -> Config:
         os.getenv("GEMINI_MODEL_VIDEO", Config.gemini_model_video).strip()
         or Config.gemini_model_video
     )
+    raw_sora_api_key = os.getenv("SORA_API_KEY")
+    raw_openai_api_key = os.getenv("OPENAI_API_KEY")
+    if raw_sora_api_key and raw_openai_api_key and raw_sora_api_key.strip() != raw_openai_api_key.strip():
+        log.info("SORA_API_KEY detected; preferring it over OPENAI_API_KEY for Sora access")
+    openai_api_key = (raw_openai_api_key or "").strip()
+    sora_api_key = (raw_sora_api_key or raw_openai_api_key or "").strip()
+    openai_api_base = (
+        os.getenv("OPENAI_API_BASE", Config.openai_api_base).strip()
+        or Config.openai_api_base
+    )
+    sora_model_video = (
+        os.getenv("SORA_MODEL_VIDEO", Config.sora_model_video).strip()
+        or Config.sora_model_video
+    )
     gemini_enabled = bool(gemini_api_key)
     if not gemini_enabled:
         log.warning("Gemini API key is not configured; generation features will be disabled")
@@ -408,7 +442,12 @@ def load_config() -> Config:
 
     default_video_model = (os.getenv("DEFAULT_VIDEO_MODEL") or "").strip()
     if not default_video_model:
-        default_video_model = gemini_model_video if gemini_enabled else ""
+        if gemini_enabled:
+            default_video_model = gemini_model_video
+        elif sora_api_key:
+            default_video_model = sora_model_video
+        else:
+            default_video_model = ""
     database_path = os.getenv("DATABASE_PATH", Config.database_path)
     google_sheet_id = os.getenv("GOOGLE_SHEET_ID")
     if not google_sheet_id:
@@ -423,6 +462,7 @@ def load_config() -> Config:
     prefixes = [
         "GEMINI_COST_RUB_",
         "VEO_COST_RUB_",
+        "SORA_COST_RUB_",
     ]
     pricing = PricingConfig(
         credit_price_rub=_get_env_decimal("CREDIT_PRICE_RUB", DEFAULT_CREDIT_PRICE_RUB),
@@ -440,6 +480,10 @@ def load_config() -> Config:
         gemini_model_text=gemini_model_text,
         gemini_model_image=gemini_model_image,
         gemini_model_video=gemini_model_video,
+        openai_api_key=openai_api_key,
+        sora_api_key=sora_api_key,
+        sora_model_video=sora_model_video,
+        openai_api_base=openai_api_base,
         default_video_model=default_video_model,
         database_path=database_path,
         google_sheet_id=google_sheet_id,

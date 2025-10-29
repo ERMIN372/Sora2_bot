@@ -267,6 +267,11 @@ async def run_startup_healthcheck(*, config: Config, mode: str) -> HealthCheckRe
         add_check("GEMINI_MODEL_TEXT", True, "disabled")
         add_check("GEMINI_MODEL_IMAGE", True, "disabled")
         add_check("GEMINI_MODEL_VIDEO", True, "disabled")
+    add_check("SORA_ENABLED", config.sora_enabled, str(config.sora_enabled).lower())
+    if config.sora_enabled:
+        add_check("SORA_MODEL_VIDEO", bool(config.sora_model_video), config.sora_model_video)
+    else:
+        add_check("SORA_MODEL_VIDEO", True, "disabled")
     add_check("CREDIT_PRICE_KOPEKS", config.credit_price_kopeks > 0, config.credit_price_kopeks)
     add_check("VIDEO_CREDITS", config.generation_cost_credits > 0, config.generation_cost_credits)
 

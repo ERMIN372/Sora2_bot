@@ -21,7 +21,12 @@ from generation_gate import GenerationRequestGate
 from handlers import register_handlers
 from jobs import JobQueue
 from healthcheck import run_startup_healthcheck
-from providers import BaseProviderClient, GeminiImageClient, VeoVideoClient
+from providers import (
+    BaseProviderClient,
+    GeminiImageClient,
+    SoraVideoClient,
+    VeoVideoClient,
+)
 from services.gemini_key import ensure_gemini_key_logged
 import yookassa_client
 
@@ -92,6 +97,15 @@ def _init_application(config: Config) -> ApplicationState:
                 "veo": veo_client,
                 "gemini-video": veo_client,
                 config.gemini_model_video: veo_client,
+            }
+        )
+    if config.sora_video_enabled:
+        sora_client = SoraVideoClient(config=config)
+        providers.update(
+            {
+                "sora": sora_client,
+                "openai-video": sora_client,
+                config.sora_model_video: sora_client,
             }
         )
 
