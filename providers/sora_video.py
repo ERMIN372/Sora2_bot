@@ -116,7 +116,7 @@ class SoraVideoClient(BaseProviderClient):
             provider_name="sora",
             default_headers=default_headers,
         )
-        self._default_model = (config.sora_model_video or "sora-2").strip() or "sora-2"
+        self._default_model = (config.sora_model_video or "sora").strip() or "sora"
         self._cache: Dict[str, Dict[str, Any]] = {}
 
     # ------------------------------------------------------------------
@@ -207,7 +207,7 @@ class SoraVideoClient(BaseProviderClient):
             prompt_text = prompt_value.strip()
         else:
             prompt_text = prompt
-        model_name = (settings.get("model") or self._default_model or "sora-2").strip()
+        model_name = (settings.get("model") or self._default_model or "sora").strip()
         content: list[Dict[str, Any]] = [
             {"type": "input_text", "text": prompt_text},
         ]

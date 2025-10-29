@@ -57,7 +57,7 @@ Veo и изображений через Google Gemini. Он управляет 
 | `GEMINI_MODEL_VIDEO` | Модель Gemini (Veo) для видеогенерации (по умолчанию `veo-3.0-generate-001`). |
 | `SORA_API_KEY` | Ключ OpenAI Sora. Если не задан, используется `OPENAI_API_KEY`. |
 | `OPENAI_API_KEY` | Резервный ключ OpenAI (подходит для Sora). |
-| `SORA_MODEL_VIDEO` | Модель Sora для видеогенерации (по умолчанию `sora-2`). |
+| `SORA_MODEL_VIDEO` | Модель Sora для видеогенерации (по умолчанию `sora`). |
 | `OPENAI_API_BASE` | Базовый URL OpenAI API (по умолчанию `https://api.openai.com/v1`). |
 | `DATABASE_PATH` | (Опционально) Путь к старой базе SQLite для скрипта миграции. |
 | `GOOGLE_SHEET_ID` | Идентификатор Google-таблицы, которая служит основным хранилищем данных. |
