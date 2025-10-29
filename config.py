@@ -143,7 +143,7 @@ class Config:
     gemini_model_video: str = "veo-3.0-generate-001"
     openai_api_key: str = ""
     sora_api_key: str = ""
-    sora_model_video: str = "sora-2"
+    sora_model_video: str = "sora"
     openai_api_base: str = "https://api.openai.com/v1"
     default_video_model: str = "veo-3.0-generate-001"
     database_path: str = "./bot.db"
