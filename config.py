@@ -141,6 +141,14 @@ class Config:
     gemini_model_text: str = "gemini-2.0-flash"
     gemini_model_image: str = "gemini-2.5-flash-image"
     gemini_model_video: str = "veo-3.0-generate-001"
+    gemini_api_mode: str = "developer"
+    vertex_project_id: Optional[str] = None
+    vertex_location: Optional[str] = None
+    gemini_api_endpoint: Optional[str] = None
+    gemini_safety_threshold: str = "BLOCK_ONLY_HIGH"
+    fallback_image_models: List[str] = field(
+        default_factory=lambda: ["dall-e-3", "sdxl"]
+    )
     openai_api_key: str = ""
     sora_api_key: str = ""
     sora_model_video: str = "sora"
@@ -416,6 +424,34 @@ def load_config() -> Config:
         os.getenv("GEMINI_MODEL_VIDEO", Config.gemini_model_video).strip()
         or Config.gemini_model_video
     )
+    gemini_api_mode = (
+        os.getenv("GEMINI_API_MODE", Config.gemini_api_mode).strip().lower()
+        or Config.gemini_api_mode
+    )
+    vertex_project_id = (
+        os.getenv("VERTEX_PROJECT_ID", Config.vertex_project_id or "").strip() or None
+    )
+    vertex_location = (
+        os.getenv("VERTEX_LOCATION", Config.vertex_location or "").strip() or None
+    )
+    gemini_api_endpoint = (
+        os.getenv("GEMINI_API_ENDPOINT", Config.gemini_api_endpoint or "").strip() or None
+    )
+    gemini_safety_threshold = (
+        os.getenv("GEMINI_SAFETY_THRESHOLD", Config.gemini_safety_threshold).strip()
+        or Config.gemini_safety_threshold
+    )
+    fallback_image_models_env = os.getenv("FALLBACK_IMAGE_MODELS")
+    if fallback_image_models_env is None:
+        fallback_image_models = Config.__dataclass_fields__["fallback_image_models"].default_factory()  # type: ignore[index]
+    else:
+        fallback_image_models = [
+            item.strip()
+            for item in fallback_image_models_env.split(",")
+            if item.strip()
+        ]
+        if not fallback_image_models:
+            fallback_image_models = Config.__dataclass_fields__["fallback_image_models"].default_factory()  # type: ignore[index]
     raw_sora_api_key = os.getenv("SORA_API_KEY")
     raw_openai_api_key = os.getenv("OPENAI_API_KEY")
     if raw_sora_api_key and raw_openai_api_key and raw_sora_api_key.strip() != raw_openai_api_key.strip():
@@ -480,6 +516,12 @@ def load_config() -> Config:
         gemini_model_text=gemini_model_text,
         gemini_model_image=gemini_model_image,
         gemini_model_video=gemini_model_video,
+        gemini_api_mode=gemini_api_mode,
+        vertex_project_id=vertex_project_id,
+        vertex_location=vertex_location,
+        gemini_api_endpoint=gemini_api_endpoint,
+        gemini_safety_threshold=gemini_safety_threshold,
+        fallback_image_models=fallback_image_models,
         openai_api_key=openai_api_key,
         sora_api_key=sora_api_key,
         sora_model_video=sora_model_video,

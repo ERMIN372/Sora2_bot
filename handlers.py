@@ -42,7 +42,7 @@ from observability import (
     should_notify_support,
 )
 from moderation import policy_message, run_preflight
-from providers import ProviderAPIError
+from providers import BaseProviderClient, ProviderAPIError
 from services.gemini_catalog import list_veo_video_models
 from services.gemini_downloader import (
     GeminiConfigurationError,
@@ -2842,6 +2842,34 @@ async def job_admin_command(message: Message, config: Config) -> None:
     await message.answer("\n".join(lines))
 
 
+async def models_command(message: Message, job_queue: JobQueue, config: Config) -> None:
+    client: Optional[BaseProviderClient] = None
+    for key in (
+        config.gemini_model_image,
+        "gemini-image",
+        "gemini",
+    ):
+        if not key:
+            continue
+        candidate = job_queue.get_provider(key)
+        if candidate is not None:
+            client = candidate
+            break
+    if client is None or not hasattr(client, "_available_models"):
+        await message.answer("Gemini недоступен или не инициализирован.")
+        return
+    models = getattr(client, "_available_models", []) or []
+    if not models:
+        await message.answer("Список моделей Gemini пока недоступен. Попробуйте позже.")
+        return
+    lines = ["Доступные модели Gemini:"]
+    for model_name in models:
+        if not isinstance(model_name, str):
+            continue
+        lines.append(f"• {escape_html(model_name)}")
+    await message.answer("\n".join(lines))
+
+
 async def successful_text_handler(
     message: Message,
     state: FSMContext,
@@ -2907,6 +2935,11 @@ def register_handlers(
     dp.register_message_handler(
         lambda message: job_admin_command(message, config),
         Command("job"),
+        state="*",
+    )
+    dp.register_message_handler(
+        lambda message: models_command(message, job_queue, config),
+        Command("models"),
         state="*",
     )
     dp.register_message_handler(
