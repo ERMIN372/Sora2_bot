@@ -539,11 +539,14 @@ class GeminiGenerativeClient(BaseProviderClient):
             kwargs["safety_settings"] = safety_settings
             return _genai_types.GenerateImagesConfig(**kwargs)
 
+        allowed_fields = set(_genai_types.GenerateImagesConfig.model_fields.keys())
         for raw_key, value in settings.items():
             if value is None:
                 continue
             key = _normalise_setting_key(raw_key)
             if key in {"reference_inline_data", "image_file_id"}:
+                continue
+            if key == "model":
                 continue
             if key == "safety_settings":
                 parsed = _convert_setting_list(value, _genai_types.SafetySetting)
@@ -554,23 +557,41 @@ class GeminiGenerativeClient(BaseProviderClient):
                 key = "mime_type"
             if key == "aspectratio":
                 key = "aspect_ratio"
+            if key not in allowed_fields:
+                continue
             kwargs[key] = value
 
         size_value = settings.get("size") if isinstance(settings, dict) else None
-        if size_value and "size" not in kwargs:
+        if (
+            size_value
+            and "size" in allowed_fields
+            and "size" not in kwargs
+        ):
             kwargs["size"] = size_value
             inferred = _infer_aspect_ratio(str(size_value))
-            if inferred and "aspect_ratio" not in kwargs:
+            if (
+                inferred
+                and "aspect_ratio" in allowed_fields
+                and "aspect_ratio" not in kwargs
+            ):
                 kwargs["aspect_ratio"] = inferred
 
         aspect = settings.get("aspect_ratio") if isinstance(settings, dict) else None
-        if aspect and "aspect_ratio" not in kwargs:
+        if (
+            aspect
+            and "aspect_ratio" in allowed_fields
+            and "aspect_ratio" not in kwargs
+        ):
             kwargs["aspect_ratio"] = aspect
 
         mime = None
         if isinstance(settings, dict):
             mime = settings.get("mime_type") or settings.get("response_mime_type")
-        if mime and "mime_type" not in kwargs:
+        if (
+            mime
+            and "mime_type" in allowed_fields
+            and "mime_type" not in kwargs
+        ):
             kwargs["mime_type"] = mime
 
         kwargs["safety_settings"] = safety_settings
