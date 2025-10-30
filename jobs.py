@@ -8,6 +8,7 @@ import logging
 import os
 import random
 import time
+import uuid
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
@@ -105,6 +106,16 @@ class _OperationTracker:
             "last_progress": self.last_progress,
             "last_update_token": self.last_update_token,
         }
+
+
+@dataclass(slots=True)
+class _FallbackSubmissionResult:
+    submission: ProviderJobSubmission
+    client: BaseProviderClient
+    provider_key: str
+    model: str
+    idempotency_key: str
+    settings: Dict[str, Any]
 
 
 def _coerce_float(value: Any) -> Optional[float]:
@@ -340,6 +351,118 @@ class JobQueue:
         raise RuntimeError(
             "Requested generation provider is not configured and no default provider is available"
         )
+
+    def get_provider(self, key: Optional[str]) -> Optional[BaseProviderClient]:
+        if not key:
+            return None
+        return self._providers.get(key)
+
+    async def _attempt_gemini_fallback(
+        self,
+        *,
+        error: ProviderAPIError,
+        provider_key: str,
+        prompt: str,
+        size: str,
+        settings: Dict[str, Any],
+        preset: Optional[str],
+        payload: Optional[Dict[str, Any]],
+        content_type: str,
+        user_id: int,
+        corr_id: str,
+    ) -> Optional[_FallbackSubmissionResult]:
+        if error.error_type not in {"safety", "provider_unavailable"}:
+            return None
+        if not provider_key.startswith("gemini"):
+            return None
+        if (content_type or "").strip().lower() not in {"image", "photo"}:
+            return None
+        fallback_models = [
+            model_name.strip()
+            for model_name in self._config.fallback_image_models
+            if isinstance(model_name, str) and model_name.strip()
+        ]
+        if not fallback_models:
+            log.info(
+                "Gemini fallback skipped corr_id=%s reason=no_fallback_models",
+                corr_id,
+            )
+            return None
+        fallback_client: Optional[BaseProviderClient] = None
+        fallback_provider_key = ""
+        for candidate in (
+            "sora",
+            "openai-video",
+            self._config.sora_model_video,
+        ):
+            if not candidate:
+                continue
+            client = self.get_provider(candidate)
+            if client is not None:
+                fallback_client = client
+                fallback_provider_key = candidate
+                break
+        if fallback_client is None:
+            log.info(
+                "Gemini fallback skipped corr_id=%s reason=no_fallback_provider",
+                corr_id,
+            )
+            return None
+        log.info(
+            "Gemini fallback initiated corr_id=%s provider=%s error_type=%s error_status=%s",
+            corr_id,
+            provider_key,
+            error.error_type,
+            error.status_code,
+        )
+        for fallback_model in fallback_models:
+            fallback_settings = dict(settings or {})
+            fallback_settings["model"] = fallback_model
+            fallback_idempotency_key = compute_generation_idempotency_key(
+                user_id=user_id,
+                prompt=prompt,
+                size=size,
+                model=fallback_model,
+                content_type=content_type,
+            )
+            try:
+                submission = await fallback_client.enqueue_job(
+                    prompt=prompt,
+                    settings=fallback_settings or None,
+                    preset=preset,
+                    payload=payload,
+                    idempotency_key=fallback_idempotency_key,
+                )
+            except ProviderAPIError as fallback_error:
+                log.warning(
+                    "Fallback provider error corr_id=%s model=%s status=%s type=%s",
+                    corr_id,
+                    fallback_model,
+                    fallback_error.status_code,
+                    fallback_error.error_type,
+                )
+                continue
+            except Exception:
+                log.exception(
+                    "Fallback provider unexpected error corr_id=%s model=%s",
+                    corr_id,
+                )
+                continue
+            log.info(
+                "Gemini fallback succeeded corr_id=%s fallback_provider=%s model=%s",
+                corr_id,
+                fallback_provider_key,
+                fallback_model,
+            )
+            return _FallbackSubmissionResult(
+                submission=submission,
+                client=fallback_client,
+                provider_key=fallback_provider_key,
+                model=fallback_model,
+                idempotency_key=fallback_idempotency_key,
+                settings=fallback_settings,
+            )
+        return None
 
     def _poll_interval_seconds(self) -> float:
         try:
@@ -588,6 +711,7 @@ class JobQueue:
     ) -> GenerationJobRecord:
         model_key = model or self._config.default_video_model
         client, provider_key = self._resolve_provider(provider or model_key)
+        corr_id = corr_id or str(uuid.uuid4())
         request_settings: Dict[str, Any] = dict(settings or {})
         if size:
             request_settings.setdefault("size", size)
@@ -623,13 +747,35 @@ class JobQueue:
             request_settings,
             prompt_hash,
         )
-        submission: ProviderJobSubmission = await client.enqueue_job(
-            prompt=effective_prompt,
-            settings=request_settings or None,
-            preset=preset,
-            payload=payload,
-            idempotency_key=stable_idempotency_key,
-        )
+        try:
+            submission: ProviderJobSubmission = await client.enqueue_job(
+                prompt=effective_prompt,
+                settings=request_settings or None,
+                preset=preset,
+                payload=payload,
+                idempotency_key=stable_idempotency_key,
+            )
+        except ProviderAPIError as exc:
+            fallback = await self._attempt_gemini_fallback(
+                error=exc,
+                provider_key=provider_key,
+                prompt=effective_prompt,
+                size=size,
+                settings=request_settings,
+                preset=preset,
+                payload=payload,
+                content_type=content_type_value,
+                user_id=user_id,
+                corr_id=corr_id,
+            )
+            if fallback is None:
+                raise
+            client = fallback.client
+            provider_key = fallback.provider_key
+            submission = fallback.submission
+            model_key = fallback.model
+            request_settings = fallback.settings
+            stable_idempotency_key = fallback.idempotency_key
         job_id = submission.job_id
         operation_name = submission.data.get("operation_name") if isinstance(submission.data, dict) else None
         now = datetime.utcnow()

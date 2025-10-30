@@ -17,6 +17,7 @@ from google.genai import errors as _genai_errors, types as _genai_types
 
 from config import Config, SafetyCfg
 from services.gemini_key import ensure_gemini_key_logged
+from services.gemini_client import get_media_client, get_text_client
 from services.gemini_router import (
     GeminiRoutingError,
     RouteDecision,
@@ -222,9 +223,10 @@ class GeminiGenerativeClient(BaseProviderClient):
         api_version: str,
         safety_settings: Optional[List[_genai_types.SafetySetting]] = None,
     ) -> None:
+        base_url = self._resolve_base_url(config)
         super().__init__(
             config=config,
-            base_url="",
+            base_url=base_url,
             api_key=api_key,
             provider_name=provider_name,
         )
@@ -235,6 +237,17 @@ class GeminiGenerativeClient(BaseProviderClient):
         self._task = task
         self._api_version = api_version
         self._router = get_gemini_router(config)
+        self._available_models: List[str] = []
+        self._available_model_ids: Set[str] = set()
+        self._media_safety_threshold = self._parse_safety_threshold(
+            config.gemini_safety_threshold
+        )
+        self._media_safety_settings = [
+            _genai_types.SafetySetting(
+                category=category, threshold=self._media_safety_threshold
+            )
+            for category in _SAFETY_CATEGORIES
+        ]
         self._pending: Dict[str, Tuple[Dict[str, Any], int, int, Dict[str, Any]]] = {}
         self._environment = (config.environment or "dev").lower()
         self._key_mask = ensure_gemini_key_logged(
@@ -242,6 +255,135 @@ class GeminiGenerativeClient(BaseProviderClient):
             context="gemini_generative_client",
             process_id=f"pid={os.getpid()}",  # pragma: no cover - runtime value
             logger=log,
+        )
+        self._load_available_models()
+        if self._available_model_ids and self._model.lower() not in self._available_model_ids:
+            raise ProviderAPIError(
+                provider=self.provider_name,
+                status_code=404,
+                message=f"Модель {self._model} недоступна для Gemini",
+                error_type="invalid_model",
+                provider_message="model_not_available",
+            )
+
+    def _resolve_base_url(self, config: Config) -> str:
+        endpoint = (config.gemini_api_endpoint or "").strip()
+        if endpoint:
+            return endpoint.rstrip("/")
+        mode = (config.gemini_api_mode or "developer").strip().lower()
+        if mode == "vertex":
+            region = (config.vertex_location or "").strip()
+            project = (config.vertex_project_id or "").strip()
+            if region and project:
+                return (
+                    f"https://{region}-aiplatform.googleapis.com/v1/projects/{project}/locations/{region}/publishers/google/models"
+                )
+            log.warning(
+                "Gemini Vertex API selected but VERTEX_LOCATION or VERTEX_PROJECT_ID is missing; falling back to public endpoint"
+            )
+        return "https://generativelanguage.googleapis.com"
+
+    def _parse_safety_threshold(
+        self, value: Optional[str]
+    ) -> _genai_types.HarmBlockThreshold:
+        if not value:
+            return _SAFETY_FALLBACK_THRESHOLD
+        normalised = value.strip().upper()
+        if not normalised:
+            return _SAFETY_FALLBACK_THRESHOLD
+        direct = getattr(_genai_types.HarmBlockThreshold, normalised, None)
+        if isinstance(direct, _genai_types.HarmBlockThreshold):
+            return direct
+        for candidate in _genai_types.HarmBlockThreshold:
+            if normalised in {candidate.name.upper(), str(candidate.value).upper()}:
+                return candidate
+        log.warning(
+            "Unknown Gemini safety threshold %s; defaulting to %s",
+            value,
+            _SAFETY_FALLBACK_THRESHOLD.name,
+        )
+        return _SAFETY_FALLBACK_THRESHOLD
+
+    def _load_available_models(self) -> None:
+        candidates: Set[str] = set()
+        identifiers: Set[str] = set()
+        clients = []
+        router_clients = getattr(self._router, "_clients", None)
+        if isinstance(router_clients, dict):
+            for entry in router_clients.values():
+                client_obj = getattr(entry, "_client", None) or getattr(entry, "client", None)
+                if client_obj is not None and client_obj not in clients:
+                    clients.append(client_obj)
+        if not clients:
+            for getter in (get_media_client, get_text_client):
+                try:
+                    client_obj = getter(self._config)
+                except Exception as exc:  # pragma: no cover - defensive
+                    log.debug(
+                        "Failed to build Gemini client for model discovery getter=%s error=%s",
+                        getattr(getter, "__name__", str(getter)),
+                        exc,
+                        exc_info=True,
+                    )
+                    continue
+                if client_obj not in clients:
+                    clients.append(client_obj)
+        for client_obj in clients:
+            try:
+                models_iterable = list(client_obj.models.list())
+            except Exception as exc:  # pragma: no cover - network guard
+                log.warning(
+                    "Failed to fetch Gemini models list client=%s error=%s",
+                    getattr(client_obj, "__class__", type(client_obj)).__name__,
+                    exc,
+                    exc_info=True,
+                )
+                continue
+            for model in models_iterable:
+                name = getattr(model, "name", None) or getattr(model, "model", None)
+                if not isinstance(name, str) or not name:
+                    continue
+                variants = {name.strip()}
+                if "/" in name:
+                    variants.add(name.rsplit("/", 1)[-1].strip())
+                for variant in variants:
+                    if not variant:
+                        continue
+                    candidates.add(variant)
+                    identifiers.add(variant.lower())
+        self._available_models = sorted(candidates)
+        self._available_model_ids = identifiers
+        if self._available_models:
+            log.info(
+                "Gemini available models loaded count=%s", len(self._available_models)
+            )
+
+    def _extract_safety_feedback(self, response: Any, payload: Dict[str, Any]) -> Any:
+        if hasattr(response, "prompt_feedback"):
+            feedback = getattr(response, "prompt_feedback")
+            if hasattr(feedback, "model_dump"):
+                try:
+                    return feedback.model_dump(mode="json")
+                except Exception:  # pragma: no cover - defensive serialisation
+                    return feedback
+            return feedback
+        prompt_feedback = payload.get("prompt_feedback") or payload.get("promptFeedback")
+        return prompt_feedback
+
+    def _log_generation_feedback(
+        self,
+        *,
+        status_code: int,
+        provider_message: Optional[str],
+        safety_feedback: Any,
+        corr_id: Optional[str],
+    ) -> None:
+        log.info(
+            "gemini.response status=%s provider_message=%s safety_feedback=%s corr_id=%s",
+            status_code,
+            (provider_message or ""),
+            _serialise_json(safety_feedback) if safety_feedback not in (None, "") else "",
+            corr_id or "",
         )
 
     def _build_contents(
@@ -274,6 +416,8 @@ class GeminiGenerativeClient(BaseProviderClient):
         safety_settings: Optional[List[_genai_types.SafetySetting]] = None
         if self._task == "text":
             safety_settings = list(self._safety_settings)
+        elif self._task in {"image", "video"}:
+            safety_settings = list(self._media_safety_settings)
         if not settings:
             if safety_settings is not None:
                 kwargs["safety_settings"] = safety_settings
@@ -292,8 +436,8 @@ class GeminiGenerativeClient(BaseProviderClient):
                 continue
             if key == "safety_settings":
                 parsed = _convert_setting_list(value, _genai_types.SafetySetting)
-                if parsed is not None:
-                    safety_settings = parsed if self._task == "text" else None
+                if parsed is not None and self._task == "text":
+                    safety_settings = parsed
                 continue
             if key == "tools":
                 parsed = _convert_setting_list(value, _genai_types.Tool)
@@ -589,7 +733,8 @@ class GeminiGenerativeClient(BaseProviderClient):
                     payload_json = response
                 else:
                     payload_json = {"response": response}
-                job_id = idempotency_key or str(uuid4())
+                job_id = str(uuid4())
+                safety_feedback = self._extract_safety_feedback(response, payload_json)
                 meta = {
                     "prompt": decision.prompt,
                     "settings": request_settings or {},
@@ -602,8 +747,16 @@ class GeminiGenerativeClient(BaseProviderClient):
                     "model": decision.model,
                     "api_version": decision.api_version,
                 }
+                if idempotency_key:
+                    meta["idempotency_key"] = idempotency_key
                 self._pending[job_id] = (payload_json, 200, duration_ms, meta)
                 size = request_settings.get("size")
+                self._log_generation_feedback(
+                    status_code=200,
+                    provider_message=None,
+                    safety_feedback=safety_feedback,
+                    corr_id=idempotency_key or job_id,
+                )
                 log.info(
                     "gemini.call corr_id=%s provider=%s model=%s method=%s version=%s size=%s status=%s latency_ms=%s",
                     idempotency_key or job_id,
@@ -662,6 +815,12 @@ class GeminiGenerativeClient(BaseProviderClient):
                     exc,
                     duration_ms=duration_ms,
                     decision=decision,
+                )
+                self._log_generation_feedback(
+                    status_code=provider_error.status_code,
+                    provider_message=provider_error.provider_message,
+                    safety_feedback=None,
+                    corr_id=idempotency_key,
                 )
                 log.warning(
                     "gemini.generate error model=%s method=%s version=%s env=%s key_mask=%s corr_id=%s status=%s latency_ms=%s",
@@ -750,11 +909,7 @@ class GeminiGenerativeClient(BaseProviderClient):
             else prompt
         )
         attempt = 0
-        rephraser_fn = (
-            default_rephraser(self._api_key)
-            if SafetyCfg.ENABLE_AUTO_REPHRASE
-            else (lambda text: text)
-        )
+        rephraser_fn = default_rephraser(self._api_key)
 
         while True:
             submission = await self._submit_single_attempt(
