@@ -296,14 +296,34 @@ def _image_model_description(config: Config) -> str:
 
 def _map_provider_error(error: ProviderAPIError) -> tuple[str, str, bool, str]:
     status = error.status_code or 0
-    provider_message = (error.provider_message or str(error) or "").strip()
+    raw_provider_message = (error.provider_message or "").strip()
+    default_message = (str(error) or "").strip()
+    provider_message = raw_provider_message or default_message
     error_type = (error.error_type or "").lower()
     error_code = (error.error_code or "").lower()
     short = _shorten(provider_message or (error.args[0] if error.args else "Ошибка"))
     notify_support = False
     hint = error_type or error_code or "unknown"
 
-    if status in {401, 403}:
+    policy_trigger = (
+        "policy" in error_type
+        or "policy" in error_code
+        or "safety" in error_type
+        or "safety" in error_code
+    )
+
+    if policy_trigger:
+        detail_source = raw_provider_message
+        message = "Запрос нарушает правила контента."
+        if detail_source:
+            detail = escape_html(detail_source)
+            if detail:
+                message = f"Запрос нарушает правила контента: {detail}"
+        short = _shorten(detail_source or default_message or (error.args[0] if error.args else ""))
+        if not short:
+            short = "Запрос нарушает правила контента"
+        hint = "policy"
+    elif status in {401, 403}:
         notify_support = True
         hint = "auth"
         message = (
@@ -326,10 +346,6 @@ def _map_provider_error(error: ProviderAPIError) -> tuple[str, str, bool, str]:
         hint = "provider_unavailable"
         message = "Провайдер недоступен. Попробуем ещё раз позже."
         short = _shorten(provider_message or "Провайдер недоступен")
-    elif "policy" in error_type or "policy" in error_code:
-        hint = "policy"
-        message = "Запрос нарушает правила контента."
-        short = _shorten(provider_message or "Нарушение политики")
     else:
         detail = escape_html(provider_message or (error.args[0] if error.args else ""))
         message = f"Не удалось выполнить запрос: {detail or 'попробуйте позже.'}"
