@@ -535,11 +535,21 @@ class GeminiGenerativeClient(BaseProviderClient):
     ) -> _genai_types.GenerateImagesConfig:
         kwargs: Dict[str, Any] = {}
         safety_settings = list(self._media_safety_settings)
+
+        if isinstance(settings, Mapping) and not isinstance(settings, dict):
+            settings = dict(settings.items())
+        if isinstance(settings, dict):
+            settings = {k: v for k, v in settings.items() if k != "model"}
+
         if not settings:
             kwargs["safety_settings"] = safety_settings
             return _genai_types.GenerateImagesConfig(**kwargs)
 
-        allowed_fields = set(_genai_types.GenerateImagesConfig.model_fields.keys())
+        model_fields = getattr(
+            _genai_types.GenerateImagesConfig, "model_fields", None
+        ) or getattr(_genai_types.GenerateImagesConfig, "__fields__", {})
+        allowed_fields = set(model_fields.keys())
+        allowed_fields.discard("model")
         for raw_key, value in settings.items():
             if value is None:
                 continue
