@@ -532,7 +532,10 @@ class GeminiGenerativeClient(BaseProviderClient):
 
     def _build_images_config(
         self, settings: Optional[Dict[str, Any]]
-    ) -> _genai_types.GenerateImagesConfig:
+    ) -> Tuple[
+        _genai_types.GenerateImagesConfig,
+        Optional[List[_genai_types.SafetySetting]],
+    ]:
         kwargs: Dict[str, Any] = {}
         safety_settings = list(self._media_safety_settings)
 
@@ -541,15 +544,17 @@ class GeminiGenerativeClient(BaseProviderClient):
         if isinstance(settings, dict):
             settings = {k: v for k, v in settings.items() if k != "model"}
 
-        if not settings:
-            kwargs["safety_settings"] = safety_settings
-            return _genai_types.GenerateImagesConfig(**kwargs)
-
         model_fields = getattr(
             _genai_types.GenerateImagesConfig, "model_fields", None
         ) or getattr(_genai_types.GenerateImagesConfig, "__fields__", {})
         allowed_fields = set(model_fields.keys())
         allowed_fields.discard("model")
+
+        if not settings:
+            config_fields: Dict[str, Any] = {}
+            config = _genai_types.GenerateImagesConfig(**config_fields)
+            return config, safety_settings
+
         for raw_key, value in settings.items():
             if value is None:
                 continue
@@ -597,15 +602,20 @@ class GeminiGenerativeClient(BaseProviderClient):
         mime = None
         if isinstance(settings, dict):
             mime = settings.get("mime_type") or settings.get("response_mime_type")
-        if (
-            mime
-            and "mime_type" in allowed_fields
-            and "mime_type" not in kwargs
-        ):
-            kwargs["mime_type"] = mime
+            if (
+                mime
+                and "mime_type" in allowed_fields
+                and "mime_type" not in kwargs
+            ):
+                kwargs["mime_type"] = mime
 
-        kwargs["safety_settings"] = safety_settings
-        return _genai_types.GenerateImagesConfig(**kwargs)
+        config_fields = {
+            key: value
+            for key, value in kwargs.items()
+            if key in allowed_fields and key not in {"model", "safety_settings"}
+        }
+        config = _genai_types.GenerateImagesConfig(**config_fields)
+        return config, safety_settings
 
     def _prepare_generate_call(
         self,
@@ -617,6 +627,7 @@ class GeminiGenerativeClient(BaseProviderClient):
     ) -> Tuple[Any, Dict[str, Any], Dict[str, Any]]:
         contents = payload.get("contents")
         config = payload.get("config")
+        safety_settings = payload.get("safety_settings")
         if contents is None:
             contents = self._build_contents(prompt=prompt, settings=settings)
         expected_config = (
@@ -624,13 +635,30 @@ class GeminiGenerativeClient(BaseProviderClient):
             if decision.method == "generate_images"
             else _genai_types.GenerateContentConfig
         )
-        if not isinstance(config, expected_config):
-            config = self._build_generation_config(settings, method=decision.method)
+        if decision.method == "generate_images":
+            if not isinstance(config, _genai_types.GenerateImagesConfig):
+                built_config = self._build_generation_config(
+                    settings, method=decision.method
+                )
+                if isinstance(built_config, tuple):
+                    config, built_safety_settings = built_config
+                else:
+                    config = built_config
+                    built_safety_settings = None
+                if safety_settings is None:
+                    safety_settings = built_safety_settings
+            elif safety_settings is None:
+                safety_settings = list(self._media_safety_settings)
+        else:
+            if not isinstance(config, expected_config):
+                config = self._build_generation_config(settings, method=decision.method)
         if decision.method == "generate_images":
             request_kwargs: Dict[str, Any] = {
                 "model": decision.model,
                 "config": config,
             }
+            if safety_settings is not None:
+                request_kwargs["safety_settings"] = safety_settings
             if contents:
                 request_kwargs["contents"] = contents
             if prompt:
