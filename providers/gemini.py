@@ -532,12 +532,8 @@ class GeminiGenerativeClient(BaseProviderClient):
 
     def _build_images_config(
         self, settings: Optional[Dict[str, Any]]
-    ) -> Tuple[
-        _genai_types.GenerateImagesConfig,
-        Optional[List[_genai_types.SafetySetting]],
-    ]:
+    ) -> _genai_types.GenerateImagesConfig:
         kwargs: Dict[str, Any] = {}
-        safety_settings = list(self._media_safety_settings)
 
         if isinstance(settings, Mapping) and not isinstance(settings, dict):
             settings = dict(settings.items())
@@ -553,7 +549,7 @@ class GeminiGenerativeClient(BaseProviderClient):
         if not settings:
             config_fields: Dict[str, Any] = {}
             config = _genai_types.GenerateImagesConfig(**config_fields)
-            return config, safety_settings
+            return config
 
         for raw_key, value in settings.items():
             if value is None:
@@ -564,9 +560,7 @@ class GeminiGenerativeClient(BaseProviderClient):
             if key == "model":
                 continue
             if key == "safety_settings":
-                parsed = _convert_setting_list(value, _genai_types.SafetySetting)
-                if parsed is not None:
-                    safety_settings = parsed
+                # The images API does not accept per-request safety settings.
                 continue
             if key == "response_mime_type":
                 key = "mime_type"
@@ -615,7 +609,7 @@ class GeminiGenerativeClient(BaseProviderClient):
             if key in allowed_fields and key not in {"model", "safety_settings"}
         }
         config = _genai_types.GenerateImagesConfig(**config_fields)
-        return config, safety_settings
+        return config
 
     def _prepare_generate_call(
         self,
@@ -627,7 +621,6 @@ class GeminiGenerativeClient(BaseProviderClient):
     ) -> Tuple[Any, Dict[str, Any], Dict[str, Any]]:
         contents = payload.get("contents")
         config = payload.get("config")
-        safety_settings = payload.get("safety_settings")
         if contents is None:
             contents = self._build_contents(prompt=prompt, settings=settings)
         expected_config = (
@@ -637,18 +630,7 @@ class GeminiGenerativeClient(BaseProviderClient):
         )
         if decision.method == "generate_images":
             if not isinstance(config, _genai_types.GenerateImagesConfig):
-                built_config = self._build_generation_config(
-                    settings, method=decision.method
-                )
-                if isinstance(built_config, tuple):
-                    config, built_safety_settings = built_config
-                else:
-                    config = built_config
-                    built_safety_settings = None
-                if safety_settings is None:
-                    safety_settings = built_safety_settings
-            elif safety_settings is None:
-                safety_settings = list(self._media_safety_settings)
+                config = self._build_generation_config(settings, method=decision.method)
         else:
             if not isinstance(config, expected_config):
                 config = self._build_generation_config(settings, method=decision.method)
@@ -657,8 +639,6 @@ class GeminiGenerativeClient(BaseProviderClient):
                 "model": decision.model,
                 "config": config,
             }
-            if safety_settings is not None:
-                request_kwargs["safety_settings"] = safety_settings
             if contents:
                 request_kwargs["contents"] = contents
             if prompt:
