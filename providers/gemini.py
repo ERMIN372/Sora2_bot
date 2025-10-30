@@ -621,8 +621,30 @@ class GeminiGenerativeClient(BaseProviderClient):
     ) -> Tuple[Any, Dict[str, Any], Dict[str, Any]]:
         contents = payload.get("contents")
         config = payload.get("config")
+        prompt_text = prompt
         if contents is None:
             contents = self._build_contents(prompt=prompt, settings=settings)
+        else:
+            text_parts: List[str] = []
+            for entry in contents:
+                if not isinstance(entry, Mapping):
+                    continue
+                parts = entry.get("parts")
+                if not isinstance(parts, list):
+                    continue
+                for part in parts:
+                    if not isinstance(part, Mapping):
+                        continue
+                    text_value = part.get("text")
+                    if isinstance(text_value, str) and text_value:
+                        text_parts.append(text_value)
+            if text_parts:
+                prompt_text = "\n".join(text_parts)
+        if prompt_text:
+            prompt_text = re.sub(r"(?im)^\s*negative\s*:\s*.*(?:$|\n)", "", prompt_text)
+            prompt_text = re.sub(r"\n{2,}", "\n", prompt_text).strip()
+        if not prompt_text:
+            prompt_text = prompt or ""
         expected_config = (
             _genai_types.GenerateImagesConfig
             if decision.method == "generate_images"
@@ -635,14 +657,11 @@ class GeminiGenerativeClient(BaseProviderClient):
             if not isinstance(config, expected_config):
                 config = self._build_generation_config(settings, method=decision.method)
         if decision.method == "generate_images":
-            request_kwargs: Dict[str, Any] = {
+            request_kwargs = {
                 "model": decision.model,
+                "prompt": prompt_text,
                 "config": config,
             }
-            if contents:
-                request_kwargs["contents"] = contents
-            if prompt:
-                request_kwargs.setdefault("prompt", prompt)
         else:
             request_kwargs = {
                 "model": decision.model,
