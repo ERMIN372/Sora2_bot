@@ -16,7 +16,7 @@ log = logging.getLogger(__name__)
 
 _TASK_METHOD: Mapping[str, str] = {
     "text": "generate_content",
-    "image": "generate_content",
+    "image": "generate_images",
     "video": "generate_videos",
 }
 
@@ -233,6 +233,12 @@ class GeminiRouter:
         selected_model = (model or self._default_model_for_task(normalised_task)).strip()
         self._validate_task_model(normalised_task, selected_model)
         method = _TASK_METHOD[normalised_task]
+        supported_methods = self._resolve_supported_methods(selected_model)
+        if normalised_task == "image" and method not in supported_methods:
+            if "generate_images" in supported_methods:
+                method = "generate_images"
+            elif "generate_content" in supported_methods:
+                method = "generate_content"
         if normalised_task == "text":
             api_version = "v1"
             client = get_text_client(self._config)
@@ -264,7 +270,7 @@ class GeminiRouter:
             method=method,
             api_version=api_version,
             client=client,
-            supported_methods=self._resolve_supported_methods(selected_model),
+            supported_methods=supported_methods,
             rewritten=rewritten,
             rewrite_notes=notes,
         )

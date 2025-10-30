@@ -388,26 +388,6 @@ class JobQueue:
                 corr_id,
             )
             return None
-        fallback_client: Optional[BaseProviderClient] = None
-        fallback_provider_key = ""
-        for candidate in (
-            "sora",
-            "openai-video",
-            self._config.sora_model_video,
-        ):
-            if not candidate:
-                continue
-            client = self.get_provider(candidate)
-            if client is not None:
-                fallback_client = client
-                fallback_provider_key = candidate
-                break
-        if fallback_client is None:
-            log.info(
-                "Gemini fallback skipped corr_id=%s reason=no_fallback_provider",
-                corr_id,
-            )
-            return None
         log.info(
             "Gemini fallback initiated corr_id=%s provider=%s error_type=%s error_status=%s",
             corr_id,
@@ -416,6 +396,22 @@ class JobQueue:
             error.status_code,
         )
         for fallback_model in fallback_models:
+            candidate_keys = [fallback_model, "openai-image", "openai", "sora"]
+            fallback_client: Optional[BaseProviderClient] = None
+            fallback_provider_key = ""
+            for candidate in candidate_keys:
+                if not candidate:
+                    continue
+                client = self.get_provider(candidate)
+                if client is not None:
+                    fallback_client = client
+                    fallback_provider_key = candidate
+                    break
+            if fallback_client is None:
+                log.debug(
+                    "Fallback provider not found corr_id=%s model=%s", corr_id, fallback_model
+                )
+                continue
             fallback_settings = dict(settings or {})
             fallback_settings["model"] = fallback_model
             fallback_idempotency_key = compute_generation_idempotency_key(
@@ -435,8 +431,9 @@ class JobQueue:
                 )
             except ProviderAPIError as fallback_error:
                 log.warning(
-                    "Fallback provider error corr_id=%s model=%s status=%s type=%s",
+                    "Fallback provider error corr_id=%s provider=%s model=%s status=%s type=%s",
                     corr_id,
+                    fallback_provider_key,
                     fallback_model,
                     fallback_error.status_code,
                     fallback_error.error_type,
@@ -444,8 +441,10 @@ class JobQueue:
                 continue
             except Exception:
                 log.exception(
-                    "Fallback provider unexpected error corr_id=%s model=%s",
+                    "Fallback provider unexpected error corr_id=%s provider=%s model=%s",
                     corr_id,
+                    fallback_provider_key,
+                    fallback_model,
                 )
                 continue
             log.info(

@@ -24,6 +24,7 @@ from healthcheck import run_startup_healthcheck
 from providers import (
     BaseProviderClient,
     GeminiImageClient,
+    OpenAIImageClient,
     SoraVideoClient,
     VeoVideoClient,
 )
@@ -111,6 +112,28 @@ def _init_application(config: Config) -> ApplicationState:
                 config.sora_model_video: sora_client,
             }
         )
+    if config.openai_image_enabled:
+        try:
+            openai_image_client = OpenAIImageClient(config=config)
+        except RuntimeError:
+            log.warning("OpenAI image fallback is misconfigured; skipping", exc_info=True)
+        else:
+            entries: Dict[str, BaseProviderClient] = {"openai-image": openai_image_client}
+            for model_name in config.fallback_image_models:
+                if not isinstance(model_name, str):
+                    continue
+                key = model_name.strip()
+                if not key or key in entries:
+                    continue
+                entries[key] = openai_image_client
+            for key, client in entries.items():
+                if key in providers:
+                    continue
+                providers[key] = client
+            log.info(
+                "OpenAI image fallback enabled models=%s",
+                ",".join(entries.keys()),
+            )
 
     default_provider = config.default_video_model
     if default_provider not in providers:

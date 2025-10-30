@@ -7,6 +7,7 @@ from .base import (
     ProviderJobSubmission,
 )
 from .gemini import GeminiImageClient, GeminiTextClient
+from .openai_image import OpenAIImageClient
 from .sora_video import SoraVideoClient
 from .veo_video import VeoVideoClient
 
@@ -17,6 +18,7 @@ __all__ = [
     "ProviderJobSubmission",
     "GeminiImageClient",
     "GeminiTextClient",
+    "OpenAIImageClient",
     "SoraVideoClient",
     "VeoVideoClient",
 ]

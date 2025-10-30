@@ -145,7 +145,7 @@ class Config:
     vertex_project_id: Optional[str] = None
     vertex_location: Optional[str] = None
     gemini_api_endpoint: Optional[str] = None
-    gemini_safety_threshold: str = "BLOCK_ONLY_HIGH"
+    gemini_safety_threshold: str = "BLOCK_NONE"
     fallback_image_models: List[str] = field(
         default_factory=lambda: ["dall-e-3", "sdxl"]
     )
@@ -238,6 +238,12 @@ class Config:
         """Return ``True`` if Sora video generation can be used."""
 
         return self.sora_enabled and bool((self.sora_model_video or "").strip())
+
+    @property
+    def openai_image_enabled(self) -> bool:
+        """Return ``True`` if OpenAI image generation can be used as fallback."""
+
+        return self.sora_enabled and bool((self.openai_api_base or "").strip())
 
     @property
     def allowed_package_ids(self) -> Tuple[str, ...]:
@@ -638,9 +644,7 @@ class SafetyCfg:
     MAX_RETRIES: int = 2
     ENABLE_PRE_CLEAN: bool = True
     NEGATIVE_PROMPT_BASE: str = (
-        "no nudity; no violence; no blood; no gore; no hate; no drugs; "
-        "family-friendly; safe; neutral; no brand logos; no trademarks; "
-        "no real persons; no celebrities; prevent sensitive content"
+        "no nudity; no violence; no gore; no hate; family-friendly; safe; neutral"
     )
 
 

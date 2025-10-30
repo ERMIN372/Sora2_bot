@@ -42,8 +42,9 @@ from observability import (
     should_notify_support,
 )
 from moderation import policy_message, run_preflight
-from providers import BaseProviderClient, ProviderAPIError
+from providers import ProviderAPIError
 from services.gemini_catalog import list_veo_video_models
+from services.gemini_client import get_media_client, get_text_client
 from services.gemini_downloader import (
     GeminiConfigurationError,
     GeminiDownloadError,
@@ -896,7 +897,7 @@ async def _launch_order(
 
     original_prompt = order.prompt
     preflight = run_preflight(original_prompt)
-    corr_id = order.corr_id or str(uuid.uuid4())
+    corr_id = str(uuid.uuid4())
     order.corr_id = corr_id
 
     async def _release_lock(reason: str, status: str) -> None:
@@ -2843,31 +2844,59 @@ async def job_admin_command(message: Message, config: Config) -> None:
 
 
 async def models_command(message: Message, job_queue: JobQueue, config: Config) -> None:
-    client: Optional[BaseProviderClient] = None
-    for key in (
-        config.gemini_model_image,
-        "gemini-image",
-        "gemini",
-    ):
-        if not key:
-            continue
-        candidate = job_queue.get_provider(key)
-        if candidate is not None:
-            client = candidate
-            break
-    if client is None or not hasattr(client, "_available_models"):
+    if not config.gemini_enabled:
         await message.answer("Gemini недоступен или не инициализирован.")
         return
-    models = getattr(client, "_available_models", []) or []
-    if not models:
-        await message.answer("Список моделей Gemini пока недоступен. Попробуйте позже.")
-        return
-    lines = ["Доступные модели Gemini:"]
-    for model_name in models:
-        if not isinstance(model_name, str):
+    sections: List[str] = ["Доступные модели Gemini:"]
+    failures: List[str] = []
+    found_any = False
+    scopes = (("Text (v1)", get_text_client), ("Media (v1beta)", get_media_client))
+    for label, getter in scopes:
+        try:
+            client = getter(config)
+        except Exception as exc:  # pragma: no cover - network/config guard
+            log.warning("Failed to build Gemini client scope=%s error=%s", label, exc, exc_info=True)
+            failures.append(label)
             continue
-        lines.append(f"• {escape_html(model_name)}")
-    await message.answer("\n".join(lines))
+        try:
+            catalog = list(client.models.list())
+        except Exception as exc:  # pragma: no cover - network guard
+            log.warning("Failed to list Gemini models scope=%s error=%s", label, exc, exc_info=True)
+            failures.append(label)
+            continue
+        entries: List[str] = []
+        seen: Set[str] = set()
+        for item in catalog:
+            name = getattr(item, "name", None) or getattr(item, "model", None)
+            if not isinstance(name, str) or not name:
+                continue
+            short_name = name.rsplit("/", 1)[-1]
+            if short_name in seen:
+                continue
+            seen.add(short_name)
+            raw_methods = getattr(item, "supported_generation_methods", None) or []
+            method_labels = sorted({str(method) for method in raw_methods if method})
+            methods_text = ", ".join(method_labels) if method_labels else "—"
+            entries.append(f"• {escape_html(short_name)} — {escape_html(methods_text)}")
+        if not entries:
+            continue
+        found_any = True
+        sections.append(label + ":")
+        sections.extend(entries)
+    if not found_any:
+        if failures:
+            await message.answer(
+                "Список моделей недоступен: " + ", ".join(failures)
+            )
+        else:
+            await message.answer(
+                "Список моделей Gemini пока недоступен. Попробуйте позже."
+            )
+        return
+    if failures:
+        sections.append("")
+        sections.append("Не удалось загрузить: " + ", ".join(failures))
+    await message.answer("\n".join(sections))
 
 
 async def successful_text_handler(
