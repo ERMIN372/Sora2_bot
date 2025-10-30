@@ -458,9 +458,11 @@ class GeminiGenerativeClient(BaseProviderClient):
         safety_settings: Optional[List[_genai_types.SafetySetting]] = None
         if self._task == "text":
             safety_settings = list(self._safety_settings)
-        elif self._task in {"image", "video"}:
+        elif self._task == "video":
             safety_settings = list(self._media_safety_settings)
         if not settings:
+            if self._task == "image":
+                kwargs.setdefault("response_mime_type", "image/png")
             if safety_settings is not None:
                 kwargs["safety_settings"] = safety_settings
             return _genai_types.GenerateContentConfig(**kwargs)
@@ -482,16 +484,22 @@ class GeminiGenerativeClient(BaseProviderClient):
                     safety_settings = parsed
                 continue
             if key == "tools":
+                if self._task == "image":
+                    continue
                 parsed = _convert_setting_list(value, _genai_types.Tool)
                 if parsed is not None:
                     kwargs["tools"] = parsed
                 continue
             if key == "tool_config":
+                if self._task == "image":
+                    continue
                 parsed = _maybe_model_validate(value, _genai_types.ToolConfig)
                 if parsed is not None:
                     kwargs["tool_config"] = parsed
                 continue
             if key == "response_schema":
+                if self._task == "image":
+                    continue
                 parsed = _maybe_model_validate(value, _genai_types.Schema)
                 if parsed is not None:
                     kwargs["response_schema"] = parsed
@@ -515,6 +523,8 @@ class GeminiGenerativeClient(BaseProviderClient):
             mime = settings.get("mime_type") or settings.get("response_mime_type")
             if mime:
                 kwargs.setdefault("response_mime_type", mime)
+            else:
+                kwargs.setdefault("response_mime_type", "image/png")
             if image_config:
                 existing_config = kwargs.get("image_config")
                 if isinstance(existing_config, dict):
@@ -621,6 +631,13 @@ class GeminiGenerativeClient(BaseProviderClient):
     ) -> Tuple[Any, Dict[str, Any], Dict[str, Any]]:
         contents = payload.get("contents")
         config = payload.get("config")
+        method = decision.method
+        if (
+            decision.task == "image"
+            and isinstance(decision.model, str)
+            and decision.model.lower() == "gemini-2.5-flash-image"
+        ):
+            method = "generate_content"
         prompt_text = prompt
         if contents is None:
             contents = self._build_contents(prompt=prompt, settings=settings)
@@ -647,16 +664,16 @@ class GeminiGenerativeClient(BaseProviderClient):
             prompt_text = prompt or ""
         expected_config = (
             _genai_types.GenerateImagesConfig
-            if decision.method == "generate_images"
+            if method == "generate_images"
             else _genai_types.GenerateContentConfig
         )
-        if decision.method == "generate_images":
+        if method == "generate_images":
             if not isinstance(config, _genai_types.GenerateImagesConfig):
-                config = self._build_generation_config(settings, method=decision.method)
+                config = self._build_generation_config(settings, method=method)
         else:
             if not isinstance(config, expected_config):
-                config = self._build_generation_config(settings, method=decision.method)
-        if decision.method == "generate_images":
+                config = self._build_generation_config(settings, method=method)
+        if method == "generate_images":
             request_kwargs = {
                 "model": decision.model,
                 "prompt": prompt_text,
@@ -668,16 +685,17 @@ class GeminiGenerativeClient(BaseProviderClient):
                 "contents": contents,
                 "config": config,
             }
-            if "tools" in payload:
-                request_kwargs["tools"] = payload["tools"]
-            if "system_instruction" in payload:
-                request_kwargs["system_instruction"] = payload["system_instruction"]
+            if self._task != "image":
+                if "tools" in payload:
+                    request_kwargs["tools"] = payload["tools"]
+                if "system_instruction" in payload:
+                    request_kwargs["system_instruction"] = payload["system_instruction"]
         request_meta = {
-            "mode": decision.method,
+            "mode": method,
             "api_version": decision.api_version,
             "config": config.model_dump(mode="json") if hasattr(config, "model_dump") else config,
         }
-        generator = getattr(decision.client.models, decision.method)
+        generator = getattr(decision.client.models, method)
         return generator, request_kwargs, request_meta
 
     def _map_error(
@@ -863,10 +881,11 @@ class GeminiGenerativeClient(BaseProviderClient):
                 settings=request_settings,
                 payload=payload_dict,
             )
+            actual_method = request_meta.get("mode", decision.method)
             request_meta.update(
                 {
-                    "mode": decision.method,
-                    "method": decision.method,
+                    "mode": actual_method,
+                    "method": actual_method,
                     "model": decision.model,
                     "api_version": decision.api_version,
                     "task": decision.task,
@@ -879,7 +898,7 @@ class GeminiGenerativeClient(BaseProviderClient):
             log.info(
                 "gemini.generate start model=%s method=%s version=%s env=%s key_mask=%s corr_id=%s",
                 decision.model,
-                decision.method,
+                actual_method,
                 decision.api_version,
                 self._environment,
                 self._key_mask or "",
@@ -902,7 +921,7 @@ class GeminiGenerativeClient(BaseProviderClient):
                     "payload": payload_json,
                     "assets_meta": {},
                     "request": request_meta,
-                    "request_mode": decision.method,
+                    "request_mode": actual_method,
                     "task": decision.task,
                     "key_mask": self._key_mask,
                     "model": decision.model,
@@ -924,7 +943,7 @@ class GeminiGenerativeClient(BaseProviderClient):
                     idempotency_key or job_id,
                     self.provider_name,
                     decision.model,
-                    decision.method,
+                    actual_method,
                     decision.api_version,
                     size or "",
                     200,
@@ -933,7 +952,7 @@ class GeminiGenerativeClient(BaseProviderClient):
                 log.info(
                     "gemini.generate done model=%s method=%s version=%s env=%s key_mask=%s corr_id=%s latency_ms=%s",
                     decision.model,
-                    decision.method,
+                    actual_method,
                     decision.api_version,
                     self._environment,
                     self._key_mask or "",
@@ -952,7 +971,7 @@ class GeminiGenerativeClient(BaseProviderClient):
                 if (
                     category
                     and category.upper() not in downgraded_categories
-                    and decision.method == "generate_content"
+                    and actual_method == "generate_content"
                 ):
                     downgraded = self._downgrade_safety_config(
                         request_kwargs.get("config"), category
@@ -988,7 +1007,7 @@ class GeminiGenerativeClient(BaseProviderClient):
                 log.warning(
                     "gemini.generate error model=%s method=%s version=%s env=%s key_mask=%s corr_id=%s status=%s latency_ms=%s",
                     decision.model,
-                    decision.method,
+                    actual_method,
                     decision.api_version,
                     self._environment,
                     self._key_mask or "",
@@ -1004,7 +1023,7 @@ class GeminiGenerativeClient(BaseProviderClient):
                     "Retrying Gemini request provider=%s model=%s method=%s attempt=%s/%s error=%s",
                     self.provider_name,
                     decision.model,
-                    decision.method,
+                    actual_method,
                     attempt + 1,
                     self._config.request_retries + 1,
                     provider_error,
@@ -1022,7 +1041,7 @@ class GeminiGenerativeClient(BaseProviderClient):
                 log.warning(
                     "gemini.generate error model=%s method=%s version=%s env=%s key_mask=%s corr_id=%s status=%s latency_ms=%s",
                     decision.model,
-                    decision.method,
+                    actual_method,
                     decision.api_version,
                     self._environment,
                     self._key_mask or "",
@@ -1038,7 +1057,7 @@ class GeminiGenerativeClient(BaseProviderClient):
                     "Retrying Gemini request provider=%s model=%s method=%s attempt=%s/%s error=%s",
                     self.provider_name,
                     decision.model,
-                    decision.method,
+                    actual_method,
                     attempt + 1,
                     self._config.request_retries + 1,
                     provider_error,
