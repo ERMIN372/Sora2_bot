@@ -10,7 +10,7 @@ import os
 import re
 import time
 from fractions import Fraction
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple
 from uuid import uuid4
 
 from google.genai import errors as _genai_errors, types as _genai_types
@@ -377,10 +377,46 @@ class GeminiGenerativeClient(BaseProviderClient):
         provider_message: Optional[str],
         safety_feedback: Any,
         corr_id: Optional[str],
+        payload: Optional[Mapping[str, Any]] = None,
     ) -> None:
+        block_reason: str = ""
+        safety_ratings: Any = None
+        finish_reasons: List[str] = []
+        if isinstance(payload, Mapping):
+            prompt_feedback = (
+                payload.get("prompt_feedback")
+                or payload.get("promptFeedback")
+                or payload.get("safety_feedback")
+                or payload.get("safetyFeedback")
+            )
+            if isinstance(prompt_feedback, Mapping):
+                block_reason = str(
+                    prompt_feedback.get("block_reason")
+                    or prompt_feedback.get("blockReason")
+                    or ""
+                )
+                safety_ratings = (
+                    prompt_feedback.get("safety_ratings")
+                    or prompt_feedback.get("safetyRatings")
+                )
+            candidates = payload.get("candidates")
+            if isinstance(candidates, list):
+                for candidate in candidates:
+                    if not isinstance(candidate, Mapping):
+                        continue
+                    finish = candidate.get("finishReason") or candidate.get("finish_reason")
+                    if not finish:
+                        continue
+                    finish_text = str(finish).strip()
+                    if not finish_text:
+                        continue
+                    finish_reasons.append(finish_text.upper())
         log.info(
-            "gemini.response status=%s provider_message=%s safety_feedback=%s corr_id=%s",
+            "gemini.response status=%s block_reason=%s safety_ratings=%s finish_reasons=%s provider_message=%s safety_feedback=%s corr_id=%s",
             status_code,
+            block_reason or "",
+            _serialise_json(safety_ratings) if safety_ratings not in (None, "") else "",
+            ",".join(dict.fromkeys(finish_reasons)) if finish_reasons else "",
             (provider_message or ""),
             _serialise_json(safety_feedback) if safety_feedback not in (None, "") else "",
             corr_id or "",
@@ -410,8 +446,14 @@ class GeminiGenerativeClient(BaseProviderClient):
         return [{"role": "user", "parts": parts}]
 
     def _build_generation_config(
-        self, settings: Optional[Dict[str, Any]]
-    ) -> _genai_types.GenerateContentConfig:
+        self,
+        settings: Optional[Dict[str, Any]],
+        *,
+        method: str,
+    ) -> Any:
+        if method == "generate_images":
+            return self._build_images_config(settings)
+
         kwargs: Dict[str, Any] = {}
         safety_settings: Optional[List[_genai_types.SafetySetting]] = None
         if self._task == "text":
@@ -488,6 +530,52 @@ class GeminiGenerativeClient(BaseProviderClient):
             kwargs["safety_settings"] = safety_settings
         return _genai_types.GenerateContentConfig(**kwargs)
 
+    def _build_images_config(
+        self, settings: Optional[Dict[str, Any]]
+    ) -> _genai_types.GenerateImagesConfig:
+        kwargs: Dict[str, Any] = {}
+        safety_settings = list(self._media_safety_settings)
+        if not settings:
+            kwargs["safety_settings"] = safety_settings
+            return _genai_types.GenerateImagesConfig(**kwargs)
+
+        for raw_key, value in settings.items():
+            if value is None:
+                continue
+            key = _normalise_setting_key(raw_key)
+            if key in {"reference_inline_data", "image_file_id"}:
+                continue
+            if key == "safety_settings":
+                parsed = _convert_setting_list(value, _genai_types.SafetySetting)
+                if parsed is not None:
+                    safety_settings = parsed
+                continue
+            if key == "response_mime_type":
+                key = "mime_type"
+            if key == "aspectratio":
+                key = "aspect_ratio"
+            kwargs[key] = value
+
+        size_value = settings.get("size") if isinstance(settings, dict) else None
+        if size_value and "size" not in kwargs:
+            kwargs["size"] = size_value
+            inferred = _infer_aspect_ratio(str(size_value))
+            if inferred and "aspect_ratio" not in kwargs:
+                kwargs["aspect_ratio"] = inferred
+
+        aspect = settings.get("aspect_ratio") if isinstance(settings, dict) else None
+        if aspect and "aspect_ratio" not in kwargs:
+            kwargs["aspect_ratio"] = aspect
+
+        mime = None
+        if isinstance(settings, dict):
+            mime = settings.get("mime_type") or settings.get("response_mime_type")
+        if mime and "mime_type" not in kwargs:
+            kwargs["mime_type"] = mime
+
+        kwargs["safety_settings"] = safety_settings
+        return _genai_types.GenerateImagesConfig(**kwargs)
+
     def _prepare_generate_call(
         self,
         *,
@@ -500,19 +588,34 @@ class GeminiGenerativeClient(BaseProviderClient):
         config = payload.get("config")
         if contents is None:
             contents = self._build_contents(prompt=prompt, settings=settings)
-        if not isinstance(config, _genai_types.GenerateContentConfig):
-            config = self._build_generation_config(settings)
-        request_kwargs = {
-            "model": decision.model,
-            "contents": contents,
-            "config": config,
-        }
-        if "tools" in payload:
-            request_kwargs["tools"] = payload["tools"]
-        if "system_instruction" in payload:
-            request_kwargs["system_instruction"] = payload["system_instruction"]
+        expected_config = (
+            _genai_types.GenerateImagesConfig
+            if decision.method == "generate_images"
+            else _genai_types.GenerateContentConfig
+        )
+        if not isinstance(config, expected_config):
+            config = self._build_generation_config(settings, method=decision.method)
+        if decision.method == "generate_images":
+            request_kwargs: Dict[str, Any] = {
+                "model": decision.model,
+                "config": config,
+            }
+            if contents:
+                request_kwargs["contents"] = contents
+            if prompt:
+                request_kwargs.setdefault("prompt", prompt)
+        else:
+            request_kwargs = {
+                "model": decision.model,
+                "contents": contents,
+                "config": config,
+            }
+            if "tools" in payload:
+                request_kwargs["tools"] = payload["tools"]
+            if "system_instruction" in payload:
+                request_kwargs["system_instruction"] = payload["system_instruction"]
         request_meta = {
-            "mode": "generate_content",
+            "mode": decision.method,
             "api_version": decision.api_version,
             "config": config.model_dump(mode="json") if hasattr(config, "model_dump") else config,
         }
@@ -756,6 +859,7 @@ class GeminiGenerativeClient(BaseProviderClient):
                     provider_message=None,
                     safety_feedback=safety_feedback,
                     corr_id=idempotency_key or job_id,
+                    payload=payload_json,
                 )
                 log.info(
                     "gemini.call corr_id=%s provider=%s model=%s method=%s version=%s size=%s status=%s latency_ms=%s",
@@ -821,6 +925,7 @@ class GeminiGenerativeClient(BaseProviderClient):
                     provider_message=provider_error.provider_message,
                     safety_feedback=None,
                     corr_id=idempotency_key,
+                    payload=None,
                 )
                 log.warning(
                     "gemini.generate error model=%s method=%s version=%s env=%s key_mask=%s corr_id=%s status=%s latency_ms=%s",
@@ -894,17 +999,15 @@ class GeminiGenerativeClient(BaseProviderClient):
         idempotency_key: Optional[str] = None,
         **_: Any,
     ) -> ProviderJobSubmission:
-        if self._task not in {"image", "video"}:
-            return await self._submit_single_attempt(
-                prompt=prompt,
-                settings=settings,
-                payload=payload,
-                idempotency_key=idempotency_key,
-            )
-
         original_prompt = prompt
+
+        def _noop_attach(text: str, _neg: str) -> str:
+            return text
+
+        use_negative = SafetyCfg.ENABLE_NEGATIVE_PROMPT and self._task in {"image", "video"}
+        attach_neg_fn = attach_negative_prompt if use_negative else _noop_attach
         current_prompt = (
-            attach_negative_prompt(prompt, SafetyCfg.NEGATIVE_PROMPT_BASE)
+            attach_neg_fn(prompt, SafetyCfg.NEGATIVE_PROMPT_BASE)
             if SafetyCfg.ENABLE_NEGATIVE_PROMPT
             else prompt
         )
@@ -928,30 +1031,26 @@ class GeminiGenerativeClient(BaseProviderClient):
                     payload_json = stored_payload
                 if isinstance(stored_meta, dict):
                     meta = stored_meta
-            else:
-                if isinstance(submission.data, dict):
-                    payload_json = submission.data
+            elif isinstance(submission.data, dict):
+                payload_json = submission.data
 
             info = extract_block_info(payload_json)
             blocked = bool(info.get("reason"))
-            if not blocked and isinstance(payload_json, dict):
+            finish_reasons: List[str] = []
+            if isinstance(payload_json, dict):
                 candidates = payload_json.get("candidates")
                 if isinstance(candidates, list):
                     for candidate in candidates:
                         if not isinstance(candidate, dict):
                             continue
-                        finish = (
-                            candidate.get("finishReason")
-                            or candidate.get("finish_reason")
-                            or ""
-                        )
-                        finish_text = str(finish).upper()
-                        if finish_text in {"STOP", "SAFETY"}:
+                        finish = candidate.get("finishReason") or candidate.get("finish_reason")
+                        finish_text = str(finish or "").strip().upper()
+                        if not finish_text:
+                            continue
+                        finish_reasons.append(finish_text)
+                        if finish_text in {"STOP", "SAFETY"} and not blocked:
+                            info["reason"] = finish_text
                             blocked = True
-                            if not info.get("reason"):
-                                info["reason"] = finish_text
-                            break
-
             if not blocked:
                 return submission
 
@@ -961,13 +1060,15 @@ class GeminiGenerativeClient(BaseProviderClient):
             model_name = meta.get("model") or self._model
             api_version = meta.get("api_version") or self._api_version
             log.warning(
-                "gemini.safety block provider=%s model=%s api_version=%s attempt=%s reason=%s categories=%s original_prompt=%r sanitized_prompt=%r",
+                "gemini.safety block provider=%s task=%s model=%s api_version=%s attempt=%s reason=%s categories=%s finish=%s original_prompt=%r sanitized_prompt=%r",
                 self.provider_name,
+                self._task,
                 model_name,
                 api_version,
                 attempt + 1,
                 info.get("reason"),
                 info.get("categories"),
+                ",".join(dict.fromkeys(finish_reasons)) if finish_reasons else "",
                 original_prompt,
                 current_prompt,
             )
@@ -976,7 +1077,7 @@ class GeminiGenerativeClient(BaseProviderClient):
                 raise ProviderAPIError(
                     provider=self.provider_name,
                     status_code=400,
-                    message="Запрос отклонён политиками Gemini", 
+                    message="Запрос отклонён политиками Gemini",
                     error_type="safety",
                     provider_message=str(info.get("reason")),
                     retryable=False,
@@ -990,14 +1091,14 @@ class GeminiGenerativeClient(BaseProviderClient):
                 cfg=SafetyCfg,
                 rephraser=rephraser_fn,
                 scrubber=scrub_brands_and_persons,
-                attach_neg=attach_negative_prompt,
+                attach_neg=attach_neg_fn,
             )
 
             if not decision.do_retry:
                 raise ProviderAPIError(
                     provider=self.provider_name,
                     status_code=400,
-                    message="Gemini заблокировал запрос", 
+                    message="Gemini заблокировал запрос",
                     error_type="safety",
                     provider_message=str(info.get("reason")),
                     retryable=False,
