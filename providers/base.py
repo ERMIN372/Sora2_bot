@@ -136,8 +136,11 @@ class BaseProviderClient:
     async def _ensure_session(self) -> aiohttp.ClientSession:
         async with self._lock:
             if self._session is None or self._session.closed:
+                total_timeout = None
+                if self._config.provider_timeout_s > 0:
+                    total_timeout = self._config.provider_timeout_s
                 timeout = aiohttp.ClientTimeout(
-                    total=None,
+                    total=total_timeout,
                     sock_connect=self._config.request_connect_timeout,
                     sock_read=self._config.request_read_timeout,
                 )

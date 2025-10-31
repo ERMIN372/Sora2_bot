@@ -14,6 +14,43 @@ load_dotenv()
 log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _mask_secret(value: Optional[str], visible: int = 4) -> str:
+    """Return a masked representation of *value* for safe logging."""
+
+    if not value:
+        return ""
+    text = str(value)
+    if len(text) <= visible:
+        return "*" * len(text)
+    return f"{text[:visible]}{'*' * (len(text) - visible)}"
+
+
+def env_str(key: str, default: str = "", *, strip: bool = True) -> str:
+    """Fetch a string environment variable with optional whitespace stripping."""
+
+    value = os.getenv(key)
+    if value is None:
+        return default
+    return value.strip() if strip else value
+
+
+def env_float(key: str, default: float) -> float:
+    """Fetch a floating-point environment variable with validation."""
+
+    value = os.getenv(key)
+    if value is None or not value.strip():
+        return float(default)
+    try:
+        return float(value)
+    except ValueError as exc:  # pragma: no cover - defensive guard
+        raise RuntimeError(f"Environment variable {key!r} must be a float") from exc
+
+
+# ---------------------------------------------------------------------------
 # Pricing constants
 # ---------------------------------------------------------------------------
 
@@ -150,9 +187,12 @@ class Config:
     )
     openai_api_key: str = ""
     sora_api_key: str = ""
+    openai_org_id: Optional[str] = None
     # Значение "sora" больше не поддерживается и приведёт к ошибке "Model not found" в Sora API.
     sora_model_video: str = "sora-2"
     openai_api_base: str = "https://api.openai.com/v1"
+    openai_api_version_video: str = ""
+    openai_beta_header: str = ""
     sora_requests_per_minute: int = 60
     gemini_requests_per_minute: int = 120
     default_video_model: str = "veo-3.0-generate-001"
@@ -162,6 +202,7 @@ class Config:
     request_timeout: float = 20.0
     request_connect_timeout: float = 10.0
     request_read_timeout: float = 20.0
+    provider_timeout_s: float = 60.0
     request_retries: int = 3
     retry_backoff: float = 2.0
     yookassa_shop_id: Optional[str] = None
@@ -456,15 +497,34 @@ def load_config() -> Config:
         ]
         if not fallback_image_models:
             fallback_image_models = Config.__dataclass_fields__["fallback_image_models"].default_factory()  # type: ignore[index]
-    raw_sora_api_key = os.getenv("SORA_API_KEY")
-    raw_openai_api_key = os.getenv("OPENAI_API_KEY")
+    raw_sora_api_key = env_str("SORA_API_KEY", "")
+    raw_openai_api_key = env_str("OPENAI_API_KEY", "")
     if raw_sora_api_key and raw_openai_api_key and raw_sora_api_key.strip() != raw_openai_api_key.strip():
         log.info("SORA_API_KEY detected; preferring it over OPENAI_API_KEY for Sora access")
-    openai_api_key = (raw_openai_api_key or "").strip()
+    openai_api_key = raw_openai_api_key.strip()
     sora_api_key = (raw_sora_api_key or raw_openai_api_key or "").strip()
+    if openai_api_key:
+        log.debug("OPENAI_API_KEY detected=%s", _mask_secret(openai_api_key))
+    if sora_api_key and sora_api_key != openai_api_key:
+        log.debug("SORA_API_KEY detected=%s", _mask_secret(sora_api_key))
     openai_api_base = (
-        os.getenv("OPENAI_API_BASE", Config.openai_api_base).strip()
+        env_str("OPENAI_API_BASE", Config.openai_api_base).strip()
         or Config.openai_api_base
+    )
+    openai_org_id = env_str("OPENAI_ORG_ID", Config.openai_org_id or "").strip() or None
+    if openai_org_id:
+        log.debug("OPENAI_ORG_ID configured=%s", _mask_secret(openai_org_id))
+    openai_api_version_video = env_str(
+        "OPENAI_API_VERSION_VIDEO", Config.openai_api_version_video
+    ).strip()
+    openai_beta_header = env_str("OPENAI_BETA_HEADER", Config.openai_beta_header).strip()
+    provider_timeout_s = env_float("PROVIDER_TIMEOUT_S", Config.provider_timeout_s)
+    log.debug(
+        "OpenAI API config base_url=%s version=%s beta=%s timeout_s=%s",
+        openai_api_base,
+        openai_api_version_video or "default",
+        openai_beta_header or "default",
+        provider_timeout_s,
     )
     sora_model_video = (
         os.getenv("SORA_MODEL_VIDEO", Config.sora_model_video).strip()
@@ -527,8 +587,11 @@ def load_config() -> Config:
         fallback_image_models=fallback_image_models,
         openai_api_key=openai_api_key,
         sora_api_key=sora_api_key,
+        openai_org_id=openai_org_id,
         sora_model_video=sora_model_video,
         openai_api_base=openai_api_base,
+        openai_api_version_video=openai_api_version_video,
+        openai_beta_header=openai_beta_header,
         sora_requests_per_minute=_get_env_int(
             "SORA_REQUESTS_PER_MINUTE", Config.sora_requests_per_minute
         ),
@@ -554,6 +617,7 @@ def load_config() -> Config:
         request_read_timeout=_get_env_float(
             "REQUEST_READ_TIMEOUT", Config.request_read_timeout
         ),
+        provider_timeout_s=provider_timeout_s,
         request_retries=_get_env_int("REQUEST_RETRIES", Config.request_retries),
         retry_backoff=_get_env_float("RETRY_BACKOFF", Config.retry_backoff),
         yookassa_shop_id=os.getenv("YOOKASSA_SHOP_ID"),
@@ -638,6 +702,8 @@ __all__ = [
     "RuntimeConfig",
     "CFG",
     "load_config",
+    "env_str",
+    "env_float",
 ]
 
 

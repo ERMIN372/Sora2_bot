@@ -15,6 +15,7 @@ from .base import (
     ProviderAPIError,
     ProviderJobStatus,
     ProviderJobSubmission,
+    _mask_secret,
     _serialise_for_log,
 )
 from services.payload_sanitize import log_removed_keys, normalize_sora_payload, sanitize_payload
@@ -93,7 +94,12 @@ class OpenAIVideoClient(BaseProviderClient):
         if not api_key:
             raise RuntimeError("OpenAI API key is required for video generation")
         base_url = (config.openai_api_base or "https://api.openai.com/v1").rstrip("/")
-        default_headers = {"OpenAI-Beta": "video=1"}
+        beta_header = (config.openai_beta_header or "video=1").strip()
+        default_headers: Dict[str, str] = {}
+        if beta_header:
+            default_headers["OpenAI-Beta"] = beta_header
+        if config.openai_org_id:
+            default_headers["OpenAI-Organization"] = config.openai_org_id
         super().__init__(
             config=config,
             base_url=base_url,
@@ -106,8 +112,20 @@ class OpenAIVideoClient(BaseProviderClient):
         if configured_model:
             self._supported_models.add(configured_model)
         self._default_model = configured_model or _DEFAULT_VIDEO_MODELS[0]
+        self._api_version = (config.openai_api_version_video or "").strip()
+        self._default_params: Dict[str, Any] = {}
+        if self._api_version:
+            self._default_params["api-version"] = self._api_version
         self._error_handler = ApiErrorHandler(
             provider="openai-video", logger=log, supported_models=sorted(self._supported_models)
+        )
+        log.debug(
+            "OpenAIVideoClient configured base_url=%s api_version=%s beta=%s org_id=%s api_key=%s",
+            base_url,
+            self._api_version or "default",
+            beta_header or "default",
+            _mask_secret(config.openai_org_id),
+            _mask_secret(api_key),
         )
 
     # ------------------------------------------------------------------
@@ -394,6 +412,10 @@ class OpenAIVideoClient(BaseProviderClient):
         idempotency_key: Optional[str] = None,
         **kwargs: Any,
     ) -> Tuple[Dict[str, Any], int, int]:
+        params = kwargs.pop("params", None)
+        merged_params = self._merge_params(params)
+        if merged_params:
+            kwargs["params"] = merged_params
         try:
             data, status_code, duration_ms = await super()._request(
                 method, path, idempotency_key=idempotency_key, **kwargs
@@ -412,17 +434,20 @@ class OpenAIVideoClient(BaseProviderClient):
         session = await self._ensure_session()
         url = f"{self._base_url}{path}"
         headers = self._build_headers()
-        if params is None:
-            params = {}
+        merged_params = self._merge_params(params)
+        if merged_params is None:
+            merged_params = {}
         log.debug(
             "openai.video.binary_request method=%s url=%s params=%s",
             method,
             url,
-            _serialise_for_log(dict(params), limit=512),
+            _serialise_for_log(dict(merged_params), limit=512),
         )
         start = time.monotonic()
         try:
-            async with session.request(method, url, headers=headers, params=dict(params)) as response:
+            async with session.request(
+                method, url, headers=headers, params=dict(merged_params)
+            ) as response:
                 body = await response.read()
                 duration_ms = int((time.monotonic() - start) * 1000)
                 if response.status >= 400:
@@ -449,6 +474,17 @@ class OpenAIVideoClient(BaseProviderClient):
                 retryable=False,
                 duration_ms=duration_ms,
             ) from exc
+
+    def _merge_params(self, params: Optional[Mapping[str, Any]]) -> Optional[Dict[str, Any]]:
+        merged: Dict[str, Any] = {}
+        if self._default_params:
+            merged.update(self._default_params)
+        if params:
+            for key, value in params.items():
+                if value is None:
+                    continue
+                merged[key] = value
+        return merged or None
 
     def _normalise_error(self, error: ProviderAPIError) -> ProviderAPIError:
         raw_body = error.provider_message or ""

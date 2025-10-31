@@ -16,6 +16,7 @@ from .base import (
     ProviderAPIError,
     ProviderJobStatus,
     ProviderJobSubmission,
+    _mask_secret,
     _serialise_for_log,
 )
 from services.payload_sanitize import (
@@ -158,13 +159,25 @@ class SoraVideoClient(BaseProviderClient):
         if not api_key:
             raise RuntimeError("Sora API key is not configured; set SORA_API_KEY or OPENAI_API_KEY")
         base_url = (config.openai_api_base or "https://api.openai.com/v1").rstrip("/")
-        default_headers = {"OpenAI-Beta": "assistants=v2"}
+        beta_header = (config.openai_beta_header or "assistants=v2").strip()
+        default_headers: Dict[str, str] = {}
+        if beta_header:
+            default_headers["OpenAI-Beta"] = beta_header
+        if config.openai_org_id:
+            default_headers["OpenAI-Organization"] = config.openai_org_id
         super().__init__(
             config=config,
             base_url=base_url,
             api_key=api_key,
             provider_name="sora",
             default_headers=default_headers,
+        )
+        log.debug(
+            "SoraVideoClient configured base_url=%s beta=%s org_id=%s api_key=%s",
+            base_url,
+            beta_header or "default",
+            _mask_secret(config.openai_org_id),
+            _mask_secret(api_key),
         )
         self._supported_models = set(AVAILABLE_SORA_MODELS)
         configured_model = (config.sora_model_video or "").strip()
