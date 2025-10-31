@@ -150,8 +150,8 @@ class Config:
     )
     openai_api_key: str = ""
     sora_api_key: str = ""
-    # Другие значения приведут к ошибке "Model not found" от Sora API.
-    sora_model_video: str = "sora"
+    # Значение "sora" больше не поддерживается и приведёт к ошибке "Model not found" в Sora API.
+    sora_model_video: str = "sora-2"
     openai_api_base: str = "https://api.openai.com/v1"
     default_video_model: str = "veo-3.0-generate-001"
     database_path: str = "./bot.db"

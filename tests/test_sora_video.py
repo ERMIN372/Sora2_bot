@@ -14,7 +14,7 @@ def sora_config() -> Config:
         gemini_api_key="",
         openai_api_key="sk-test",
         sora_api_key="sk-test",
-        sora_model_video="sora",
+        sora_model_video="sora-2",
     )
 
 
@@ -38,7 +38,7 @@ def test_enqueue_job_builds_payload(sora_config: Config) -> None:
             assert call_args.args[0] == "POST"
             assert call_args.args[1] == "/responses"
             payload = call_args.kwargs["json"]
-            assert payload["model"] == "sora"
+            assert payload["model"] == "sora-2"
             assert payload["input"][0]["content"][0]["text"] == "Make a cool video"
             assert "modalities" not in payload
             assert "tools" not in payload
