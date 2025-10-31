@@ -55,13 +55,13 @@ Veo и изображений через Google Gemini. Он управляет 
 | `GEMINI_MODEL_TEXT` | Модель Gemini для текстовых ответов (по умолчанию `gemini-2.0-flash`). |
 | `GEMINI_MODEL_IMAGE` | Модель Gemini для изображений (по умолчанию `gemini-2.5-flash-image`). |
 | `GEMINI_MODEL_VIDEO` | Модель Gemini (Veo) для видеогенерации (по умолчанию `veo-3.0-generate-001`). |
-| `SORA_API_KEY` | Ключ OpenAI Sora. Если не задан, используется `OPENAI_API_KEY`. |
-| `OPENAI_API_KEY` | Резервный ключ OpenAI (подходит для Sora). |
-| `OPENAI_ORG_ID` | Необязательный идентификатор организации OpenAI для запросов. |
-| `SORA_MODEL_VIDEO` | Модель Sora для видеогенерации (по умолчанию `sora`). |
-| `OPENAI_API_BASE` | Базовый URL OpenAI API (по умолчанию `https://api.openai.com/v1`). |
-| `OPENAI_API_VERSION_VIDEO` | Версия API для Video API (`api-version` в Azure/Enterprise). |
-| `OPENAI_BETA_HEADER` | Значение заголовка `OpenAI-Beta` (если требуется переопределить дефолт). |
+| `SORA_API_KEY` | Основной ключ доступа к OpenAI Video API (Sora 2). Если не задан, будет использован `OPENAI_API_KEY`. |
+| `OPENAI_API_KEY` | Резервный ключ OpenAI. Подойдёт, если у вас нет отдельного `SORA_API_KEY`. |
+| `OPENAI_ORG_ID` | Необязательный идентификатор организации OpenAI для маршрутизации запросов. |
+| `SORA_MODEL_VIDEO` | Предпочитаемая модель Sora 2 (по умолчанию `sora-2`). |
+| `OPENAI_API_BASE` | Базовый URL OpenAI Video API (по умолчанию `https://api.openai.com/v1`). |
+| `OPENAI_API_VERSION_VIDEO` | Значение параметра `api-version` для Enterprise/ Azure-совместимых развёртываний. |
+| `OPENAI_BETA_HEADER` | Заголовок `OpenAI-Beta` для включения Sora 2 (по умолчанию `video=1`). |
 | `DATABASE_PATH` | (Опционально) Путь к старой базе SQLite для скрипта миграции. |
 | `GOOGLE_SHEET_ID` | Идентификатор Google-таблицы, которая служит основным хранилищем данных. |
 | `GOOGLE_SA_JSON_BASE64` | JSON сервис-аккаунта Google в Base64, используемый для доступа к таблице Google Sheets. |
@@ -71,7 +71,7 @@ Veo и изображений через Google Gemini. Он управляет 
 | `CREDITS_PER_PAYMENT` | Количество кредитов, начисляемых пользователю за успешный платёж. |
 | `CREDITS_PER_GENERATION` | Количество кредитов, списываемых за каждую заявку на генерацию. |
 | `REQUEST_TIMEOUT` | Тайм-аут (в секундах) для исходящих запросов к API. |
-| `PROVIDER_TIMEOUT_S` | Общий тайм-аут для HTTP-клиента провайдера (параметр `total` в `aiohttp.ClientTimeout`). |
+| `PROVIDER_TIMEOUT_S` | Общий тайм-аут (в секундах) для HTTP-клиента провайдера, применяется и к OpenAI Video API. |
 | `REQUEST_RETRIES` | Количество повторных попыток при неудачных запросах к API. |
 | `RETRY_BACKOFF` | Множитель экспоненциальной паузы между повторными попытками. |
 | `AIROGRAM_REDIS_URL` | Необязательный URL подключения к Redis для FSM или ограничения скорости. |
@@ -162,6 +162,44 @@ python main.py --mode webhook
 Нажмите `Ctrl+C`, чтобы остановить процесс. При завершении работы очередь
 дренируется, сетевые сессии закрываются, вебхук Telegram удаляется, а соединения с
 базой данных освобождаются.
+
+## OpenAI Video API (Sora 2)
+
+### Возможности
+
+Бот поддерживает полный цикл работы с OpenAI Video API: создание роликов (`/video`),
+ремиксы по готовому видео (`/video_remix`), просмотр списка заданий (`/video_list`),
+получение подробной информации (`/video_info`) и скачивание готовых ассетов (`/video_get`).
+Все команды используют общий клиент `OpenAIVideoClient`, который автоматически
+учитывает выбранную модель, размер кадра и стоимость в кредитах. 【F:handlers.py†L3110-L3374】【F:handlers.py†L3377-L3560】
+
+Для отображения доступных моделей предусмотрена команда `/video_models`, а общая
+команда `/models` объединяет список Gemini и Sora 2. Встроенная диагностика
+`/diag_openai_video` проверяет подключение, скорость ответа API и актуальные модели. 【F:handlers.py†L3080-L3107】【F:handlers.py†L3563-L3695】
+
+### Конфигурация
+
+При старте приложения создаются клиенты Sora 2 (через Responses API) и новый
+клиент OpenAI Video API; они регистрируются в пуле провайдеров и доступны под
+именами `openai-video` и `openai-video-api`. 【F:main.py†L111-L132】
+
+Ключевые переменные окружения для Sora 2:
+
+- `SORA_API_KEY` или `OPENAI_API_KEY` — токен с доступом к Video API; без него клиент не инициализируется. 【F:providers/openai_video.py†L37-L51】
+- `SORA_MODEL_VIDEO` — целевая модель (по умолчанию `sora-2`). 【F:config.py†L188-L199】
+- `OPENAI_API_BASE`, `OPENAI_API_VERSION_VIDEO` и `OPENAI_BETA_HEADER` — позволяют переключиться на собственный эндпоинт, указать версию API и заголовок беты (`video=1`). 【F:providers/openai_video.py†L40-L57】
+- `PROVIDER_TIMEOUT_S` — общий тайм-аут HTTP-клиента, который применяется к запросам OpenAI Video API. 【F:config.py†L213-L225】
+
+### Ограничения и доступ
+
+- Клиент OpenAI Video API требует действующий ключ и активированное бета-подключение (заголовок `OpenAI-Beta: video=1`). Без него запросы вернут ошибку авторизации. 【F:providers/openai_video.py†L40-L54】【F:providers/openai_video.py†L121-L129】
+- Значение `sora` больше не поддерживается: используйте модель семейства `sora-2` или ту, что опубликована для вашего аккаунта. 【F:config.py†L191-L195】
+- Для скачивания результатов используются ассеты, которые API возвращает не всегда; команда `/video_get` добавляет задачу в очередь и повторно скачивает файл при появлении. 【F:handlers.py†L3498-L3560】
+- Скорость обработки ограничена глобальными лимитами OpenAI и параметром `sora_requests_per_minute`; при превышении лимита стоит уменьшить частоту команд. 【F:config.py†L196-L203】
+
+Если доступ к бете ещё не открыт, подайте заявку в кабинете OpenAI или через менеджера
+поддержки и дождитесь включения Sora 2 для вашего ключа. После активации выполните
+`/diag_openai_video`, чтобы проверить соединение и список моделей. 【F:handlers.py†L3563-L3606】
 
 Чтобы запускать бота в фоне в продакшене, используйте менеджер процессов вроде
 `systemd`, `supervisord`, Docker или систему оркестрации контейнеров.
