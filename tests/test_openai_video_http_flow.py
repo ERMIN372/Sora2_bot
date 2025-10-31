@@ -2,11 +2,12 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from typing import Any, Dict
 
 import pytest
 
-from providers.base import BaseProviderClient
+from providers.base import BaseProviderClient, ProviderAPIError
 from providers.openai_video import OpenAIVideoClient
 
 
@@ -90,6 +91,17 @@ def test_openai_video_full_cycle(monkeypatch: pytest.MonkeyPatch, make_openai_vi
     assert method == "GET" and path == "/videos/vid_123"
     assert kwargs.get("params") is None
 
+    history = client.diagnostic_history
+    assert len(history) >= 3
+    first_entry = history[0]
+    assert first_entry["method"] == "POST"
+    assert first_entry["path"] == "/videos"
+    assert "payload.metadata" in first_entry["dropped_fields"]
+    last_entry = history[-1]
+    assert last_entry["method"] == "GET"
+    assert last_entry["path"] == "/videos/vid_123/content/primary"
+    assert "params.quality" in last_entry["dropped_fields"]
+
 
 def test_openai_video_list_pagination(monkeypatch: pytest.MonkeyPatch, make_openai_video_config) -> None:
     config = make_openai_video_config(openai_api_version_video="2024-05-01-preview")
@@ -157,3 +169,48 @@ def test_openai_video_models_filtering(monkeypatch: pytest.MonkeyPatch, make_ope
     supported = client.supported_models
     assert "sora-2" in supported
     assert "gpt-4.1" in supported
+
+
+def test_openai_video_unknown_parameter_error(make_openai_video_config) -> None:
+    config = make_openai_video_config()
+    client = OpenAIVideoClient(config=config)
+    client._record_last_request(
+        method="POST",
+        path="/videos",
+        payload={"prompt": "test", "extra": "value"},
+        dropped_fields=["payload.extra"],
+        correlation_id="diag-1",
+    )
+    error_payload = {
+        "error": {
+            "message": "Unknown parameter 'extra' provided",
+            "code": "invalid_parameter",
+            "param": "extra",
+        }
+    }
+    error = ProviderAPIError(
+        provider="openai-video",
+        status_code=400,
+        message="Bad request",
+        error_type="invalid_request_error",
+        error_code="invalid_parameter",
+        provider_message=json.dumps(error_payload),
+        retryable=False,
+    )
+    normalised = client._normalise_error(error)
+    assert isinstance(normalised, ProviderAPIError)
+    assert normalised.error_type == "invalid_request"
+    assert normalised.error_code == "invalid_request"
+    message = str(normalised)
+    assert "Unknown parameter" in message
+    assert "payload.extra" in message
+    history = client.diagnostic_history
+    assert history
+    diagnostic = history[-1]
+    assert diagnostic.get("status_code") == 400
+    assert "payload.extra" in diagnostic.get("dropped_fields", ())
+    error_info = diagnostic.get("error") or {}
+    assert error_info.get("error_code") == "invalid_request"
+    assert "payload.extra" in error_info.get("message", "")
+    offending = error_info.get("offending_parameters") or ()
+    assert "extra" in offending

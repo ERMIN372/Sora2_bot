@@ -3603,6 +3603,49 @@ async def diag_openai_video_command(
             lines.append("list_models: пусто")
     except Exception as exc:  # pragma: no cover - network guard
         lines.append(f"list_models: error={escape_html(str(exc))}")
+    history = getattr(client, "diagnostic_history", [])
+    if history:
+        lines.append("")
+        lines.append("Последние запросы OpenAI Videos:")
+        for entry in list(history)[-3:][::-1]:
+            method = str(entry.get("method") or "?")
+            path = str(entry.get("path") or "?")
+            dropped = entry.get("dropped_fields") or ()
+            dropped_text = ", ".join(dropped) if dropped else "—"
+            correlation = str(entry.get("correlation_id") or "")
+            status_code = entry.get("status_code")
+            duration = entry.get("duration_ms")
+            meta_parts: List[str] = []
+            if correlation:
+                meta_parts.append(f"corr={correlation}")
+            meta_parts.append(f"dropped={dropped_text}")
+            if status_code is not None:
+                meta_parts.append(f"status={status_code}")
+            if duration is not None:
+                meta_parts.append(f"{duration} мс")
+            error_info = entry.get("error")
+            if isinstance(error_info, dict):
+                err_parts: List[str] = []
+                err_code = error_info.get("error_code")
+                err_type = error_info.get("error_type")
+                err_msg = error_info.get("message")
+                if err_code:
+                    err_parts.append(str(err_code))
+                if err_type and err_type != err_code:
+                    err_parts.append(str(err_type))
+                if err_msg:
+                    text = str(err_msg)
+                    if len(text) > 160:
+                        text = f"{text[:157]}…"
+                    err_parts.append(text)
+                if err_parts:
+                    meta_parts.append("error: " + " — ".join(err_parts))
+            base_text = escape_html(f"{method} {path}")
+            details = "; ".join(escape_html(part) for part in meta_parts if part)
+            if details:
+                lines.append(f"• {base_text} ({details})")
+            else:
+                lines.append(f"• {base_text}")
     await message.answer("\n".join(lines))
 
 
