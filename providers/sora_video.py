@@ -1,10 +1,11 @@
 """OpenAI Sora video generation client."""
 from __future__ import annotations
 
+import json
 import logging
 import math
 import re
-from typing import Any, Dict, Iterable, Optional
+from typing import Any, Dict, Iterable, Optional, Tuple
 
 from config import Config
 
@@ -13,6 +14,7 @@ from .base import (
     ProviderAPIError,
     ProviderJobStatus,
     ProviderJobSubmission,
+    _serialise_for_log,
 )
 from services.payload_sanitize import (
     log_removed_keys,
@@ -22,6 +24,9 @@ from services.payload_sanitize import (
 from services.payload_whitelists import SORA_VIDEO_ALLOWED
 
 log = logging.getLogger(__name__)
+
+
+_SUPPORTED_MODELS = {"sora"}
 
 
 _SIZE_PATTERN = re.compile(r"^(\d+)[xX](\d+)$")
@@ -116,7 +121,14 @@ class SoraVideoClient(BaseProviderClient):
             provider_name="sora",
             default_headers=default_headers,
         )
+        self._supported_models = set(_SUPPORTED_MODELS)
         self._default_model = (config.sora_model_video or "sora").strip() or "sora"
+        if self._default_model not in self._supported_models:
+            log.warning(
+                "Unsupported default Sora model configured model=%s; falling back to 'sora'",
+                self._default_model,
+            )
+            self._default_model = "sora"
         self._cache: Dict[str, Dict[str, Any]] = {}
 
     # ------------------------------------------------------------------
@@ -132,18 +144,61 @@ class SoraVideoClient(BaseProviderClient):
         idempotency_key: Optional[str] = None,
         **_: Any,
     ) -> ProviderJobSubmission:
+        settings = dict(settings or {})
+        requested_model = (settings.get("model") or self._default_model or "sora").strip()
+        model_name = requested_model or self._default_model
+        if model_name not in self._supported_models:
+            log.warning(
+                "Unsupported Sora model requested model=%s supported=%s",
+                model_name,
+                sorted(self._supported_models),
+            )
+            raise ProviderAPIError(
+                provider="sora",
+                status_code=400,
+                message=(
+                    "Model '{model}' is not supported. Available models: {available}".format(
+                        model=model_name,
+                        available=", ".join(sorted(self._supported_models)),
+                    )
+                ),
+                error_type="invalid_model",
+            )
+        settings["model"] = model_name
         request_payload = self._build_request_payload(
             prompt=prompt,
-            settings=settings or {},
+            settings=settings,
             payload=payload or {},
         )
         endpoint = "/responses"
-        log.info("sora.request endpoint=%s method=%s", endpoint, "POST")
+        log.info(
+            "sora.enqueue start endpoint=%s method=%s model=%s payload=%s",
+            endpoint,
+            "POST",
+            model_name,
+            _serialise_for_log(request_payload, limit=2048),
+        )
         data, status_code, duration_ms = await self._request(
             "POST",
             endpoint,
             json=request_payload,
             idempotency_key=idempotency_key,
+        )
+        error_code = None
+        error_message = None
+        if isinstance(data, dict):
+            error_payload = data.get("error")
+            if isinstance(error_payload, dict):
+                error_code = error_payload.get("code")
+                error_message = error_payload.get("message") or error_payload.get("detail")
+        log.info(
+            "sora.enqueue response endpoint=%s status=%s duration_ms=%s error_code=%s error_message=%s json=%s",
+            endpoint,
+            status_code,
+            duration_ms,
+            error_code,
+            error_message,
+            _serialise_for_log(data, limit=2048),
         )
         job_id = self._resolve_job_id(data)
         if not job_id:
@@ -170,8 +225,19 @@ class SoraVideoClient(BaseProviderClient):
             duration_ms = 0
         else:
             endpoint = f"/responses/{job_id}"
-            log.info("sora.request endpoint=%s method=%s", endpoint, "GET")
+            log.info(
+                "sora.status start endpoint=%s method=%s",
+                endpoint,
+                "GET",
+            )
             data, status_code, duration_ms = await self._request("GET", endpoint)
+            log.info(
+                "sora.status response endpoint=%s status=%s duration_ms=%s json=%s",
+                endpoint,
+                status_code,
+                duration_ms,
+                _serialise_for_log(data, limit=2048),
+            )
             self._cache[job_id] = data
         status = self._extract_status(data)
         error = self._extract_error(data)
@@ -274,6 +340,83 @@ class SoraVideoClient(BaseProviderClient):
         if metadata:
             request["metadata"] = metadata
         return request
+
+    async def _request(
+        self,
+        method: str,
+        path: str,
+        *,
+        idempotency_key: Optional[str] = None,
+        **kwargs: Any,
+    ) -> Tuple[Dict[str, Any], int, int]:
+        url = f"{self._base_url}{path}"
+        params_payload = kwargs.get("params")
+        json_payload = kwargs.get("json")
+        data_payload = kwargs.get("data")
+        log.debug(
+            "sora.http.request method=%s url=%s params=%s json=%s data=%s",
+            method,
+            url,
+            _serialise_for_log(params_payload, limit=1024),
+            _serialise_for_log(json_payload, limit=2048),
+            _serialise_for_log(data_payload, limit=2048),
+        )
+        try:
+            data, status_code, duration_ms = await super()._request(
+                method,
+                path,
+                idempotency_key=idempotency_key,
+                **kwargs,
+            )
+        except ProviderAPIError as exc:
+            raw_body = exc.provider_message or ""
+            error_json: Dict[str, Any]
+            try:
+                error_json = json.loads(raw_body) if raw_body else {}
+            except (TypeError, ValueError):
+                error_json = {"raw": raw_body}
+            error_code = None
+            error_message = None
+            if isinstance(error_json, dict):
+                error_payload = error_json.get("error")
+                if isinstance(error_payload, dict):
+                    error_code = error_payload.get("code")
+                    error_message = error_payload.get("message") or error_payload.get("detail")
+                else:
+                    error_code = error_json.get("code")
+                    error_message = error_json.get("message")
+            log.warning(
+                "sora.http.error method=%s url=%s status=%s duration_ms=%s error_code=%s error_message=%s text=%s json=%s",
+                method,
+                url,
+                exc.status_code,
+                exc.duration_ms or 0,
+                error_code,
+                error_message,
+                raw_body,
+                _serialise_for_log(error_json, limit=2048),
+            )
+            raise
+        error_code = None
+        error_message = None
+        if isinstance(data, dict):
+            error_payload = data.get("error")
+            if isinstance(error_payload, dict):
+                error_code = error_payload.get("code")
+                error_message = error_payload.get("message") or error_payload.get("detail")
+        text_repr = json.dumps(data, ensure_ascii=False) if isinstance(data, dict) else str(data)
+        log.debug(
+            "sora.http.response method=%s url=%s status=%s duration_ms=%s error_code=%s error_message=%s text=%s json=%s",
+            method,
+            url,
+            status_code,
+            duration_ms,
+            error_code,
+            error_message,
+            text_repr,
+            _serialise_for_log(data, limit=2048),
+        )
+        return data, status_code, duration_ms
 
     def _resolve_job_id(self, payload: Dict[str, Any]) -> Optional[str]:
         if not isinstance(payload, dict):
