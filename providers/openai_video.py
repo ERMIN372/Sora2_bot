@@ -121,8 +121,9 @@ class OpenAIVideoClient(BaseProviderClient):
         default_headers: Dict[str, str] = {}
         if beta_header:
             default_headers["OpenAI-Beta"] = beta_header
-        if config.openai_org_id:
-            default_headers["OpenAI-Organization"] = config.openai_org_id
+        org_id = (config.openai_org_id or "").strip()
+        if org_id:
+            default_headers["OpenAI-Organization"] = org_id
         super().__init__(
             config=config,
             base_url=base_url,
@@ -130,6 +131,8 @@ class OpenAIVideoClient(BaseProviderClient):
             provider_name="openai-video",
             default_headers=default_headers,
         )
+        self._beta_header = beta_header
+        self._organization_id = org_id
         self._supported_models: set[str] = set(_DEFAULT_VIDEO_MODELS)
         configured_model = (config.sora_model_video or "").strip()
         if configured_model:
@@ -144,6 +147,7 @@ class OpenAIVideoClient(BaseProviderClient):
         )
         self._last_request: Dict[str, Any] = {}
         self._diagnostic_history: Deque[Dict[str, Any]] = deque(maxlen=10)
+        self._error_snapshots: Deque[Dict[str, Any]] = deque(maxlen=10)
         log.debug(
             "OpenAIVideoClient configured base_url=%s api_version=%s beta=%s org_id=%s api_key=%s",
             base_url,
@@ -178,6 +182,16 @@ class OpenAIVideoClient(BaseProviderClient):
                 item["error"] = dict(error_info)
             history.append(item)
         return history
+
+    def get_diagnostics(self) -> Dict[str, Any]:
+        safe_headers = _sanitize_headers(self._build_headers())
+        return {
+            "api_version": self._api_version or "",
+            "beta_header": self._beta_header,
+            "organization_id": self._organization_id,
+            "headers": safe_headers,
+            "error_snapshots": [dict(snapshot) for snapshot in self._error_snapshots],
+        }
 
     async def create(
         self,
@@ -689,6 +703,16 @@ class OpenAIVideoClient(BaseProviderClient):
         self._last_request.update(normalised)
         if self._diagnostic_history:
             self._diagnostic_history[-1].update(normalised)
+        error_info = normalised.get("error")
+        if error_info:
+            if isinstance(error_info, Mapping):
+                snapshot = dict(error_info)
+            else:
+                snapshot = {"message": str(error_info)}
+            status_code = normalised.get("status_code")
+            if status_code is not None and "status_code" not in snapshot:
+                snapshot["status_code"] = status_code
+            self._error_snapshots.append(snapshot)
 
     def _record_response_history(
         self,

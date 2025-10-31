@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import binascii
+import fnmatch
 import json
 import logging
 import mimetypes
@@ -12,7 +13,7 @@ from dataclasses import dataclass, field
 import re
 import uuid
 from datetime import datetime
-from typing import Any, Dict, Iterable, List, Literal, Optional, Set, Tuple
+from typing import Any, Dict, Iterable, List, Literal, Mapping, Optional, Set, Tuple
 
 from aiogram import Bot, Dispatcher
 from aiogram.dispatcher import FSMContext
@@ -3077,6 +3078,23 @@ async def job_admin_command(message: Message, config: Config) -> None:
     await message.answer("\n".join(lines))
 
 
+_VIDEO_MODEL_PATTERNS: Tuple[str, ...] = ("sora-2*", "gpt-*-sora*")
+
+
+def _filter_video_model_ids(models: Iterable[str]) -> List[str]:
+    filtered: List[str] = []
+    for model in models:
+        if not isinstance(model, str):
+            continue
+        candidate = model.strip()
+        if not candidate:
+            continue
+        lowered = candidate.lower()
+        if any(fnmatch.fnmatch(lowered, pattern) for pattern in _VIDEO_MODEL_PATTERNS):
+            filtered.append(candidate)
+    return filtered
+
+
 async def video_models_command(
     message: Message,
     job_queue: JobQueue,
@@ -3097,7 +3115,13 @@ async def video_models_command(
         log.warning("Failed to list OpenAI video models error=%s", exc, exc_info=True)
         await message.answer(i18n.t("video.models.fetch_failed"))
         return
-    visible_models = models or list(client.supported_models)
+    visible_models = _filter_video_model_ids(models)
+    if not models:
+        visible_models = _filter_video_model_ids(client.supported_models)
+    elif not visible_models:
+        fallback = _filter_video_model_ids(client.supported_models)
+        if fallback:
+            visible_models = fallback
     if not visible_models:
         await message.answer(i18n.t("video.models.empty"))
         return
@@ -3589,10 +3613,19 @@ async def diag_openai_video_command(
         await message.answer("Не удалось инициализировать OpenAI Videos API.")
         return
     supported = ", ".join(client.supported_models) or "—"
+    diagnostics = client.get_diagnostics()
+    headers = diagnostics.get("headers") or {}
+    headers_text = ", ".join(
+        f"{escape_html(str(key))}={escape_html(str(value))}" for key, value in sorted(headers.items())
+    ) or "—"
     lines = [
         "Диагностика OpenAI Videos API:",
         f"configured_model: {escape_html(config.sora_model_video or '-')}",
         f"supported_models: {escape_html(supported)}",
+        f"api_version: {escape_html(diagnostics.get('api_version') or '—')}",
+        f"beta_header: {escape_html(diagnostics.get('beta_header') or '—')}",
+        f"organization_id: {escape_html(diagnostics.get('organization_id') or '—')}",
+        f"headers: {headers_text}",
     ]
     queue_obj = getattr(job_queue, "_queue", None)
     if queue_obj is not None:
@@ -3602,21 +3635,54 @@ async def diag_openai_video_command(
             size = "?"
         lines.append(f"queue_size: {size}")
     try:
-        _, status_code, duration_ms = await client.list(limit=1, return_meta=True)
-        lines.append(f"list: status={status_code} time={duration_ms} мс")
+        data, status_code, duration_ms = await client.list(limit=1, return_meta=True)
+        has_more_value: Optional[Any] = None
+        if isinstance(data, Mapping):
+            has_more_value = data.get("has_more") if "has_more" in data else None
+        has_more_text = "—"
+        if has_more_value is not None:
+            if isinstance(has_more_value, bool):
+                has_more_text = "true" if has_more_value else "false"
+            else:
+                has_more_text = str(has_more_value)
+        lines.append(
+            f"list: status={status_code} has_more={escape_html(has_more_text)} time={duration_ms} мс"
+        )
     except Exception as exc:  # pragma: no cover - network guard
         lines.append(f"list: error={escape_html(str(exc))}")
     try:
         models = await client.list_models()
-        if models:
-            preview = ", ".join(models[:5])
+        filtered_models = _filter_video_model_ids(models)
+        if filtered_models:
+            preview = ", ".join(filtered_models[:5])
             lines.append(f"list_models: {escape_html(preview)}")
-            if len(models) > 5:
-                lines.append(f"… ещё {len(models) - 5}")
+            if len(filtered_models) > 5:
+                lines.append(f"… ещё {len(filtered_models) - 5}")
         else:
             lines.append("list_models: пусто")
     except Exception as exc:  # pragma: no cover - network guard
         lines.append(f"list_models: error={escape_html(str(exc))}")
+    sample_model = (config.sora_model_video or "").strip() or (client.supported_models[0] if client.supported_models else "")
+    try:
+        prepared = client.prepare_create_request(
+            prompt="Диагностика", payload={"model": sample_model} if sample_model else None
+        )
+        request_preview = json.dumps(prepared.request, ensure_ascii=False)
+        extras_preview = json.dumps(prepared.extras, ensure_ascii=False)
+        if len(request_preview) > 160:
+            request_preview = f"{request_preview[:157]}…"
+        if len(extras_preview) > 160:
+            extras_preview = f"{extras_preview[:157]}…"
+        dropped_text = ", ".join(prepared.dropped_fields) if prepared.dropped_fields else "—"
+        lines.append(
+            f"create.prepare: model={escape_html(str(prepared.request.get('model', '-')))} "
+            f"dropped={escape_html(dropped_text)} corr={escape_html(prepared.correlation_id or '—')}"
+        )
+        lines.append(f"create.request: {escape_html(request_preview)}")
+        if prepared.extras:
+            lines.append(f"create.extras: {escape_html(extras_preview)}")
+    except Exception as exc:  # pragma: no cover - validation guard
+        lines.append(f"create.prepare: error={escape_html(str(exc))}")
     history = getattr(client, "diagnostic_history", [])
     if history:
         lines.append("")
@@ -3660,6 +3726,28 @@ async def diag_openai_video_command(
                 lines.append(f"• {base_text} ({details})")
             else:
                 lines.append(f"• {base_text}")
+    error_snapshots = diagnostics.get("error_snapshots") or []
+    if error_snapshots:
+        lines.append("")
+        lines.append("Ошибки OpenAI (последние):")
+        for snapshot in list(error_snapshots)[-3:][::-1]:
+            if isinstance(snapshot, Mapping):
+                status_code = snapshot.get("status_code")
+                error_code = snapshot.get("error_code")
+                message = snapshot.get("message")
+                provider_message = snapshot.get("provider_message")
+                parts: List[str] = []
+                if status_code is not None:
+                    parts.append(f"status={status_code}")
+                if error_code:
+                    parts.append(f"code={error_code}")
+                if message:
+                    parts.append(_shorten(str(message), 180))
+                if provider_message:
+                    parts.append(_shorten(str(provider_message), 180))
+                lines.append("• " + escape_html("; ".join(parts) or json.dumps(snapshot, ensure_ascii=False)))
+            else:
+                lines.append("• " + escape_html(str(snapshot)))
     await message.answer("\n".join(lines))
 
 
