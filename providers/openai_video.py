@@ -4,8 +4,10 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import time
-from typing import Any, Dict, FrozenSet, Iterable, List, Mapping, Optional, Tuple
+from collections import deque
+from typing import Any, Deque, Dict, FrozenSet, Iterable, List, Mapping, Optional, Tuple
 
 from config import Config
 
@@ -132,6 +134,7 @@ class OpenAIVideoClient(BaseProviderClient):
             provider="openai-video", logger=log, supported_models=sorted(self._supported_models)
         )
         self._last_request: Dict[str, Any] = {}
+        self._diagnostic_history: Deque[Dict[str, Any]] = deque(maxlen=10)
         log.debug(
             "OpenAIVideoClient configured base_url=%s api_version=%s beta=%s org_id=%s api_key=%s",
             base_url,
@@ -152,6 +155,20 @@ class OpenAIVideoClient(BaseProviderClient):
     @property
     def last_request(self) -> Dict[str, Any]:
         return dict(self._last_request)
+
+    @property
+    def diagnostic_history(self) -> List[Dict[str, Any]]:
+        history: List[Dict[str, Any]] = []
+        for entry in self._diagnostic_history:
+            item = dict(entry)
+            dropped = item.get("dropped_fields")
+            if isinstance(dropped, (list, tuple, set)):
+                item["dropped_fields"] = tuple(dropped)
+            error_info = item.get("error")
+            if isinstance(error_info, Mapping):
+                item["error"] = dict(error_info)
+            history.append(item)
+        return history
 
     async def create(
         self,
@@ -557,7 +574,7 @@ class OpenAIVideoClient(BaseProviderClient):
         dropped_fields: Optional[List[str]] = None,
         correlation_id: Optional[str] = None,
     ) -> None:
-        self._last_request = {
+        entry: Dict[str, Any] = {
             "method": method,
             "path": path,
             "dropped_fields": tuple(sorted(set(dropped_fields or []))),
@@ -565,11 +582,20 @@ class OpenAIVideoClient(BaseProviderClient):
             "timestamp": time.monotonic(),
         }
         if payload is not None:
-            self._last_request["payload"] = payload
+            entry["payload"] = payload
         if params is not None:
-            self._last_request["params"] = params
+            entry["params"] = params
         if headers is not None:
-            self._last_request["headers"] = headers
+            entry["headers"] = headers
+        self._last_request = entry
+        self._diagnostic_history.append(entry)
+
+    def _update_last_diagnostic(self, **updates: Any) -> None:
+        if not self._last_request:
+            return
+        self._last_request.update(updates)
+        if self._diagnostic_history:
+            self._diagnostic_history[-1].update(updates)
 
     def _log_request(
         self,
@@ -688,6 +714,7 @@ class OpenAIVideoClient(BaseProviderClient):
             )
         except ProviderAPIError as exc:
             raise self._normalise_error(exc) from exc
+        self._update_last_diagnostic(status_code=status_code, duration_ms=duration_ms)
         return data, status_code, duration_ms
 
     async def _request_binary(
@@ -718,7 +745,7 @@ class OpenAIVideoClient(BaseProviderClient):
                 duration_ms = int((time.monotonic() - start) * 1000)
                 if response.status >= 400:
                     message = body.decode("utf-8", errors="ignore")
-                    raise ProviderAPIError(
+                    api_error = ProviderAPIError(
                         provider=self.provider_name,
                         status_code=response.status,
                         message="OpenAI Video API returned an error",
@@ -728,10 +755,22 @@ class OpenAIVideoClient(BaseProviderClient):
                         retryable=response.status >= 500,
                         duration_ms=duration_ms,
                     )
+                    self._update_last_diagnostic(
+                        status_code=api_error.status_code,
+                        duration_ms=duration_ms,
+                        error={
+                            "status_code": api_error.status_code,
+                            "error_code": api_error.error_code,
+                            "error_type": api_error.error_type,
+                            "message": str(api_error),
+                        },
+                    )
+                    raise api_error
+                self._update_last_diagnostic(status_code=response.status, duration_ms=duration_ms)
                 return body, dict(response.headers)
         except asyncio.TimeoutError as exc:
             duration_ms = int((time.monotonic() - start) * 1000)
-            raise ProviderAPIError(
+            api_error = ProviderAPIError(
                 provider=self.provider_name,
                 status_code=0,
                 message="OpenAI Video request timed out",
@@ -739,7 +778,18 @@ class OpenAIVideoClient(BaseProviderClient):
                 provider_message="",
                 retryable=False,
                 duration_ms=duration_ms,
-            ) from exc
+            )
+            self._update_last_diagnostic(
+                status_code=api_error.status_code,
+                duration_ms=duration_ms,
+                error={
+                    "status_code": api_error.status_code,
+                    "error_code": api_error.error_code,
+                    "error_type": api_error.error_type,
+                    "message": str(api_error),
+                },
+            )
+            raise api_error from exc
 
     def _merge_params(self, params: Optional[Mapping[str, Any]]) -> Optional[Dict[str, Any]]:
         merged: Dict[str, Any] = {}
@@ -757,6 +807,7 @@ class OpenAIVideoClient(BaseProviderClient):
         error_code: Optional[str] = None
         error_message: Optional[str] = None
         error_type: Optional[str] = None
+        offending_params: set[str] = set()
         try:
             payload = json.loads(raw_body) if raw_body else {}
         except (TypeError, ValueError):
@@ -767,11 +818,33 @@ class OpenAIVideoClient(BaseProviderClient):
                 error_code = nested.get("code") or nested.get("error_code")
                 error_message = nested.get("message") or nested.get("detail")
                 error_type = nested.get("type") or nested.get("error_type")
+                for key in (
+                    "param",
+                    "parameter",
+                    "field",
+                    "params",
+                    "parameters",
+                    "unknown",
+                    "unknown_params",
+                    "unknown_parameters",
+                ):
+                    if key in nested:
+                        self._collect_offending_params(nested[key], offending_params)
             else:
                 if isinstance(payload.get("code"), str):
                     error_code = payload.get("code")
                 if isinstance(payload.get("message"), str):
                     error_message = payload.get("message")
+            for key in (
+                "param",
+                "params",
+                "parameters",
+                "unknown",
+                "unknown_params",
+                "unknown_parameters",
+            ):
+                if key in payload:
+                    self._collect_offending_params(payload[key], offending_params)
         log.warning(
             "openai.video.error status=%s error_code=%s error_type=%s error_message=%s body=%s",
             error.status_code,
@@ -780,6 +853,41 @@ class OpenAIVideoClient(BaseProviderClient):
             error_message or str(error),
             raw_body,
         )
+        message_candidates = [error_message or "", raw_body]
+        unknown_parameter = any(
+            "unknown parameter" in str(candidate).lower() for candidate in message_candidates if candidate
+        )
+        if unknown_parameter:
+            for candidate in message_candidates:
+                self._collect_offending_params(candidate, offending_params)
+            dropped = tuple(self._last_request.get("dropped_fields", ()))
+            params_text = ", ".join(sorted(offending_params)) if offending_params else "—"
+            dropped_text = ", ".join(dropped) if dropped else "—"
+            message = (
+                f"Unknown parameter(s) reported by OpenAI: {params_text}. "
+                f"Dropped fields: {dropped_text}."
+            )
+            error_snapshot = {
+                "status_code": error.status_code,
+                "error_code": "invalid_request",
+                "error_type": "invalid_request",
+                "message": message,
+                "provider_message": raw_body,
+                "offending_parameters": tuple(sorted(offending_params)),
+            }
+            self._update_last_diagnostic(
+                status_code=error.status_code, error=error_snapshot
+            )
+            return ProviderAPIError(
+                provider=error.provider,
+                status_code=error.status_code,
+                message=message,
+                error_type="invalid_request",
+                error_code="invalid_request",
+                provider_message=raw_body or error.provider_message,
+                retryable=False,
+                duration_ms=error.duration_ms,
+            )
         resolution = self._error_handler.resolve(
             status_code=error.status_code,
             error_code=error_code or error.error_code,
@@ -787,22 +895,69 @@ class OpenAIVideoClient(BaseProviderClient):
         )
         if resolution:
             self._error_handler.log_admin_hint(resolution)
-            return self._error_handler.apply(
+            resolved = self._error_handler.apply(
                 base_error=error,
                 resolution=resolution,
                 raw_body=raw_body,
                 fallback_code=error_code or error.error_code,
             )
-        return ProviderAPIError(
+            self._update_last_diagnostic(
+                status_code=resolved.status_code,
+                error={
+                    "status_code": resolved.status_code,
+                    "error_code": resolved.error_code,
+                    "error_type": resolved.error_type,
+                    "message": str(resolved),
+                    "provider_message": raw_body,
+                },
+            )
+            return resolved
+        message = error_message or str(error) or "OpenAI Video API error"
+        fallback_error = ProviderAPIError(
             provider=error.provider,
             status_code=error.status_code,
-            message=error_message or str(error) or "OpenAI Video API error",
+            message=message,
             error_type=error_type or error.error_type or "unknown",
             error_code=error_code or error.error_code,
             provider_message=raw_body or error.provider_message,
             retryable=error.retryable,
             duration_ms=error.duration_ms,
         )
+        self._update_last_diagnostic(
+            status_code=fallback_error.status_code,
+            error={
+                "status_code": fallback_error.status_code,
+                "error_code": fallback_error.error_code,
+                "error_type": fallback_error.error_type,
+                "message": str(fallback_error),
+                "provider_message": raw_body,
+            },
+        )
+        return fallback_error
+
+    def _collect_offending_params(self, value: Any, result: set[str]) -> None:
+        if value is None:
+            return
+        if isinstance(value, str):
+            matches = re.findall(r"['\"]([^'\"]+)['\"]", value)
+            if matches:
+                for item in matches:
+                    candidate = item.strip()
+                    if candidate:
+                        result.add(candidate)
+                return
+            for token in re.split(r"[,\s]+", value):
+                candidate = token.strip(" '\"")
+                if candidate:
+                    result.add(candidate)
+            return
+        if isinstance(value, (list, tuple, set)):
+            for item in value:
+                self._collect_offending_params(item, result)
+            return
+        if isinstance(value, Mapping):
+            for item in value.values():
+                self._collect_offending_params(item, result)
 
     def _resolve_job_id(self, payload: Mapping[str, Any]) -> Optional[str]:
         if not isinstance(payload, Mapping):
