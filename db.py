@@ -31,6 +31,7 @@ class GenerationJobRecord:
     prompt: str
     status: str
     video_url: Optional[str]
+    video_id: Optional[str]
     error: Optional[str]
     created_at: datetime
     updated_at: datetime
@@ -164,6 +165,7 @@ def _job_from_dict(data: Dict[str, Any]) -> GenerationJobRecord:
         prompt=str(data.get("prompt", "")),
         status=str(data.get("status", "")),
         video_url=video_url,
+        video_id=data.get("video_id") or None,
         error=error,
         created_at=_parse_datetime(data.get("created_at", "")),
         updated_at=_parse_datetime(data.get("updated_at", "")),
@@ -475,6 +477,7 @@ class Database:
             idempotency_key=job.idempotency_key or "",
             operation_name=job.operation_name,
             file_url=job.file_url,
+            video_id=job.video_id,
         )
 
     async def find_job_by_idempotency_key(
@@ -495,6 +498,7 @@ class Database:
         video_url: Optional[str] = None,
         file_url: Optional[str] = None,
         operation_name: Optional[str] = None,
+        video_id: Optional[str] = None,
         error: Optional[str] = None,
         status_message_id: Optional[int] = None,
         status_message_index: Optional[int] = None,
@@ -508,6 +512,8 @@ class Database:
             updates["file_url"] = file_url
         if operation_name is not None:
             updates["operation_name"] = operation_name
+        if video_id is not None:
+            updates["video_id"] = video_id
         if error is not None:
             updates["error"] = error
         if status_message_id is not None:
