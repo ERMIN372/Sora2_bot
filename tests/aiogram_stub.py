@@ -37,6 +37,7 @@ def ensure_aiogram_stub() -> None:
     types_module.KeyboardButton = placeholder
     types_module.Message = placeholder
     types_module.ReplyKeyboardMarkup = placeholder
+    types_module.ReplyKeyboardRemove = placeholder
 
     utils_module = types.ModuleType("aiogram.utils")
     exceptions_module = types.ModuleType("aiogram.utils.exceptions")
