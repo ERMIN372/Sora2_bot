@@ -1,11 +1,16 @@
 import pathlib
 import sys
 import types
-from typing import Any, Dict
+from typing import TYPE_CHECKING, Any, Callable, Dict
+
+import pytest
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+
+if TYPE_CHECKING:  # pragma: no cover - import for typing only
+    from config import Config
 
 try:  # pragma: no cover - prefer real dependency
     import dotenv  # type: ignore
@@ -227,3 +232,23 @@ except ModuleNotFoundError:  # pragma: no cover - test environment shim
     gspread_mod.exceptions = _Exceptions()
     gspread_mod.authorize = authorize
     sys.modules["gspread"] = gspread_mod
+
+
+@pytest.fixture
+def make_openai_video_config() -> Callable[..., "Config"]:
+    """Factory fixture for constructing ``Config`` objects in tests."""
+
+    def _factory(**overrides: Any) -> "Config":
+        from config import Config  # Lazy import to allow dependency shims above
+
+        base: Dict[str, Any] = {
+            "bot_token": "test-token",
+            "gemini_api_key": "",
+            "openai_api_key": "sk-test",
+            "sora_api_key": "sk-test",
+            "openai_api_base": "https://api.openai.com/v1",
+        }
+        base.update(overrides)
+        return Config(**base)  # type: ignore[arg-type]
+
+    return _factory
