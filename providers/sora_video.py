@@ -1,6 +1,7 @@
 """OpenAI Sora video generation client."""
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import math
@@ -9,6 +10,7 @@ from typing import Any, Dict, Iterable, Optional, Tuple
 
 from config import Config
 
+from .api_error_handler import ApiErrorHandler
 from .base import (
     BaseProviderClient,
     ProviderAPIError,
@@ -22,6 +24,7 @@ from services.payload_sanitize import (
     sanitize_payload,
 )
 from services.payload_whitelists import SORA_VIDEO_ALLOWED
+from services.rate_limiter import AsyncRateLimiter
 
 log = logging.getLogger(__name__)
 
@@ -105,6 +108,48 @@ def _guess_mime(entry: Dict[str, Any]) -> Optional[str]:
     return None
 
 
+def _parse_error_payload(raw: Any) -> Tuple[Optional[str], Optional[str], Optional[str], Dict[str, Any]]:
+    payload: Dict[str, Any]
+    if isinstance(raw, dict):
+        payload = raw
+    elif isinstance(raw, str) and raw:
+        try:
+            parsed = json.loads(raw)
+        except (TypeError, ValueError):
+            payload = {"raw": raw}
+        else:
+            payload = parsed if isinstance(parsed, dict) else {"raw": parsed}
+    else:
+        payload = {}
+
+    error_code: Optional[str] = None
+    error_type: Optional[str] = None
+    error_message: Optional[str] = None
+    if isinstance(payload, dict):
+        error_payload = payload.get("error")
+        if isinstance(error_payload, dict):
+            error_code = (
+                error_payload.get("code")
+                or error_payload.get("error_code")
+                or error_payload.get("status")
+            )
+            error_type = error_payload.get("type") or error_payload.get("error_type")
+            error_message = (
+                error_payload.get("message")
+                or error_payload.get("detail")
+                or error_payload.get("title")
+            )
+        else:
+            if isinstance(payload.get("code"), str):
+                error_code = payload.get("code")
+            if isinstance(payload.get("type"), str):
+                error_type = payload.get("type")
+            raw_message = payload.get("message") or payload.get("error")
+            if isinstance(raw_message, str):
+                error_message = raw_message
+    return error_code, error_type, error_message, payload
+
+
 class SoraVideoClient(BaseProviderClient):
     """Thin wrapper around OpenAI's Responses API for Sora generation."""
 
@@ -135,6 +180,11 @@ class SoraVideoClient(BaseProviderClient):
                 )
             self._default_model = fallback_model
         self._cache: Dict[str, Dict[str, Any]] = {}
+        self._error_handler = ApiErrorHandler(
+            provider="sora", logger=log, supported_models=AVAILABLE_SORA_MODELS
+        )
+        limit_per_minute = max(1, config.sora_requests_per_minute)
+        self._rate_limiter = AsyncRateLimiter(limit_per_minute, 60.0)
 
     # ------------------------------------------------------------------
     # High level operations
@@ -397,111 +447,141 @@ class SoraVideoClient(BaseProviderClient):
         **kwargs: Any,
     ) -> Tuple[Dict[str, Any], int, int]:
         url = f"{self._base_url}{path}"
-        params_payload = kwargs.get("params")
-        json_payload = kwargs.get("json")
-        data_payload = kwargs.get("data")
+        request_kwargs = dict(kwargs)
+        extra_headers = request_kwargs.pop("headers", {})
+        params_payload = request_kwargs.get("params")
+        json_payload = request_kwargs.get("json")
+        data_payload = request_kwargs.get("data")
         payload = json_payload or data_payload or params_payload
         log.debug("Sora request: url=%s, payload=%s", url, _serialise_for_log(payload, limit=2048))
-        try:
-            data, status_code, duration_ms = await super()._request(
-                method,
-                path,
-                idempotency_key=idempotency_key,
-                **kwargs,
-            )
-        except ProviderAPIError as exc:
-            raw_body = exc.provider_message or ""
-            error_json: Dict[str, Any]
+
+        headers = self._build_headers()
+        if idempotency_key:
+            headers.setdefault("Idempotency-Key", idempotency_key)
+        headers.update(extra_headers)
+
+        attempt = 0
+        backoff_delay = self._config.retry_backoff
+        server_retry_index = 0
+
+        while True:
+            await self._rate_limiter.acquire()
             try:
-                error_json = json.loads(raw_body) if raw_body else {}
-            except (TypeError, ValueError):
-                error_json = {"raw": raw_body}
+                data, status_code, duration_ms = await super()._perform_request(
+                    method,
+                    url,
+                    headers=headers,
+                    **request_kwargs,
+                )
+            except ProviderAPIError as exc:
+                raw_body = exc.provider_message or ""
+                error_code, error_type, error_message, error_payload = _parse_error_payload(raw_body)
+                serialised_error = _serialise_for_log(error_payload, limit=2048)
+                log.error(
+                    "sora.api.error status=%s code=%s message=%s",
+                    exc.status_code,
+                    error_code or exc.error_code,
+                    error_message or str(exc),
+                )
+                log.warning(
+                    "sora.http.error method=%s url=%s status=%s duration_ms=%s error_type=%s error_code=%s error_message=%s text=%s json=%s",
+                    method,
+                    url,
+                    exc.status_code,
+                    exc.duration_ms or 0,
+                    error_type or exc.error_type,
+                    error_code or exc.error_code,
+                    error_message or str(exc),
+                    raw_body,
+                    serialised_error,
+                )
+
+                if exc.status_code in self._error_handler.SERVER_ERROR_STATUSES:
+                    delay = self._error_handler.server_retry_delay(server_retry_index)
+                    if delay is not None:
+                        server_retry_index += 1
+                        log.warning(
+                            "sora.http.retry server_error status=%s attempt=%s delay=%s",
+                            exc.status_code,
+                            server_retry_index,
+                            delay,
+                        )
+                        await asyncio.sleep(delay)
+                        continue
+
+                resolution = self._error_handler.resolve(
+                    status_code=exc.status_code,
+                    error_code=error_code or exc.error_code,
+                    error_message=error_message or str(exc),
+                )
+                if resolution:
+                    if exc.status_code == 429 and resolution.cooldown_seconds:
+                        await self._rate_limiter.penalize(resolution.cooldown_seconds)
+                    self._error_handler.log_admin_hint(resolution)
+                    raise self._error_handler.apply(
+                        base_error=exc,
+                        resolution=resolution,
+                        raw_body=raw_body,
+                        fallback_code=error_code or exc.error_code,
+                    ) from exc
+
+                if exc.retryable and attempt < self._config.request_retries and exc.status_code not in self._error_handler.SERVER_ERROR_STATUSES:
+                    attempt += 1
+                    log.warning(
+                        "sora.http.retry status=%s attempt=%s/%s delay=%s",
+                        exc.status_code,
+                        attempt,
+                        self._config.request_retries,
+                        backoff_delay,
+                    )
+                    await asyncio.sleep(backoff_delay)
+                    backoff_delay *= self._config.retry_backoff
+                    continue
+
+                log.error(
+                    "sora.http.unknown_error status=%s body=%s",
+                    exc.status_code,
+                    raw_body,
+                )
+                raise ProviderAPIError(
+                    provider="sora",
+                    status_code=exc.status_code,
+                    message=str(exc) or "Sora API error",
+                    error_type="unknown",
+                    error_code=error_code or exc.error_code,
+                    provider_message=raw_body or exc.provider_message,
+                    retryable=False,
+                    duration_ms=exc.duration_ms,
+                ) from exc
+
             error_code = None
-            error_type = exc.error_type
+            error_type = None
             error_message = None
-            if isinstance(error_json, dict):
-                error_payload = error_json.get("error")
+            if isinstance(data, dict):
+                error_payload = data.get("error")
                 if isinstance(error_payload, dict):
                     error_code = error_payload.get("code")
-                    error_type = error_payload.get("type") or error_type
+                    error_type = error_payload.get("type")
                     error_message = error_payload.get("message") or error_payload.get("detail")
-                else:
-                    error_code = error_json.get("code")
-                    error_message = error_json.get("message")
-                    error_type = error_json.get("type") or error_type
-            serialised_error = _serialise_for_log(error_json, limit=2048)
+                    log.error(
+                        "Sora API error in response code=%s message=%s",
+                        error_code,
+                        error_message,
+                    )
+            serialised_response = _serialise_for_log(data, limit=2048)
+            log.debug("Sora response: status=%s, body=%s", status_code, serialised_response)
             log.debug(
-                "Sora response: status=%s, body=%s",
-                exc.status_code,
-                serialised_error,
-            )
-            if error_code or error_message:
-                log.error(
-                    "Sora API error in response code=%s message=%s",
-                    error_code,
-                    error_message,
-                )
-            log.warning(
-                "sora.http.error method=%s url=%s status=%s duration_ms=%s error_code=%s error_message=%s text=%s json=%s",
+                "sora.http.response method=%s url=%s status=%s duration_ms=%s error_type=%s error_code=%s error_message=%s json=%s",
                 method,
                 url,
-                exc.status_code,
-                exc.duration_ms or 0,
+                status_code,
+                duration_ms,
+                error_type,
                 error_code,
                 error_message,
-                raw_body,
-                serialised_error,
+                serialised_response,
             )
-            model_not_found_codes = {
-                "model_not_found",
-                "invalid_model",
-                "unsupported_model",
-            }
-            if error_code in model_not_found_codes:
-                user_message = "Модель не найдена. Проверьте имя модели и попробуйте снова"
-            else:
-                provider_details = error_message or raw_body or str(exc)
-                if error_code:
-                    provider_details = f"[{error_code}] {provider_details}" if provider_details else f"[{error_code}]"
-                user_message = f"Sora API error (status {exc.status_code}): {provider_details}"
-            raise ProviderAPIError(
-                provider="sora",
-                status_code=exc.status_code,
-                message=user_message,
-                error_type=error_type or exc.error_type,
-                error_code=error_code or exc.error_code,
-                provider_message=raw_body or exc.provider_message,
-                retryable=exc.retryable,
-                duration_ms=exc.duration_ms,
-            ) from exc
-        error_code = None
-        error_type = None
-        error_message = None
-        if isinstance(data, dict):
-            error_payload = data.get("error")
-            if isinstance(error_payload, dict):
-                error_code = error_payload.get("code")
-                error_type = error_payload.get("type")
-                error_message = error_payload.get("message") or error_payload.get("detail")
-                log.error(
-                    "Sora API error in response code=%s message=%s",
-                    error_code,
-                    error_message,
-                )
-        serialised_response = _serialise_for_log(data, limit=2048)
-        log.debug("Sora response: status=%s, body=%s", status_code, serialised_response)
-        log.debug(
-            "sora.http.response method=%s url=%s status=%s duration_ms=%s error_type=%s error_code=%s error_message=%s json=%s",
-            method,
-            url,
-            status_code,
-            duration_ms,
-            error_type,
-            error_code,
-            error_message,
-            serialised_response,
-        )
-        return data, status_code, duration_ms
+            return data, status_code, duration_ms
 
     def _resolve_job_id(self, payload: Dict[str, Any]) -> Optional[str]:
         if not isinstance(payload, dict):

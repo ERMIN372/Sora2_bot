@@ -33,7 +33,9 @@ from services.prompt_filters import (
     scrub_brands_and_persons,
 )
 from services.retry_policy import RetryDecision, next_attempt
+from services.rate_limiter import AsyncRateLimiter
 
+from .api_error_handler import ApiErrorHandler
 from .base import BaseProviderClient, ProviderAPIError, ProviderJobStatus, ProviderJobSubmission
 
 log = logging.getLogger(__name__)
@@ -270,6 +272,13 @@ class GeminiGenerativeClient(BaseProviderClient):
             logger=log,
         )
         self._load_available_models()
+        self._error_handler = ApiErrorHandler(
+            provider=provider_name,
+            logger=log,
+            supported_models=self._available_models,
+        )
+        limit_per_minute = max(1, config.gemini_requests_per_minute)
+        self._rate_limiter = AsyncRateLimiter(limit_per_minute, 60.0)
         if self._available_model_ids and self._model.lower() not in self._available_model_ids:
             raise ProviderAPIError(
                 provider=self.provider_name,
@@ -720,7 +729,7 @@ class GeminiGenerativeClient(BaseProviderClient):
         *,
         duration_ms: int,
         decision: Optional[RouteDecision] = None,
-    ) -> ProviderAPIError:
+    ) -> Tuple[ProviderAPIError, Optional[str], Optional[str], Optional[str]]:
         if isinstance(exc, genai_errors.APIError):
             status_code = int(getattr(exc, "code", 0) or 0)
             message = getattr(exc, "message", "Gemini API error") or "Gemini API error"
@@ -729,7 +738,12 @@ class GeminiGenerativeClient(BaseProviderClient):
             if not provider_message and hasattr(exc, "response"):
                 provider_message = getattr(exc.response, "text", None)
             status_name = str(getattr(exc, "status", "") or "")
-            provider_text = str(provider_message or "")
+            provider_text = ""
+            if provider_message is not None:
+                try:
+                    provider_text = json.dumps(provider_message, ensure_ascii=False)
+                except (TypeError, ValueError):
+                    provider_text = str(provider_message)
             error_type = "api"
             if status_code in {400, 404}:
                 message = (
@@ -757,34 +771,53 @@ class GeminiGenerativeClient(BaseProviderClient):
                 error_type = "download_failed"
                 retryable = False
                 message = "Не удалось скачать файл Gemini. Попробуем ещё раз позже и вернём кредиты."
-            return ProviderAPIError(
-                provider=self.provider_name,
-                status_code=status_code,
-                message=message,
-                error_type=error_type,
-                error_code=str(getattr(exc, "status", "")) or None,
-                provider_message=str(provider_message or message),
-                retryable=retryable,
-                duration_ms=duration_ms,
+            raw_body = provider_text or str(message)
+            error_code = status_name or (str(status_code) if status_code else None)
+            return (
+                ProviderAPIError(
+                    provider=self.provider_name,
+                    status_code=status_code,
+                    message=message,
+                    error_type=error_type,
+                    error_code=error_code,
+                    provider_message=raw_body,
+                    retryable=retryable,
+                    duration_ms=duration_ms,
+                ),
+                error_code,
+                message,
+                raw_body,
             )
         if isinstance(exc, ValueError):
-            return ProviderAPIError(
-                provider=self.provider_name,
-                status_code=400,
-                message=str(exc) or "Invalid Gemini request",
-                error_type="validation",
-                provider_message=str(exc),
-                retryable=False,
-                duration_ms=duration_ms,
+            text = str(exc) or "Invalid Gemini request"
+            return (
+                ProviderAPIError(
+                    provider=self.provider_name,
+                    status_code=400,
+                    message=text,
+                    error_type="validation",
+                    provider_message=text,
+                    retryable=False,
+                    duration_ms=duration_ms,
+                ),
+                "value_error",
+                text,
+                text,
             )
-        return ProviderAPIError(
-            provider=self.provider_name,
-            status_code=0,
-            message=str(exc) or "Gemini request failed",
-            error_type="network",
-            provider_message=str(exc),
-            retryable=True,
-            duration_ms=duration_ms,
+        text = str(exc) or "Gemini request failed"
+        return (
+            ProviderAPIError(
+                provider=self.provider_name,
+                status_code=0,
+                message=text,
+                error_type="network",
+                provider_message=text,
+                retryable=True,
+                duration_ms=duration_ms,
+            ),
+            exc.__class__.__name__,
+            text,
+            text,
         )
 
     def _extract_threshold_error_category(self, exc: Exception) -> Optional[str]:
@@ -873,6 +906,7 @@ class GeminiGenerativeClient(BaseProviderClient):
         delay = self._config.retry_backoff
         last_error: Optional[ProviderAPIError] = None
         downgraded_categories: Set[str] = set()
+        server_retry_index = 0
         while attempt <= self._config.request_retries:
             model_override = request_settings.get("model") or self._model
             try:
@@ -921,6 +955,7 @@ class GeminiGenerativeClient(BaseProviderClient):
                 idempotency_key or "",
             )
             try:
+                await self._rate_limiter.acquire()
                 response = await asyncio.to_thread(generator, **request_kwargs)
                 duration_ms = int((time.monotonic() - start) * 1000)
                 if hasattr(response, "model_dump"):
@@ -1008,11 +1043,51 @@ class GeminiGenerativeClient(BaseProviderClient):
                             _enum_code(_SAFETY_FALLBACK_THRESHOLD),
                         )
                         continue
-                provider_error = self._map_error(
+                provider_error, error_code, error_message, raw_body = self._map_error(
                     exc,
                     duration_ms=duration_ms,
                     decision=decision,
                 )
+                log.error(
+                    "gemini.api.error status=%s code=%s message=%s",
+                    provider_error.status_code,
+                    error_code or provider_error.error_code,
+                    error_message or provider_error.message,
+                )
+                resolution = self._error_handler.resolve(
+                    status_code=provider_error.status_code,
+                    error_code=error_code or provider_error.error_code,
+                    error_message=error_message or provider_error.message,
+                )
+                if resolution:
+                    if (
+                        provider_error.status_code == 429
+                        and resolution.cooldown_seconds
+                    ):
+                        await self._rate_limiter.penalize(resolution.cooldown_seconds)
+                    self._error_handler.log_admin_hint(resolution)
+                    provider_error = self._error_handler.apply(
+                        base_error=provider_error,
+                        resolution=resolution,
+                        raw_body=raw_body,
+                        fallback_code=error_code or provider_error.error_code,
+                    )
+                else:
+                    log.error(
+                        "gemini.api.unknown status=%s body=%s",
+                        provider_error.status_code,
+                        raw_body,
+                    )
+                    provider_error = ProviderAPIError(
+                        provider=self.provider_name,
+                        status_code=provider_error.status_code,
+                        message=provider_error.message,
+                        error_type="unknown",
+                        error_code=error_code or provider_error.error_code,
+                        provider_message=raw_body or provider_error.provider_message,
+                        retryable=False,
+                        duration_ms=provider_error.duration_ms,
+                    )
                 self._log_generation_feedback(
                     status_code=provider_error.status_code,
                     provider_message=provider_error.provider_message,
@@ -1020,6 +1095,23 @@ class GeminiGenerativeClient(BaseProviderClient):
                     corr_id=idempotency_key,
                     payload=None,
                 )
+                if (
+                    provider_error.status_code
+                    in self._error_handler.SERVER_ERROR_STATUSES
+                ):
+                    delay_override = self._error_handler.server_retry_delay(
+                        server_retry_index
+                    )
+                    if delay_override is not None:
+                        server_retry_index += 1
+                        log.warning(
+                            "Retrying Gemini request after server error status=%s attempt=%s delay=%s",
+                            provider_error.status_code,
+                            server_retry_index,
+                            delay_override,
+                        )
+                        await asyncio.sleep(delay_override)
+                        continue
                 log.warning(
                     "gemini.generate error model=%s method=%s version=%s env=%s key_mask=%s corr_id=%s status=%s latency_ms=%s",
                     decision.model,
@@ -1049,11 +1141,51 @@ class GeminiGenerativeClient(BaseProviderClient):
                 continue
             except Exception as exc:  # pragma: no cover - network guard
                 duration_ms = int((time.monotonic() - start) * 1000)
-                provider_error = self._map_error(
+                provider_error, error_code, error_message, raw_body = self._map_error(
                     exc,
                     duration_ms=duration_ms,
                     decision=decision,
                 )
+                log.error(
+                    "gemini.api.error status=%s code=%s message=%s",
+                    provider_error.status_code,
+                    error_code or provider_error.error_code,
+                    error_message or provider_error.message,
+                )
+                resolution = self._error_handler.resolve(
+                    status_code=provider_error.status_code,
+                    error_code=error_code or provider_error.error_code,
+                    error_message=error_message or provider_error.message,
+                )
+                if resolution:
+                    if (
+                        provider_error.status_code == 429
+                        and resolution.cooldown_seconds
+                    ):
+                        await self._rate_limiter.penalize(resolution.cooldown_seconds)
+                    self._error_handler.log_admin_hint(resolution)
+                    provider_error = self._error_handler.apply(
+                        base_error=provider_error,
+                        resolution=resolution,
+                        raw_body=raw_body,
+                        fallback_code=error_code or provider_error.error_code,
+                    )
+                elif 400 <= provider_error.status_code <= 599:
+                    log.error(
+                        "gemini.api.unknown status=%s body=%s",
+                        provider_error.status_code,
+                        raw_body,
+                    )
+                    provider_error = ProviderAPIError(
+                        provider=self.provider_name,
+                        status_code=provider_error.status_code,
+                        message=provider_error.message,
+                        error_type="unknown",
+                        error_code=error_code or provider_error.error_code,
+                        provider_message=raw_body or provider_error.provider_message,
+                        retryable=False,
+                        duration_ms=provider_error.duration_ms,
+                    )
                 log.warning(
                     "gemini.generate error model=%s method=%s version=%s env=%s key_mask=%s corr_id=%s status=%s latency_ms=%s",
                     decision.model,
