@@ -26,6 +26,7 @@ from providers import (
     GeminiImageClient,
     OpenAIChatClient,
     OpenAIImageClient,
+    OpenAIVideoClient,
     SoraVideoClient,
     VeoVideoClient,
 )
@@ -112,9 +113,21 @@ def _init_application(config: Config) -> ApplicationState:
             {
                 "sora": sora_client,
                 "openai-video": sora_client,
-                config.sora_model_video: sora_client,
             }
         )
+        if config.sora_model_video:
+            providers.setdefault(config.sora_model_video, sora_client)
+        try:
+            openai_video_client = OpenAIVideoClient(config=config)
+        except RuntimeError:
+            log.warning("OpenAI Videos API client is not configured; continuing without it", exc_info=True)
+        else:
+            providers["openai-video-api"] = openai_video_client
+            for model_name in openai_video_client.supported_models:
+                providers[model_name] = openai_video_client
+            configured_model = (config.sora_model_video or "").strip()
+            if configured_model and configured_model not in providers:
+                providers[configured_model] = openai_video_client
     if config.openai_image_enabled:
         try:
             openai_image_client = OpenAIImageClient(config=config)
