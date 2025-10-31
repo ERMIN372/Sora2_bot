@@ -13,7 +13,9 @@ from fractions import Fraction
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple
 from uuid import uuid4
 
+from google import genai
 from google.genai import errors as _genai_errors, types as _genai_types
+from google.genai import types as genai_types
 
 from config import Config, SafetyCfg
 from services.gemini_key import ensure_gemini_key_logged
@@ -230,12 +232,24 @@ class GeminiGenerativeClient(BaseProviderClient):
             api_key=api_key,
             provider_name=provider_name,
         )
+        if task in ("image", "video"):
+            resolved_version = "v1beta"
+            http_opts = genai_types.HttpOptions(api_version="v1beta")
+        else:
+            resolved_version = "v1"
+            http_opts = genai_types.HttpOptions(api_version="v1")
+
+        self._client = genai.Client(
+            api_key=api_key,
+            http_options=http_opts,
+        )
+
         self._api_key = api_key
         parsed_safety = _convert_setting_list(safety_settings, _genai_types.SafetySetting)
         self._safety_settings = parsed_safety or _default_safety_settings()
         self._model = model
         self._task = task
-        self._api_version = api_version
+        self._api_version = resolved_version
         self._router = get_gemini_router(config)
         self._available_models: List[str] = []
         self._available_model_ids: Set[str] = set()
@@ -308,6 +322,9 @@ class GeminiGenerativeClient(BaseProviderClient):
         candidates: Set[str] = set()
         identifiers: Set[str] = set()
         clients = []
+        own_client = getattr(self, "_client", None)
+        if own_client is not None:
+            clients.append(own_client)
         router_clients = getattr(self._router, "_clients", None)
         if isinstance(router_clients, dict):
             for entry in router_clients.values():
