@@ -10,6 +10,7 @@ except ModuleNotFoundError:  # pragma: no cover - optional dependency during tes
     AsyncOpenAI = None  # type: ignore[assignment]
 
 from config import Config
+from providers.base import _mask_secret
 
 log = logging.getLogger(__name__)
 
@@ -24,7 +25,13 @@ class OpenAIChatClient:
         if not api_key:
             raise RuntimeError("OpenAI API key is required for ChatGPT integration")
         base_url = (config.openai_api_base or "https://api.openai.com/v1").rstrip("/")
-        self._client = AsyncOpenAI(api_key=api_key, base_url=base_url)
+        org_id = (config.openai_org_id or "").strip()
+        client_kwargs = {"api_key": api_key, "base_url": base_url}
+        if org_id:
+            client_kwargs["organization"] = org_id
+            log.debug("OpenAIChatClient organization=%s", _mask_secret(org_id))
+        log.debug("OpenAIChatClient configured base_url=%s api_key=%s", base_url, _mask_secret(api_key))
+        self._client = AsyncOpenAI(**client_kwargs)
         self._model = model
 
     async def generate_reply(

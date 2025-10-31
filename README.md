@@ -57,8 +57,11 @@ Veo и изображений через Google Gemini. Он управляет 
 | `GEMINI_MODEL_VIDEO` | Модель Gemini (Veo) для видеогенерации (по умолчанию `veo-3.0-generate-001`). |
 | `SORA_API_KEY` | Ключ OpenAI Sora. Если не задан, используется `OPENAI_API_KEY`. |
 | `OPENAI_API_KEY` | Резервный ключ OpenAI (подходит для Sora). |
+| `OPENAI_ORG_ID` | Необязательный идентификатор организации OpenAI для запросов. |
 | `SORA_MODEL_VIDEO` | Модель Sora для видеогенерации (по умолчанию `sora`). |
 | `OPENAI_API_BASE` | Базовый URL OpenAI API (по умолчанию `https://api.openai.com/v1`). |
+| `OPENAI_API_VERSION_VIDEO` | Версия API для Video API (`api-version` в Azure/Enterprise). |
+| `OPENAI_BETA_HEADER` | Значение заголовка `OpenAI-Beta` (если требуется переопределить дефолт). |
 | `DATABASE_PATH` | (Опционально) Путь к старой базе SQLite для скрипта миграции. |
 | `GOOGLE_SHEET_ID` | Идентификатор Google-таблицы, которая служит основным хранилищем данных. |
 | `GOOGLE_SA_JSON_BASE64` | JSON сервис-аккаунта Google в Base64, используемый для доступа к таблице Google Sheets. |
@@ -68,6 +71,7 @@ Veo и изображений через Google Gemini. Он управляет 
 | `CREDITS_PER_PAYMENT` | Количество кредитов, начисляемых пользователю за успешный платёж. |
 | `CREDITS_PER_GENERATION` | Количество кредитов, списываемых за каждую заявку на генерацию. |
 | `REQUEST_TIMEOUT` | Тайм-аут (в секундах) для исходящих запросов к API. |
+| `PROVIDER_TIMEOUT_S` | Общий тайм-аут для HTTP-клиента провайдера (параметр `total` в `aiohttp.ClientTimeout`). |
 | `REQUEST_RETRIES` | Количество повторных попыток при неудачных запросах к API. |
 | `RETRY_BACKOFF` | Множитель экспоненциальной паузы между повторными попытками. |
 | `AIROGRAM_REDIS_URL` | Необязательный URL подключения к Redis для FSM или ограничения скорости. |

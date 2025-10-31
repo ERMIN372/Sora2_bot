@@ -12,6 +12,7 @@ from providers.base import (
     ProviderAPIError,
     ProviderJobStatus,
     ProviderJobSubmission,
+    _mask_secret,
 )
 
 log = logging.getLogger(__name__)
@@ -25,12 +26,25 @@ class OpenAIImageClient(BaseProviderClient):
         if not api_key:
             raise RuntimeError("OpenAI API key is required for image generation")
         base_url = (config.openai_api_base or "https://api.openai.com/v1").rstrip("/")
+        beta_header = (config.openai_beta_header or "assistants=v2").strip()
+        default_headers: Dict[str, str] = {}
+        if beta_header:
+            default_headers["OpenAI-Beta"] = beta_header
+        if config.openai_org_id:
+            default_headers["OpenAI-Organization"] = config.openai_org_id
         super().__init__(
             config=config,
             base_url=base_url,
             api_key=api_key,
             provider_name="openai-image",
-            default_headers={"OpenAI-Beta": "assistants=v2"},
+            default_headers=default_headers,
+        )
+        log.debug(
+            "OpenAIImageClient configured base_url=%s beta=%s org_id=%s api_key=%s",
+            base_url,
+            beta_header or "default",
+            _mask_secret(config.openai_org_id),
+            _mask_secret(api_key),
         )
         fallback_models = [
             model for model in config.fallback_image_models if isinstance(model, str) and model
