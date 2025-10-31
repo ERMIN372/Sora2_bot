@@ -94,6 +94,7 @@ def test_openai_video_full_cycle(monkeypatch: pytest.MonkeyPatch, make_openai_vi
     method, path, kwargs = calls[0]
     assert method == "POST" and path == "/videos"
     assert "json" in kwargs and kwargs["json"]["prompt"] == "Render a serene landscape"
+    assert "metadata" not in kwargs["json"]
 
     method, path, kwargs = calls[1]
     assert method == "GET" and path == "/videos/vid_123"
@@ -245,6 +246,7 @@ def test_prepare_create_request_returns_extras(make_openai_video_config) -> None
     assert prepared.request["prompt"] == "Create a video"
     assert prepared.request["seconds"] == "12"
     assert prepared.request["size"] == "1440x1080"
+    assert "metadata" not in prepared.request
     assert prepared.extras["duration_seconds"] == 12
     assert prepared.extras["aspect_ratio"] == "4:3"
     assert prepared.extras["size"] == "1440x1080"
