@@ -107,7 +107,7 @@ _SUPPORTED_SORA_PREFIXES: Tuple[str, ...] = (
     "gpt-4.2-sora",
 )
 
-SUPPORTED_SORA_MODELS: Set[str] = {"sora"}
+SUPPORTED_SORA_MODELS: Set[str] = {"sora-2", "sora-2-fast", "sora-2-pro"}
 
 
 class GenerationStates(StatesGroup):
@@ -329,12 +329,23 @@ def _map_provider_error(error: ProviderAPIError) -> tuple[str, str, bool, str]:
     notify_support = False
     hint = error_type or error_code or "unknown"
 
+    available_models_text = ", ".join(sorted(SUPPORTED_SORA_MODELS))
+
     policy_trigger = (
         "policy" in error_type
         or "policy" in error_code
         or "safety" in error_type
         or "safety" in error_code
     )
+
+    if error_code == "invalid_model" or error_type == "invalid_model":
+        message = (
+            "Выбранная модель Sora не поддерживается. "
+            f"Доступные модели: {escape_html(available_models_text)}"
+        )
+        short = f"Недоступная модель Sora ({available_models_text})"
+        hint = "invalid_model"
+        return message, short, notify_support, hint
 
     if policy_trigger:
         detail_source = raw_provider_message
@@ -367,9 +378,12 @@ def _map_provider_error(error: ProviderAPIError) -> tuple[str, str, bool, str]:
         hint = "validation"
     elif status >= 500 or error_type in {"timeout", "network"} or status == 0:
         notify_support = True
-        hint = "provider_unavailable"
-        message = "Провайдер недоступен. Попробуем ещё раз позже."
-        short = _shorten(provider_message or "Провайдер недоступен")
+        provider_detail = escape_html(provider_message or (error.args[0] if error.args else ""))
+        provider_code = error_code or error_type or ("timeout" if status == 0 else str(status))
+        hint = provider_code or "provider_unavailable"
+        detail_text = provider_detail or "попробуйте позже."
+        message = f"Ошибка провайдера ({provider_code or 'unknown'}): {detail_text}"
+        short = _shorten(provider_message or message)
     else:
         detail = escape_html(provider_message or (error.args[0] if error.args else ""))
         message = f"Не удалось выполнить запрос: {detail or 'попробуйте позже.'}"

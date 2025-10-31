@@ -123,10 +123,10 @@ class SoraVideoClient(BaseProviderClient):
         )
         self._supported_models = set(AVAILABLE_SORA_MODELS)
         configured_model = (config.sora_model_video or "").strip()
+        fallback_model = AVAILABLE_SORA_MODELS[0]
         if configured_model and configured_model in self._supported_models:
             self._default_model = configured_model
         else:
-            fallback_model = AVAILABLE_SORA_MODELS[0]
             if configured_model:
                 log.warning(
                     "Unsupported default Sora model configured model=%s; falling back to '%s'",
@@ -150,7 +150,7 @@ class SoraVideoClient(BaseProviderClient):
         **_: Any,
     ) -> ProviderJobSubmission:
         settings = dict(settings or {})
-        requested_model = (settings.get("model") or self._default_model).strip()
+        requested_model = (settings.get("model") or self._default_model or "").strip()
         model_name = requested_model or self._default_model
         if model_name not in self._supported_models:
             available = ", ".join(AVAILABLE_SORA_MODELS)
@@ -162,9 +162,21 @@ class SoraVideoClient(BaseProviderClient):
             raise ProviderAPIError(
                 provider="sora",
                 status_code=400,
-                message=f"Выбранная модель Sora не поддерживается, используйте одну из: {available}",
+                message=(
+                    "Выбранная модель Sora не поддерживается, используйте одну из: "
+                    f"{available}"
+                ),
                 error_type="invalid_model",
                 error_code="invalid_model",
+                provider_message=json.dumps(
+                    {
+                        "error": {
+                            "code": "invalid_model",
+                            "message": "Unsupported Sora model",
+                        }
+                    },
+                    ensure_ascii=False,
+                ),
             )
         settings["model"] = model_name
         request_payload = self._build_request_payload(
@@ -173,12 +185,9 @@ class SoraVideoClient(BaseProviderClient):
             payload=payload or {},
         )
         endpoint = "/responses"
-        log.debug(
-            "Sora request: url=%s, method=%s, payload=%s",
-            f"{self._base_url}{endpoint}",
-            "POST",
-            _serialise_for_log(request_payload, limit=2048),
-        )
+        url = f"{self._base_url}{endpoint}"
+        serialised_payload = _serialise_for_log(request_payload, limit=2048)
+        log.debug("Sora request: url=%s, payload=%s", url, serialised_payload)
         log.info(
             "sora.enqueue start endpoint=%s method=%s model=%s payload=%s",
             endpoint,
@@ -195,19 +204,16 @@ class SoraVideoClient(BaseProviderClient):
         error_code = None
         error_type = None
         error_message = None
-        if isinstance(data, dict):
-            error_payload = data.get("error")
-            if isinstance(error_payload, dict):
-                error_code = error_payload.get("code")
-                error_type = error_payload.get("type")
-                error_message = error_payload.get("message") or error_payload.get("detail")
-        log.debug(
-            "Sora response: status=%s, body=%s, error_type=%s, error_code=%s",
-            status_code,
-            _serialise_for_log(data, limit=2048),
-            error_type,
-            error_code,
-        )
+        error_payload = data.get("error") if isinstance(data, dict) else None
+        if isinstance(error_payload, dict):
+            error_code = error_payload.get("code") or error_payload.get("error_code")
+            error_type = error_payload.get("type") or error_payload.get("error_type")
+            error_message = error_payload.get("message") or error_payload.get("detail")
+            log.error(
+                "Sora API error in response code=%s message=%s", error_code, error_message
+            )
+        serialised_response = _serialise_for_log(data, limit=2048)
+        log.debug("Sora response: status=%s, body=%s", status_code, serialised_response)
         log.info(
             "sora.enqueue response endpoint=%s status=%s duration_ms=%s error_type=%s error_code=%s error_message=%s json=%s",
             endpoint,
@@ -216,7 +222,7 @@ class SoraVideoClient(BaseProviderClient):
             error_type,
             error_code,
             error_message,
-            _serialise_for_log(data, limit=2048),
+            serialised_response,
         )
         job_id = self._resolve_job_id(data)
         if not job_id:
@@ -245,12 +251,8 @@ class SoraVideoClient(BaseProviderClient):
             duration_ms = 0
         else:
             endpoint = f"/responses/{job_id}"
-            log.debug(
-                "Sora request: url=%s, method=%s, payload=%s",
-                f"{self._base_url}{endpoint}",
-                "GET",
-                "",
-            )
+            url = f"{self._base_url}{endpoint}"
+            log.debug("Sora request: url=%s, payload=%s", url, "")
             log.info(
                 "sora.status start endpoint=%s method=%s",
                 endpoint,
@@ -259,24 +261,29 @@ class SoraVideoClient(BaseProviderClient):
             data, status_code, duration_ms = await self._request("GET", endpoint)
             error_type = None
             error_code = None
+            error_message = None
             if isinstance(data, dict):
                 error_payload = data.get("error")
                 if isinstance(error_payload, dict):
                     error_type = error_payload.get("type")
                     error_code = error_payload.get("code")
-            log.debug(
-                "Sora response: status=%s, body=%s, error_type=%s, error_code=%s",
-                status_code,
-                _serialise_for_log(data, limit=2048),
-                error_type,
-                error_code,
-            )
+                    error_message = error_payload.get("message") or error_payload.get("detail")
+                    log.error(
+                        "Sora API error in response code=%s message=%s",
+                        error_code,
+                        error_message,
+                    )
+            serialised_response = _serialise_for_log(data, limit=2048)
+            log.debug("Sora response: status=%s, body=%s", status_code, serialised_response)
             log.info(
-                "sora.status response endpoint=%s status=%s duration_ms=%s json=%s",
+                "sora.status response endpoint=%s status=%s duration_ms=%s error_type=%s error_code=%s error_message=%s json=%s",
                 endpoint,
                 status_code,
                 duration_ms,
-                _serialise_for_log(data, limit=2048),
+                error_type,
+                error_code,
+                error_message,
+                serialised_response,
             )
             self._cache[job_id] = data
         status = self._extract_status(data)
@@ -394,12 +401,7 @@ class SoraVideoClient(BaseProviderClient):
         json_payload = kwargs.get("json")
         data_payload = kwargs.get("data")
         payload = json_payload or data_payload or params_payload
-        log.debug(
-            "Sora request: url=%s, method=%s, payload=%s",
-            url,
-            method,
-            _serialise_for_log(payload, limit=2048),
-        )
+        log.debug("Sora request: url=%s, payload=%s", url, _serialise_for_log(payload, limit=2048))
         try:
             data, status_code, duration_ms = await super()._request(
                 method,
@@ -427,13 +429,18 @@ class SoraVideoClient(BaseProviderClient):
                     error_code = error_json.get("code")
                     error_message = error_json.get("message")
                     error_type = error_json.get("type") or error_type
+            serialised_error = _serialise_for_log(error_json, limit=2048)
             log.debug(
-                "Sora response: status=%s, body=%s, error_type=%s, error_code=%s",
+                "Sora response: status=%s, body=%s",
                 exc.status_code,
-                _serialise_for_log(error_json, limit=2048),
-                error_type,
-                error_code,
+                serialised_error,
             )
+            if error_code or error_message:
+                log.error(
+                    "Sora API error in response code=%s message=%s",
+                    error_code,
+                    error_message,
+                )
             log.warning(
                 "sora.http.error method=%s url=%s status=%s duration_ms=%s error_code=%s error_message=%s text=%s json=%s",
                 method,
@@ -443,7 +450,7 @@ class SoraVideoClient(BaseProviderClient):
                 error_code,
                 error_message,
                 raw_body,
-                _serialise_for_log(error_json, limit=2048),
+                serialised_error,
             )
             model_not_found_codes = {
                 "model_not_found",
@@ -454,6 +461,8 @@ class SoraVideoClient(BaseProviderClient):
                 user_message = "Модель не найдена. Проверьте имя модели и попробуйте снова"
             else:
                 provider_details = error_message or raw_body or str(exc)
+                if error_code:
+                    provider_details = f"[{error_code}] {provider_details}" if provider_details else f"[{error_code}]"
                 user_message = f"Sora API error (status {exc.status_code}): {provider_details}"
             raise ProviderAPIError(
                 provider="sora",
@@ -474,16 +483,15 @@ class SoraVideoClient(BaseProviderClient):
                 error_code = error_payload.get("code")
                 error_type = error_payload.get("type")
                 error_message = error_payload.get("message") or error_payload.get("detail")
-        text_repr = json.dumps(data, ensure_ascii=False) if isinstance(data, dict) else str(data)
+                log.error(
+                    "Sora API error in response code=%s message=%s",
+                    error_code,
+                    error_message,
+                )
+        serialised_response = _serialise_for_log(data, limit=2048)
+        log.debug("Sora response: status=%s, body=%s", status_code, serialised_response)
         log.debug(
-            "Sora response: status=%s, body=%s, error_type=%s, error_code=%s",
-            status_code,
-            _serialise_for_log(data, limit=2048),
-            error_type,
-            error_code,
-        )
-        log.debug(
-            "sora.http.response method=%s url=%s status=%s duration_ms=%s error_type=%s error_code=%s error_message=%s text=%s json=%s",
+            "sora.http.response method=%s url=%s status=%s duration_ms=%s error_type=%s error_code=%s error_message=%s json=%s",
             method,
             url,
             status_code,
@@ -491,8 +499,7 @@ class SoraVideoClient(BaseProviderClient):
             error_type,
             error_code,
             error_message,
-            text_repr,
-            _serialise_for_log(data, limit=2048),
+            serialised_response,
         )
         return data, status_code, duration_ms
 
