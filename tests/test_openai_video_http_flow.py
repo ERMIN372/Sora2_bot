@@ -42,10 +42,18 @@ def test_openai_video_full_cycle(monkeypatch: pytest.MonkeyPatch, make_openai_vi
             )
         raise AssertionError(f"Unexpected request {method} {path}")
 
-    async def fake_binary(self, method: str, path: str, params=None):
+    async def fake_binary(self, method: str, path: str, params=None, **_: Any):
         assert method == "GET"
         assert path == "/videos/vid_123/content/primary"
         assert params is None
+        self._record_response_history(
+            method=method,
+            path=path,
+            status_code=200,
+            duration_ms=25,
+            request_id="diag-bin",
+            diagnostic={"dropped_fields": self.last_request.get("dropped_fields", ())},
+        )
         return b"video-bytes", {"content-type": "video/mp4"}
 
     monkeypatch.setattr(BaseProviderClient, "_request", fake_request)
@@ -96,11 +104,19 @@ def test_openai_video_full_cycle(monkeypatch: pytest.MonkeyPatch, make_openai_vi
     first_entry = history[0]
     assert first_entry["method"] == "POST"
     assert first_entry["path"] == "/videos"
+    assert first_entry["endpoint"] == "/videos"
     assert "payload.metadata" in first_entry["dropped_fields"]
+    assert "status" in first_entry and first_entry["status"] >= 0
+    assert "duration_ms" in first_entry
+    assert "request_id" in first_entry
     last_entry = history[-1]
     assert last_entry["method"] == "GET"
     assert last_entry["path"] == "/videos/vid_123/content/primary"
+    assert last_entry["endpoint"] == "/videos/vid_123/content/primary"
     assert "params.quality" in last_entry["dropped_fields"]
+    assert "status" in last_entry and last_entry["status"] >= 0
+    assert "duration_ms" in last_entry
+    assert "request_id" in last_entry
 
 
 def test_openai_video_list_pagination(monkeypatch: pytest.MonkeyPatch, make_openai_video_config) -> None:
