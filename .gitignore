@@ -225,6 +225,3 @@ logs/
 # кеши
 __pycache__/
 *.pyc
-
-.replit
-requirements.txt
