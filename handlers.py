@@ -573,30 +573,33 @@ SESSION_MANAGER = SessionManager()
 STATUS_MESSAGES = StatusMessageManager()
 
 
-def _main_keyboard() -> ReplyKeyboardMarkup:
-    return ReplyKeyboardMarkup(
-        keyboard=[
-            [KeyboardButton(text=i18n.t("buttons.generate_text"))],
-            [KeyboardButton(text=i18n.t("buttons.generate_photo"))],
-            [KeyboardButton(text=i18n.t("buttons.balance"))],
-            [KeyboardButton(text=i18n.t("buttons.top_up"))],
-            [KeyboardButton(text=i18n.t("buttons.help"))],
+def _main_keyboard(config: Config) -> ReplyKeyboardMarkup:
+    keyboard: List[List[KeyboardButton]] = [
+        [KeyboardButton(text=i18n.t("buttons.generate_text"))],
+        [KeyboardButton(text=i18n.t("buttons.generate_photo"))],
+        [KeyboardButton(text=i18n.t("buttons.balance"))],
+        [KeyboardButton(text=i18n.t("buttons.top_up"))],
+        [KeyboardButton(text=i18n.t("buttons.help"))],
+    ]
+    if config.sora_video_enabled:
+        keyboard.extend(
             [
-                KeyboardButton(text=i18n.t("buttons.video_models")),
-                KeyboardButton(text=i18n.t("buttons.video_list")),
-            ],
-            [
-                KeyboardButton(text=i18n.t("buttons.video_info")),
-                KeyboardButton(text=i18n.t("buttons.video_get")),
-            ],
-            [
-                KeyboardButton(text=i18n.t("buttons.video_create")),
-                KeyboardButton(text=i18n.t("buttons.video_remix")),
-            ],
-            [KeyboardButton(text=i18n.t("buttons.chatgpt"))],
-        ],
-        resize_keyboard=True,
-    )
+                [
+                    KeyboardButton(text=i18n.t("buttons.video_models")),
+                    KeyboardButton(text=i18n.t("buttons.video_list")),
+                ],
+                [
+                    KeyboardButton(text=i18n.t("buttons.video_info")),
+                    KeyboardButton(text=i18n.t("buttons.video_get")),
+                ],
+                [
+                    KeyboardButton(text=i18n.t("buttons.video_create")),
+                    KeyboardButton(text=i18n.t("buttons.video_remix")),
+                ],
+            ]
+        )
+    keyboard.append([KeyboardButton(text=i18n.t("buttons.chatgpt"))])
+    return ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True)
 
 
 def _mark_selected(label: str, selected: bool) -> str:
@@ -736,7 +739,7 @@ async def _send_main_menu(message: Message, config: Config) -> None:
             video_models=_video_models_description(config),
             image_model=_image_model_description(config),
         ),
-        reply_markup=_main_keyboard(),
+        reply_markup=_main_keyboard(config),
     )
 
 
@@ -2806,7 +2809,9 @@ async def order_callback_handler(
         session.pending_order = None
         session.awaiting_payment = False
         await state.finish()
-        await callback.message.answer(i18n.t("help.main"), reply_markup=_main_keyboard())
+        await callback.message.answer(
+            i18n.t("help.main"), reply_markup=_main_keyboard(config)
+        )
         return
     if not order:
         await callback.message.answer(i18n.t("flow.no_prompt"))
