@@ -6,19 +6,19 @@ import os
 import threading
 from typing import Dict, Tuple
 
-from google.genai import Client as _GenAIClient
-from google.genai import types as _genai_types
+from google import genai
+from google.genai import types
 
 from config import Config, RoutingCfg
 from services.gemini_key import ensure_gemini_key_logged
 
 log = logging.getLogger(__name__)
 
-_CLIENT_CACHE: Dict[Tuple[str, str, Tuple[int, int, int]], _GenAIClient] = {}
+_CLIENT_CACHE: Dict[Tuple[str, str, Tuple[int, int, int]], genai.Client] = {}
 _CACHE_LOCK = threading.Lock()
 
 
-def _build_http_options(config: Config, *, api_version: str) -> _genai_types.HttpOptions:
+def _build_http_options(config: Config, *, api_version: str) -> types.HttpOptions:
     timeout_seconds: float | None = None
     candidates = []
     for value in (
@@ -35,10 +35,10 @@ def _build_http_options(config: Config, *, api_version: str) -> _genai_types.Htt
         timeout_seconds = max(candidates)
     timeout_ms = int(timeout_seconds * 1000) if timeout_seconds else None
     version = (api_version or "").strip() or None
-    return _genai_types.HttpOptions(timeout=timeout_ms, api_version=version)
+    return types.HttpOptions(timeout=timeout_ms, api_version=version)
 
 
-def _get_client(config: Config, *, api_version: str) -> _GenAIClient:
+def _get_client(config: Config, *, api_version: str) -> genai.Client:
     """Return a cached :class:`google.genai.Client` instance for *api_version*."""
 
     api_key = (config.gemini_api_key or "").strip()
@@ -64,24 +64,24 @@ def _get_client(config: Config, *, api_version: str) -> _GenAIClient:
         client = _CLIENT_CACHE.get(cache_key)
         if client is None:
             http_options = _build_http_options(config, api_version=version)
-            client = _GenAIClient(api_key=api_key, http_options=http_options)
+            client = genai.Client(api_key=api_key, http_options=http_options)
             _CLIENT_CACHE[cache_key] = client
     return client
 
 
-def get_text_client(config: Config) -> _GenAIClient:
+def get_text_client(config: Config) -> genai.Client:
     """Return a Gemini client configured for text models (v1)."""
 
     return _get_client(config, api_version=RoutingCfg.TEXT_API_VERSION)
 
 
-def get_media_client(config: Config) -> _GenAIClient:
+def get_media_client(config: Config) -> genai.Client:
     """Return a Gemini client configured for media models (v1beta)."""
 
     return _get_client(config, api_version=RoutingCfg.MEDIA_API_VERSION)
 
 
-def get_gemini_client(config: Config, *, api_version: str | None = None) -> _GenAIClient:
+def get_gemini_client(config: Config, *, api_version: str | None = None) -> genai.Client:
     """Backward compatible wrapper for legacy call sites."""
 
     version = (api_version or "v1").strip().lower()

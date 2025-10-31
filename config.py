@@ -137,7 +137,6 @@ class Config:
     bot_token: str
     environment: str = "dev"
     gemini_api_key: str = ""
-    gemini_api_version: str = "v1"
     gemini_model_text: str = "gemini-2.0-flash"
     gemini_model_image: str = "gemini-2.5-flash-image"
     gemini_model_video: str = "veo-3.0-generate-001"
@@ -414,10 +413,6 @@ def load_config() -> Config:
             "GOOGLE_API_KEY detected; preferring it over GEMINI_API_KEY for Gemini API access"
         )
     gemini_api_key = raw_gemini_api_key.strip()
-    gemini_api_version = (
-        os.getenv("GEMINI_API_VERSION", Config.gemini_api_version).strip()
-        or Config.gemini_api_version
-    )
     gemini_model_text = (
         os.getenv("GEMINI_MODEL_TEXT", Config.gemini_model_text).strip()
         or Config.gemini_model_text
@@ -517,7 +512,6 @@ def load_config() -> Config:
     return Config(
         bot_token=bot_token,
         gemini_api_key=gemini_api_key,
-        gemini_api_version=gemini_api_version,
         environment=environment,
         gemini_model_text=gemini_model_text,
         gemini_model_image=gemini_model_image,

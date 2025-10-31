@@ -14,8 +14,7 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Set, 
 from uuid import uuid4
 
 from google import genai
-from google.genai import errors as _genai_errors, types as _genai_types
-from google.genai import types as genai_types
+from google.genai import errors as genai_errors, types
 
 from config import Config, SafetyCfg
 from services.gemini_key import ensure_gemini_key_logged
@@ -40,16 +39,16 @@ from .base import BaseProviderClient, ProviderAPIError, ProviderJobStatus, Provi
 log = logging.getLogger(__name__)
 
 
-_SAFETY_CATEGORIES: Tuple[_genai_types.HarmCategory, ...] = (
-    _genai_types.HarmCategory.HARM_CATEGORY_HARASSMENT,
-    _genai_types.HarmCategory.HARM_CATEGORY_HATE_SPEECH,
-    _genai_types.HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT,
-    _genai_types.HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT,
-    _genai_types.HarmCategory.HARM_CATEGORY_CIVIC_INTEGRITY,
+_SAFETY_CATEGORIES: Tuple[types.HarmCategory, ...] = (
+    types.HarmCategory.HARM_CATEGORY_HARASSMENT,
+    types.HarmCategory.HARM_CATEGORY_HATE_SPEECH,
+    types.HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT,
+    types.HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT,
+    types.HarmCategory.HARM_CATEGORY_CIVIC_INTEGRITY,
 )
 
-_SAFETY_DEFAULT_THRESHOLD = _genai_types.HarmBlockThreshold.BLOCK_NONE
-_SAFETY_FALLBACK_THRESHOLD = _genai_types.HarmBlockThreshold.BLOCK_ONLY_HIGH
+_SAFETY_DEFAULT_THRESHOLD = types.HarmBlockThreshold.BLOCK_NONE
+_SAFETY_FALLBACK_THRESHOLD = types.HarmBlockThreshold.BLOCK_ONLY_HIGH
 
 
 def _enum_code(value: Any) -> str:
@@ -64,11 +63,11 @@ def _enum_code(value: Any) -> str:
     return str(value)
 
 
-def _default_safety_settings() -> List[_genai_types.SafetySetting]:
+def _default_safety_settings() -> List[types.SafetySetting]:
     """Return a permissive Gemini safety configuration for text calls."""
 
     return [
-        _genai_types.SafetySetting(
+        types.SafetySetting(
             category=category, threshold=_SAFETY_DEFAULT_THRESHOLD
         )
         for category in _SAFETY_CATEGORIES
@@ -223,7 +222,7 @@ class GeminiGenerativeClient(BaseProviderClient):
         provider_name: str,
         task: str,
         api_version: str,
-        safety_settings: Optional[List[_genai_types.SafetySetting]] = None,
+        safety_settings: Optional[List[types.SafetySetting]] = None,
     ) -> None:
         base_url = self._resolve_base_url(config)
         super().__init__(
@@ -232,12 +231,13 @@ class GeminiGenerativeClient(BaseProviderClient):
             api_key=api_key,
             provider_name=provider_name,
         )
-        if task in ("image", "video"):
+        self._task = task
+        if self._task in ("image", "video"):
             resolved_version = "v1beta"
-            http_opts = genai_types.HttpOptions(api_version="v1beta")
+            http_opts = types.HttpOptions(api_version="v1beta")
         else:
             resolved_version = "v1"
-            http_opts = genai_types.HttpOptions(api_version="v1")
+            http_opts = types.HttpOptions(api_version="v1")
 
         self._client = genai.Client(
             api_key=api_key,
@@ -245,10 +245,9 @@ class GeminiGenerativeClient(BaseProviderClient):
         )
 
         self._api_key = api_key
-        parsed_safety = _convert_setting_list(safety_settings, _genai_types.SafetySetting)
+        parsed_safety = _convert_setting_list(safety_settings, types.SafetySetting)
         self._safety_settings = parsed_safety or _default_safety_settings()
         self._model = model
-        self._task = task
         self._api_version = resolved_version
         self._router = get_gemini_router(config)
         self._available_models: List[str] = []
@@ -257,7 +256,7 @@ class GeminiGenerativeClient(BaseProviderClient):
             config.gemini_safety_threshold
         )
         self._media_safety_settings = [
-            _genai_types.SafetySetting(
+            types.SafetySetting(
                 category=category, threshold=self._media_safety_threshold
             )
             for category in _SAFETY_CATEGORIES
@@ -299,16 +298,16 @@ class GeminiGenerativeClient(BaseProviderClient):
 
     def _parse_safety_threshold(
         self, value: Optional[str]
-    ) -> _genai_types.HarmBlockThreshold:
+    ) -> types.HarmBlockThreshold:
         if not value:
             return _SAFETY_FALLBACK_THRESHOLD
         normalised = value.strip().upper()
         if not normalised:
             return _SAFETY_FALLBACK_THRESHOLD
-        direct = getattr(_genai_types.HarmBlockThreshold, normalised, None)
-        if isinstance(direct, _genai_types.HarmBlockThreshold):
+        direct = getattr(types.HarmBlockThreshold, normalised, None)
+        if isinstance(direct, types.HarmBlockThreshold):
             return direct
-        for candidate in _genai_types.HarmBlockThreshold:
+        for candidate in types.HarmBlockThreshold:
             if normalised in {candidate.name.upper(), str(candidate.value).upper()}:
                 return candidate
         log.warning(
@@ -472,7 +471,7 @@ class GeminiGenerativeClient(BaseProviderClient):
             return self._build_images_config(settings)
 
         kwargs: Dict[str, Any] = {}
-        safety_settings: Optional[List[_genai_types.SafetySetting]] = None
+        safety_settings: Optional[List[types.SafetySetting]] = None
         if self._task == "text":
             safety_settings = list(self._safety_settings)
         elif self._task == "video":
@@ -482,9 +481,9 @@ class GeminiGenerativeClient(BaseProviderClient):
                 kwargs.setdefault("response_mime_type", "image/png")
             if safety_settings is not None:
                 kwargs["safety_settings"] = safety_settings
-            return _genai_types.GenerateContentConfig(**kwargs)
+            return types.GenerateContentConfig(**kwargs)
 
-        allowed_fields = set(_genai_types.GenerateContentConfig.model_fields.keys())
+        allowed_fields = set(types.GenerateContentConfig.model_fields.keys())
         skip_fields = {"http_options", "should_return_http_response"}
         image_config: Dict[str, Any] = {}
         for raw_key, value in settings.items():
@@ -496,28 +495,28 @@ class GeminiGenerativeClient(BaseProviderClient):
             if key in skip_fields or key not in allowed_fields:
                 continue
             if key == "safety_settings":
-                parsed = _convert_setting_list(value, _genai_types.SafetySetting)
+                parsed = _convert_setting_list(value, types.SafetySetting)
                 if parsed is not None and self._task == "text":
                     safety_settings = parsed
                 continue
             if key == "tools":
                 if self._task == "image":
                     continue
-                parsed = _convert_setting_list(value, _genai_types.Tool)
+                parsed = _convert_setting_list(value, types.Tool)
                 if parsed is not None:
                     kwargs["tools"] = parsed
                 continue
             if key == "tool_config":
                 if self._task == "image":
                     continue
-                parsed = _maybe_model_validate(value, _genai_types.ToolConfig)
+                parsed = _maybe_model_validate(value, types.ToolConfig)
                 if parsed is not None:
                     kwargs["tool_config"] = parsed
                 continue
             if key == "response_schema":
                 if self._task == "image":
                     continue
-                parsed = _maybe_model_validate(value, _genai_types.Schema)
+                parsed = _maybe_model_validate(value, types.Schema)
                 if parsed is not None:
                     kwargs["response_schema"] = parsed
                 continue
@@ -555,11 +554,11 @@ class GeminiGenerativeClient(BaseProviderClient):
 
         if safety_settings is not None:
             kwargs["safety_settings"] = safety_settings
-        return _genai_types.GenerateContentConfig(**kwargs)
+        return types.GenerateContentConfig(**kwargs)
 
     def _build_images_config(
         self, settings: Optional[Dict[str, Any]]
-    ) -> _genai_types.GenerateImagesConfig:
+    ) -> types.GenerateImagesConfig:
         kwargs: Dict[str, Any] = {}
 
         if isinstance(settings, Mapping) and not isinstance(settings, dict):
@@ -568,14 +567,14 @@ class GeminiGenerativeClient(BaseProviderClient):
             settings = {k: v for k, v in settings.items() if k != "model"}
 
         model_fields = getattr(
-            _genai_types.GenerateImagesConfig, "model_fields", None
-        ) or getattr(_genai_types.GenerateImagesConfig, "__fields__", {})
+            types.GenerateImagesConfig, "model_fields", None
+        ) or getattr(types.GenerateImagesConfig, "__fields__", {})
         allowed_fields = set(model_fields.keys())
         allowed_fields.discard("model")
 
         if not settings:
             config_fields: Dict[str, Any] = {}
-            config = _genai_types.GenerateImagesConfig(**config_fields)
+            config = types.GenerateImagesConfig(**config_fields)
             return config
 
         for raw_key, value in settings.items():
@@ -635,7 +634,7 @@ class GeminiGenerativeClient(BaseProviderClient):
             for key, value in kwargs.items()
             if key in allowed_fields and key not in {"model", "safety_settings"}
         }
-        config = _genai_types.GenerateImagesConfig(**config_fields)
+        config = types.GenerateImagesConfig(**config_fields)
         return config
 
     def _prepare_generate_call(
@@ -680,12 +679,12 @@ class GeminiGenerativeClient(BaseProviderClient):
         if not prompt_text:
             prompt_text = prompt or ""
         expected_config = (
-            _genai_types.GenerateImagesConfig
+            types.GenerateImagesConfig
             if method == "generate_images"
-            else _genai_types.GenerateContentConfig
+            else types.GenerateContentConfig
         )
         if method == "generate_images":
-            if not isinstance(config, _genai_types.GenerateImagesConfig):
+            if not isinstance(config, types.GenerateImagesConfig):
                 config = self._build_generation_config(settings, method=method)
         else:
             if not isinstance(config, expected_config):
@@ -722,7 +721,7 @@ class GeminiGenerativeClient(BaseProviderClient):
         duration_ms: int,
         decision: Optional[RouteDecision] = None,
     ) -> ProviderAPIError:
-        if isinstance(exc, _genai_errors.APIError):
+        if isinstance(exc, genai_errors.APIError):
             status_code = int(getattr(exc, "code", 0) or 0)
             message = getattr(exc, "message", "Gemini API error") or "Gemini API error"
             retryable = status_code in {408, 409, 429, 500, 502, 503, 504}
@@ -789,7 +788,7 @@ class GeminiGenerativeClient(BaseProviderClient):
         )
 
     def _extract_threshold_error_category(self, exc: Exception) -> Optional[str]:
-        if not isinstance(exc, _genai_errors.APIError):
+        if not isinstance(exc, genai_errors.APIError):
             return None
         message = str(getattr(exc, "message", "") or "")
         if not message:
@@ -805,8 +804,8 @@ class GeminiGenerativeClient(BaseProviderClient):
         self,
         config: Any,
         category: str,
-    ) -> Optional[_genai_types.GenerateContentConfig]:
-        if not isinstance(config, _genai_types.GenerateContentConfig):
+    ) -> Optional[types.GenerateContentConfig]:
+        if not isinstance(config, types.GenerateContentConfig):
             return None
         try:
             dump = config.model_dump(mode="json")
@@ -832,7 +831,7 @@ class GeminiGenerativeClient(BaseProviderClient):
         if not changed:
             return None
         try:
-            return _genai_types.GenerateContentConfig.model_validate(dump)
+            return types.GenerateContentConfig.model_validate(dump)
         except Exception:  # pragma: no cover - defensive revalidation
             log.warning(
                 "Failed to downgrade safety config for category=%s", category, exc_info=True
@@ -982,7 +981,7 @@ class GeminiGenerativeClient(BaseProviderClient):
                     duration_ms=duration_ms,
                     data=payload_json,
                 )
-            except _genai_errors.APIError as exc:
+            except genai_errors.APIError as exc:
                 duration_ms = int((time.monotonic() - start) * 1000)
                 category = self._extract_threshold_error_category(exc)
                 if (
