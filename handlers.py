@@ -107,6 +107,8 @@ _SUPPORTED_SORA_PREFIXES: Tuple[str, ...] = (
     "gpt-4.2-sora",
 )
 
+SUPPORTED_SORA_MODELS: Set[str] = {"sora"}
+
 
 class GenerationStates(StatesGroup):
     """Conversation states for collecting generation inputs."""
@@ -280,6 +282,27 @@ def _resolve_model_label(model: str, config: Config) -> str:
     if model in {config.gemini_model_image, "gemini-image", "gemini"}:
         return i18n.t("image.model.gemini")
     return model
+
+
+async def _ensure_supported_video_model(
+    message: Message,
+    *,
+    category: str,
+    model: str,
+    provider: str,
+    model_label: str,
+    config: Config,
+) -> Tuple[str, str, str]:
+    if category != "video":
+        return model, provider, model_label
+    normalised = _normalise_video_model_name(model)
+    if provider == "sora" or _is_sora_video_model_name(model):
+        if normalised not in SUPPORTED_SORA_MODELS:
+            await message.answer("Выбранная модель не поддерживается, используется sora")
+            model = "sora"
+            provider = "sora"
+            model_label = _resolve_model_label("sora", config)
+    return model, provider, model_label
 
 
 def _video_models_description(config: Config) -> str:
@@ -2309,6 +2332,14 @@ async def handle_text_input(
     model_label = state_data.get("model_label") or _resolve_model_label(model, config)
     include_size = bool(state_data.get("include_size", category == "video"))
     product = state_data.get("product", "sora_video")
+    model, provider, model_label = await _ensure_supported_video_model(
+        message,
+        category=category,
+        model=model,
+        provider=provider,
+        model_label=model_label,
+        config=config,
+    )
     raw_prompt = (message.text or "").strip()
     prompt = raw_prompt
     if _detect_pro_request(raw_prompt):
@@ -2354,6 +2385,14 @@ async def handle_photo_input(
     model_label = state_data.get("model_label") or _resolve_model_label(model, config)
     include_size = bool(state_data.get("include_size", category == "video"))
     product = state_data.get("product", "sora_video")
+    model, provider, model_label = await _ensure_supported_video_model(
+        message,
+        category=category,
+        model=model,
+        provider=provider,
+        model_label=model_label,
+        config=config,
+    )
     if not message.photo:
         await _send_generation_prompt(
             message,
