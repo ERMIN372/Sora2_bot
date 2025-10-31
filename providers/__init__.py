@@ -9,6 +9,7 @@ from .base import (
 from .gemini import GeminiImageClient, GeminiTextClient
 from .openai_chat import OpenAIChatClient
 from .openai_image import OpenAIImageClient
+from .openai_video import OpenAIVideoClient
 from .sora_video import SoraVideoClient
 from .veo_video import VeoVideoClient
 
@@ -21,6 +22,7 @@ __all__ = [
     "GeminiTextClient",
     "OpenAIChatClient",
     "OpenAIImageClient",
+    "OpenAIVideoClient",
     "SoraVideoClient",
     "VeoVideoClient",
 ]
