@@ -38,3 +38,29 @@ def test_openai_video_client_uses_default_beta_header() -> None:
 
     headers = client._build_headers()
     assert headers["OpenAI-Beta"] == "video=1"
+
+
+def test_openai_video_client_get_diagnostics_includes_error_snapshots() -> None:
+    config = _make_config(openai_beta_header="video=2", openai_org_id="org-diag")
+    client = OpenAIVideoClient(config=config)
+
+    client._record_last_request(method="GET", path="/videos", dropped_fields=[], correlation_id=None)
+    client._update_last_diagnostic(
+        status_code=429, error={"error_code": "rate_limit", "message": "Too many requests"}
+    )
+    diagnostics = client.get_diagnostics()
+
+    assert diagnostics["beta_header"] == "video=2"
+    assert diagnostics["organization_id"] == "org-diag"
+    assert diagnostics["api_version"] == ""
+
+    headers = diagnostics["headers"]
+    assert headers["OpenAI-Beta"] == "video=2"
+    assert "Authorization" in headers and headers["Authorization"] != "Bearer sk-test"
+
+    snapshots = diagnostics["error_snapshots"]
+    assert len(snapshots) == 1
+    snapshot = snapshots[0]
+    assert snapshot["status_code"] == 429
+    assert snapshot["error_code"] == "rate_limit"
+    assert snapshot["message"] == "Too many requests"
