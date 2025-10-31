@@ -211,6 +211,7 @@ class OpenAIVideoClient(BaseProviderClient):
             path,
             json=request,
             idempotency_key=idempotency_key,
+            diagnostic={"dropped_fields": dropped_fields},
         )
         log.info(
             "openai.video.create status=%s duration_ms=%s model=%s", status_code, duration_ms, request.get("model")
@@ -262,6 +263,7 @@ class OpenAIVideoClient(BaseProviderClient):
             path,
             json=request,
             idempotency_key=idempotency_key,
+            diagnostic={"dropped_fields": dropped_fields},
         )
         log.info(
             "openai.video.remix status=%s duration_ms=%s video_id=%s", status_code, duration_ms, video_id
@@ -312,7 +314,10 @@ class OpenAIVideoClient(BaseProviderClient):
                 _serialise_for_log(params or {}, limit=512),
             )
         data, status_code, duration_ms = await self._request_json(
-            "GET", self._videos_path(), params=params or None
+            "GET",
+            self._videos_path(),
+            params=params or None,
+            diagnostic={"dropped_fields": dropped_fields},
         )
         log.debug(
             "openai.video.list status=%s duration_ms=%s params=%s",
@@ -333,7 +338,9 @@ class OpenAIVideoClient(BaseProviderClient):
             correlation_id="",
         )
         data, status_code, duration_ms = await self._request_json(
-            "GET", f"{self._videos_path()}/{video_id}"
+            "GET",
+            f"{self._videos_path()}/{video_id}",
+            diagnostic={"dropped_fields": []},
         )
         log.debug(
             "openai.video.retrieve status=%s duration_ms=%s video_id=%s",
@@ -378,7 +385,12 @@ class OpenAIVideoClient(BaseProviderClient):
                 video_id,
                 asset_id,
             )
-        body, headers = await self._request_binary("GET", path, params=query or None)
+        body, headers = await self._request_binary(
+            "GET",
+            path,
+            params=query or None,
+            diagnostic={"dropped_fields": dropped_fields},
+        )
         log.debug(
             "openai.video.content video_id=%s asset_id=%s bytes=%s",
             video_id,
@@ -388,7 +400,9 @@ class OpenAIVideoClient(BaseProviderClient):
         return body, headers
 
     async def list_models(self) -> List[str]:
-        data, status_code, duration_ms = await self._request_json("GET", "/models")
+        data, status_code, duration_ms = await self._request_json(
+            "GET", "/models", diagnostic={"dropped_fields": []}
+        )
         log.debug("openai.video.list_models status=%s duration_ms=%s", status_code, duration_ms)
         models: List[str] = []
         if isinstance(data, Mapping):
@@ -577,6 +591,7 @@ class OpenAIVideoClient(BaseProviderClient):
         entry: Dict[str, Any] = {
             "method": method,
             "path": path,
+            "endpoint": path,
             "dropped_fields": tuple(sorted(set(dropped_fields or []))),
             "correlation_id": correlation_id or "",
             "timestamp": time.monotonic(),
@@ -593,9 +608,52 @@ class OpenAIVideoClient(BaseProviderClient):
     def _update_last_diagnostic(self, **updates: Any) -> None:
         if not self._last_request:
             return
-        self._last_request.update(updates)
+        normalised = dict(updates)
+        if "dropped_fields" in normalised:
+            fields = normalised.get("dropped_fields") or ()
+            if isinstance(fields, (list, tuple, set)):
+                normalised["dropped_fields"] = tuple(
+                    sorted({str(field) for field in fields if field})
+                )
+            elif isinstance(fields, str):
+                normalised["dropped_fields"] = (fields,) if fields else ()
+            else:
+                normalised.pop("dropped_fields", None)
+        normalised.setdefault("endpoint", self._last_request.get("path", ""))
+        normalised.setdefault("method", self._last_request.get("method", ""))
+        if "status" not in normalised and "status_code" in normalised:
+            normalised["status"] = normalised["status_code"]
+        if "request_id" in normalised:
+            normalised["request_id"] = str(normalised.get("request_id") or "")
+        self._last_request.update(normalised)
         if self._diagnostic_history:
-            self._diagnostic_history[-1].update(updates)
+            self._diagnostic_history[-1].update(normalised)
+
+    def _record_response_history(
+        self,
+        *,
+        method: str,
+        path: str,
+        status_code: int,
+        duration_ms: int,
+        request_id: str,
+        diagnostic: Optional[Mapping[str, Any]] = None,
+    ) -> None:
+        dropped_fields: Any = ()
+        if diagnostic and diagnostic.get("dropped_fields"):
+            dropped_fields = diagnostic.get("dropped_fields")
+        elif self._last_request.get("dropped_fields"):
+            dropped_fields = self._last_request["dropped_fields"]
+        updates = {
+            "method": method,
+            "endpoint": path,
+            "status_code": status_code,
+            "status": status_code,
+            "duration_ms": duration_ms,
+            "request_id": request_id or "",
+            "dropped_fields": dropped_fields,
+        }
+        self._update_last_diagnostic(**updates)
 
     def _log_request(
         self,
@@ -702,19 +760,38 @@ class OpenAIVideoClient(BaseProviderClient):
         path: str,
         *,
         idempotency_key: Optional[str] = None,
+        diagnostic: Optional[Dict[str, Any]] = None,
         **kwargs: Any,
     ) -> Tuple[Dict[str, Any], int, int]:
         params = kwargs.pop("params", None)
         merged_params = self._merge_params(params)
         if merged_params:
             kwargs["params"] = merged_params
+        self._set_request_context(diagnostic)
         try:
             data, status_code, duration_ms = await super()._request(
                 method, path, idempotency_key=idempotency_key, **kwargs
             )
         except ProviderAPIError as exc:
+            meta = getattr(self, "_last_response_meta", {}) or {}
+            self._record_response_history(
+                method=method,
+                path=path,
+                status_code=exc.status_code,
+                duration_ms=int(meta.get("duration_ms") or exc.duration_ms or 0),
+                request_id=meta.get("request_id", ""),
+                diagnostic=diagnostic,
+            )
             raise self._normalise_error(exc) from exc
-        self._update_last_diagnostic(status_code=status_code, duration_ms=duration_ms)
+        meta = getattr(self, "_last_response_meta", {}) or {}
+        self._record_response_history(
+            method=method,
+            path=path,
+            status_code=status_code,
+            duration_ms=duration_ms,
+            request_id=meta.get("request_id", ""),
+            diagnostic=diagnostic,
+        )
         return data, status_code, duration_ms
 
     async def _request_binary(
@@ -723,6 +800,7 @@ class OpenAIVideoClient(BaseProviderClient):
         path: str,
         *,
         params: Optional[Mapping[str, Any]] = None,
+        diagnostic: Optional[Dict[str, Any]] = None,
     ) -> Tuple[bytes, Dict[str, str]]:
         session = await self._ensure_session()
         url = f"{self._base_url}{path}"
@@ -730,11 +808,17 @@ class OpenAIVideoClient(BaseProviderClient):
         merged_params = self._merge_params(params)
         if merged_params is None:
             merged_params = {}
+        diagnostic_fields = tuple(
+            sorted(set(diagnostic.get("dropped_fields", ())))
+        ) if diagnostic else ()
+        if diagnostic_fields:
+            self._update_last_diagnostic(dropped_fields=diagnostic_fields)
         log.debug(
-            "openai.video.binary_request method=%s url=%s params=%s",
+            "openai.video.binary_request method=%s url=%s params=%s dropped_fields=%s",
             method,
             url,
             _serialise_for_log(dict(merged_params), limit=512),
+            diagnostic_fields,
         )
         start = time.monotonic()
         try:
@@ -743,6 +827,15 @@ class OpenAIVideoClient(BaseProviderClient):
             ) as response:
                 body = await response.read()
                 duration_ms = int((time.monotonic() - start) * 1000)
+                self._record_response_meta(
+                    method=method,
+                    url=url,
+                    status=response.status,
+                    duration_ms=duration_ms,
+                    headers=dict(response.headers),
+                    context=diagnostic,
+                )
+                meta = getattr(self, "_last_response_meta", {}) or {}
                 if response.status >= 400:
                     message = body.decode("utf-8", errors="ignore")
                     api_error = ProviderAPIError(
@@ -755,9 +848,15 @@ class OpenAIVideoClient(BaseProviderClient):
                         retryable=response.status >= 500,
                         duration_ms=duration_ms,
                     )
-                    self._update_last_diagnostic(
-                        status_code=api_error.status_code,
+                    self._record_response_history(
+                        method=method,
+                        path=path,
+                        status_code=response.status,
                         duration_ms=duration_ms,
+                        request_id=meta.get("request_id", ""),
+                        diagnostic=diagnostic,
+                    )
+                    self._update_last_diagnostic(
                         error={
                             "status_code": api_error.status_code,
                             "error_code": api_error.error_code,
@@ -766,7 +865,14 @@ class OpenAIVideoClient(BaseProviderClient):
                         },
                     )
                     raise api_error
-                self._update_last_diagnostic(status_code=response.status, duration_ms=duration_ms)
+                self._record_response_history(
+                    method=method,
+                    path=path,
+                    status_code=response.status,
+                    duration_ms=duration_ms,
+                    request_id=meta.get("request_id", ""),
+                    diagnostic=diagnostic,
+                )
                 return body, dict(response.headers)
         except asyncio.TimeoutError as exc:
             duration_ms = int((time.monotonic() - start) * 1000)
@@ -780,8 +886,6 @@ class OpenAIVideoClient(BaseProviderClient):
                 duration_ms=duration_ms,
             )
             self._update_last_diagnostic(
-                status_code=api_error.status_code,
-                duration_ms=duration_ms,
                 error={
                     "status_code": api_error.status_code,
                     "error_code": api_error.error_code,
@@ -789,7 +893,27 @@ class OpenAIVideoClient(BaseProviderClient):
                     "message": str(api_error),
                 },
             )
+            self._record_response_history(
+                method=method,
+                path=path,
+                status_code=api_error.status_code,
+                duration_ms=duration_ms,
+                request_id=(self._last_response_meta or {}).get("request_id", ""),
+                diagnostic=diagnostic,
+            )
             raise api_error from exc
+        except ProviderAPIError:
+            raise
+        except Exception:
+            self._record_response_history(
+                method=method,
+                path=path,
+                status_code=0,
+                duration_ms=int((time.monotonic() - start) * 1000),
+                request_id=(self._last_response_meta or {}).get("request_id", ""),
+                diagnostic=diagnostic,
+            )
+            raise
 
     def _merge_params(self, params: Optional[Mapping[str, Any]]) -> Optional[Dict[str, Any]]:
         merged: Dict[str, Any] = {}

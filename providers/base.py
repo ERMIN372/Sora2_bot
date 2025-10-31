@@ -6,7 +6,7 @@ import json
 import logging
 import time
 from dataclasses import dataclass
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Mapping, Optional, Tuple
 
 import aiohttp
 
@@ -43,7 +43,30 @@ def _sanitize_headers(headers: Dict[str, str]) -> Dict[str, str]:
     return safe
 
 
-def _serialise_for_log(data: Any, *, limit: int = 512) -> str:
+def _extract_request_id(headers: Mapping[str, str]) -> Optional[str]:
+    if not headers:
+        return None
+    lowered: Dict[str, Any] = {}
+    for key, value in headers.items():
+        try:
+            lowered[str(key).lower()] = value
+        except Exception:  # pragma: no cover - defensive
+            continue
+    for candidate in (
+        "request-id",
+        "x-request-id",
+        "x-requestid",
+        "openai-request-id",
+        "x-openai-request-id",
+        "openai-requestid",
+    ):
+        header_value = lowered.get(candidate)
+        if header_value:
+            return str(header_value)
+    return None
+
+
+def _serialise_for_log(data: Any, *, limit: int = 3072) -> str:
     if data is None:
         return ""
     try:
@@ -55,7 +78,7 @@ def _serialise_for_log(data: Any, *, limit: int = 512) -> str:
     return serialised
 
 
-def _truncate(text: Optional[str], limit: int = 1024) -> str:
+def _truncate(text: Optional[str], limit: int = 3072) -> str:
     if not text:
         return ""
     if len(text) > limit:
@@ -128,6 +151,8 @@ class BaseProviderClient:
         self._default_headers = default_headers or {}
         self._session: Optional[aiohttp.ClientSession] = None
         self._lock = asyncio.Lock()
+        self._pending_log_context: Optional[Dict[str, Any]] = None
+        self._last_response_meta: Dict[str, Any] = {}
 
     @property
     def provider_name(self) -> str:
@@ -374,8 +399,12 @@ class BaseProviderClient:
         json_payload = kwargs.get("json")
         data_payload = kwargs.get("data")
         params_payload = kwargs.get("params")
+        context = dict(self._pending_log_context or {})
+        context_text = (
+            _serialise_for_log(context) if context else ""
+        )
         log.debug(
-            "Sending provider request provider=%s method=%s url=%s headers=%s params=%s json=%s data=%s",
+            "Sending provider request provider=%s method=%s url=%s headers=%s params=%s json=%s data=%s context=%s",
             self._provider_name,
             method,
             url,
@@ -383,30 +412,48 @@ class BaseProviderClient:
             _serialise_for_log(params_payload),
             _serialise_for_log(json_payload),
             _serialise_for_log(data_payload),
+            context_text,
         )
         try:
             async with session.request(method, url, headers=headers, **kwargs) as response:
                 text = await response.text()
                 duration_ms = int((time.monotonic() - start) * 1000)
                 status = response.status
+                response_headers = dict(response.headers)
+                request_id = _extract_request_id(response_headers)
+                safe_response_headers = _sanitize_headers(response_headers)
+                self._record_response_meta(
+                    method=method,
+                    url=url,
+                    status=status,
+                    duration_ms=duration_ms,
+                    headers=response_headers,
+                    context=context,
+                )
                 log.debug(
-                    "Provider response provider=%s method=%s url=%s status=%s duration_ms=%s body=%s",
+                    "Provider response provider=%s method=%s url=%s status=%s duration_ms=%s request_id=%s headers=%s context=%s body=%s",
                     self._provider_name,
                     method,
                     url,
                     status,
                     duration_ms,
+                    request_id or "",
+                    safe_response_headers,
+                    context_text,
                     _truncate(text),
                 )
                 if status >= 400:
                     log.warning(
-                        "Provider responded with error provider=%s method=%s url=%s status=%s duration_ms=%s body=%s",
+                        "Provider responded with error provider=%s method=%s url=%s status=%s duration_ms=%s request_id=%s headers=%s context=%s body=%s",
                         self._provider_name,
                         method,
                         url,
                         status,
                         duration_ms,
-                        _truncate(text, limit=2048),
+                        request_id or "",
+                        safe_response_headers,
+                        context_text,
+                        _truncate(text, limit=3072),
                     )
                     raise self._build_error(status, text, duration_ms)
                 if not text:
@@ -415,11 +462,14 @@ class BaseProviderClient:
                     data = json.loads(text)
                 except json.JSONDecodeError as exc:
                     log.error(
-                        "Failed to decode provider response provider=%s method=%s url=%s status=%s body=%s",
+                        "Failed to decode provider response provider=%s method=%s url=%s status=%s request_id=%s headers=%s context=%s body=%s",
                         self._provider_name,
                         method,
                         url,
                         status,
+                        request_id or "",
+                        safe_response_headers,
+                        context_text,
                         _truncate(text),
                     )
                     raise ProviderAPIError(
@@ -448,6 +498,38 @@ class BaseProviderClient:
                 error_type="timeout",
                 duration_ms=duration_ms,
             ) from exc
+        finally:
+            self._pending_log_context = None
+
+    def _record_response_meta(
+        self,
+        *,
+        method: str,
+        url: str,
+        status: int,
+        duration_ms: int,
+        headers: Mapping[str, str],
+        context: Optional[Mapping[str, Any]] = None,
+    ) -> None:
+        request_id = _extract_request_id(headers)
+        meta = {
+            "method": method,
+            "url": url,
+            "status": status,
+            "duration_ms": duration_ms,
+            "request_id": request_id,
+            "headers": _sanitize_headers(dict(headers)),
+            "context": dict(context or {}),
+        }
+        self._last_response_meta = meta
+        self._after_response_meta(meta)
+
+    def _after_response_meta(self, meta: Dict[str, Any]) -> None:
+        """Hook for subclasses to react to response metadata."""
+        return
+
+    def _set_request_context(self, context: Optional[Mapping[str, Any]]) -> None:
+        self._pending_log_context = dict(context or {}) if context else None
 
     def _build_error(self, status: int, text: str, duration_ms: int) -> ProviderAPIError:
         try:
