@@ -26,7 +26,8 @@ def test_openai_video_full_cycle(monkeypatch: pytest.MonkeyPatch, make_openai_vi
             payload = kwargs.get("json") or {}
             assert payload["prompt"] == "Render a serene landscape"
             assert payload["model"] == "sora-2"
-            assert payload.get("metadata", {}).get("duration_sec") == "8"
+            assert payload.get("seconds") == "8"
+            assert "metadata" not in payload
             return {"id": "vid_123", "status": "queued"}, 201, 120
         if method == "GET" and path == "/videos/vid_123":
             return (
@@ -43,7 +44,7 @@ def test_openai_video_full_cycle(monkeypatch: pytest.MonkeyPatch, make_openai_vi
     async def fake_binary(self, method: str, path: str, params=None):
         assert method == "GET"
         assert path == "/videos/vid_123/content/primary"
-        assert params == {"quality": "original"}
+        assert params is None
         return b"video-bytes", {"content-type": "video/mp4"}
 
     monkeypatch.setattr(BaseProviderClient, "_request", fake_request)
@@ -56,6 +57,14 @@ def test_openai_video_full_cycle(monkeypatch: pytest.MonkeyPatch, make_openai_vi
             payload={"metadata": {"user": "test"}},
         )
         assert created["id"] == "vid_123"
+        create_request = client.last_request
+        assert create_request["method"] == "POST"
+        assert create_request["path"] == "/videos"
+        assert "payload" in create_request
+        assert create_request["payload"].get("seconds") == "8"
+        assert "metadata" not in create_request["payload"]
+        assert "payload.metadata" in create_request["dropped_fields"]
+        assert "settings.duration" in create_request["dropped_fields"]
 
         retrieved = await client.retrieve("vid_123")
         assert retrieved["status"] == "ready"
@@ -65,6 +74,10 @@ def test_openai_video_full_cycle(monkeypatch: pytest.MonkeyPatch, make_openai_vi
         )
         assert body == b"video-bytes"
         assert headers["content-type"] == "video/mp4"
+        content_request = client.last_request
+        assert content_request["method"] == "GET"
+        assert content_request["path"] == "/videos/vid_123/content/primary"
+        assert "params.quality" in content_request["dropped_fields"]
 
     _run(exercise())
 
@@ -103,8 +116,13 @@ def test_openai_video_list_pagination(monkeypatch: pytest.MonkeyPatch, make_open
     assert params["limit"] == 5
     assert params["order"] == "desc"
     assert params["after"] == "cursor-a"
-    assert params["before"] == "cursor-b"
+    assert "before" not in params
     assert params["api-version"] == "2024-05-01-preview"
+    last_request = client.last_request
+    assert last_request["method"] == "GET"
+    assert last_request["path"] == "/videos"
+    assert "params" in last_request
+    assert "params.before" in last_request["dropped_fields"]
 
 
 def test_openai_video_models_filtering(monkeypatch: pytest.MonkeyPatch, make_openai_video_config) -> None:

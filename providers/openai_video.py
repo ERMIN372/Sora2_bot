@@ -5,7 +5,7 @@ import asyncio
 import json
 import logging
 import time
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
+from typing import Any, Dict, FrozenSet, Iterable, List, Mapping, Optional, Tuple
 
 from config import Config
 
@@ -16,10 +16,9 @@ from .base import (
     ProviderJobStatus,
     ProviderJobSubmission,
     _mask_secret,
+    _sanitize_headers,
     _serialise_for_log,
 )
-from services.payload_sanitize import log_removed_keys, normalize_sora_payload, sanitize_payload
-from services.payload_whitelists import SORA_VIDEO_ALLOWED
 
 
 _PROVIDERS_LOG = logging.getLogger("providers")
@@ -28,6 +27,19 @@ log = _PROVIDERS_LOG.getChild("openai_video") if _PROVIDERS_LOG else logging.get
 
 _DEFAULT_VIDEO_MODELS: Tuple[str, ...] = ("sora-2", "sora-2-fast", "sora-2-pro")
 _VIDEO_MIME_PREFIXES = ("video/", "application/octet-stream")
+
+ALLOWED_CREATE_FIELDS: FrozenSet[str] = frozenset({
+    "prompt",
+    "input_reference",
+    "model",
+    "seconds",
+    "size",
+})
+ALLOWED_REMIX_FIELDS: FrozenSet[str] = frozenset({"prompt"})
+ALLOWED_LIST_FIELDS: FrozenSet[str] = frozenset({"after", "limit", "order"})
+ALLOWED_RETRIEVE_FIELDS: FrozenSet[str] = frozenset()
+ALLOWED_CONTENT_FIELDS: FrozenSet[str] = frozenset({"variant"})
+_LOG_PAYLOAD_LIMIT = 3072
 
 
 def _iter_nodes(value: Any) -> Iterable[Dict[str, Any]]:
@@ -119,6 +131,7 @@ class OpenAIVideoClient(BaseProviderClient):
         self._error_handler = ApiErrorHandler(
             provider="openai-video", logger=log, supported_models=sorted(self._supported_models)
         )
+        self._last_request: Dict[str, Any] = {}
         log.debug(
             "OpenAIVideoClient configured base_url=%s api_version=%s beta=%s org_id=%s api_key=%s",
             base_url,
@@ -136,6 +149,10 @@ class OpenAIVideoClient(BaseProviderClient):
     def supported_models(self) -> Tuple[str, ...]:
         return tuple(sorted(self._supported_models))
 
+    @property
+    def last_request(self) -> Dict[str, Any]:
+        return dict(self._last_request)
+
     async def create(
         self,
         *,
@@ -145,14 +162,36 @@ class OpenAIVideoClient(BaseProviderClient):
         idempotency_key: Optional[str] = None,
         return_meta: bool = False,
     ) -> Any:
-        request = self._build_create_payload(
+        request, dropped_fields, correlation_id = self._build_create_payload(
             prompt=prompt,
             settings=dict(settings or {}),
             payload=dict(payload or {}),
         )
+        path = self._videos_path()
+        headers = self._build_headers()
+        if idempotency_key:
+            headers.setdefault("Idempotency-Key", idempotency_key)
+        safe_headers = _sanitize_headers(headers)
+        corr_label = correlation_id or idempotency_key or ""
+        self._record_last_request(
+            method="POST",
+            path=path,
+            payload=request,
+            headers=safe_headers,
+            dropped_fields=dropped_fields,
+            correlation_id=corr_label,
+        )
+        self._log_request(
+            method="POST",
+            path=path,
+            payload=request,
+            headers=safe_headers,
+            dropped_fields=dropped_fields,
+            correlation_id=corr_label,
+        )
         data, status_code, duration_ms = await self._request_json(
             "POST",
-            self._videos_path(),
+            path,
             json=request,
             idempotency_key=idempotency_key,
         )
@@ -173,15 +212,37 @@ class OpenAIVideoClient(BaseProviderClient):
     ) -> Any:
         if not video_id:
             raise ValueError("video_id must not be empty")
-        request = self._build_create_payload(
+        request, dropped_fields, correlation_id = self._build_remix_payload(
             prompt=prompt or "",
             settings=dict(settings or {}),
             payload=dict(payload or {}),
             allow_empty_prompt=True,
         )
+        path = f"{self._videos_path()}/{video_id}/remix"
+        headers = self._build_headers()
+        if idempotency_key:
+            headers.setdefault("Idempotency-Key", idempotency_key)
+        safe_headers = _sanitize_headers(headers)
+        corr_label = correlation_id or idempotency_key or ""
+        self._record_last_request(
+            method="POST",
+            path=path,
+            payload=request,
+            headers=safe_headers,
+            dropped_fields=dropped_fields,
+            correlation_id=corr_label,
+        )
+        self._log_request(
+            method="POST",
+            path=path,
+            payload=request,
+            headers=safe_headers,
+            dropped_fields=dropped_fields,
+            correlation_id=corr_label,
+        )
         data, status_code, duration_ms = await self._request_json(
             "POST",
-            f"{self._videos_path()}/{video_id}/remix",
+            path,
             json=request,
             idempotency_key=idempotency_key,
         )
@@ -199,18 +260,40 @@ class OpenAIVideoClient(BaseProviderClient):
         before: Optional[str] = None,
         return_meta: bool = False,
     ) -> Any:
+        raw_params: Dict[str, Any] = {
+            "limit": limit,
+            "order": order,
+            "after": after,
+        }
+        if before is not None:
+            raw_params["before"] = before
+        dropped_fields: List[str] = []
+        filtered_params = self._filter_allowed_fields(
+            raw_params, ALLOWED_LIST_FIELDS, dropped_fields, source="params"
+        )
         params: Dict[str, Any] = {}
-        if limit is not None:
+        if "limit" in filtered_params:
             try:
-                params["limit"] = int(limit)
+                params["limit"] = int(filtered_params["limit"])
             except (TypeError, ValueError):
-                log.debug("Invalid limit provided to openai.video.list", exc_info=True)
-        if order:
-            params["order"] = str(order)
-        if after:
-            params["after"] = str(after)
-        if before:
-            params["before"] = str(before)
+                dropped_fields.append("params.limit")
+        if "order" in filtered_params and filtered_params["order"] is not None:
+            params["order"] = str(filtered_params["order"])
+        if "after" in filtered_params and filtered_params["after"] is not None:
+            params["after"] = str(filtered_params["after"])
+        self._record_last_request(
+            method="GET",
+            path=self._videos_path(),
+            params=params or None,
+            dropped_fields=dropped_fields,
+            correlation_id="",
+        )
+        if dropped_fields:
+            log.warning(
+                "openai.video.list dropped_fields=%s params=%s",
+                sorted(set(dropped_fields)),
+                _serialise_for_log(params or {}, limit=512),
+            )
         data, status_code, duration_ms = await self._request_json(
             "GET", self._videos_path(), params=params or None
         )
@@ -225,6 +308,13 @@ class OpenAIVideoClient(BaseProviderClient):
     async def retrieve(self, video_id: str, *, return_meta: bool = False) -> Any:
         if not video_id:
             raise ValueError("video_id must not be empty")
+        self._record_last_request(
+            method="GET",
+            path=f"{self._videos_path()}/{video_id}",
+            params=None,
+            dropped_fields=[],
+            correlation_id="",
+        )
         data, status_code, duration_ms = await self._request_json(
             "GET", f"{self._videos_path()}/{video_id}"
         )
@@ -248,7 +338,30 @@ class OpenAIVideoClient(BaseProviderClient):
         path = f"{self._videos_path()}/{video_id}/content"
         if asset_id:
             path += f"/{asset_id}"
-        body, headers = await self._request_binary("GET", path, params=params or None)
+        raw_params = dict(params or {})
+        dropped_fields: List[str] = []
+        filtered_params = self._filter_allowed_fields(
+            raw_params, ALLOWED_CONTENT_FIELDS, dropped_fields, source="params"
+        )
+        query: Dict[str, Any] = {}
+        if "variant" in filtered_params and filtered_params["variant"] is not None:
+            query["variant"] = str(filtered_params["variant"])
+        self._record_last_request(
+            method="GET",
+            path=path,
+            params=query or None,
+            dropped_fields=dropped_fields,
+            correlation_id="",
+        )
+        if dropped_fields:
+            log.warning(
+                "openai.video.content dropped_fields=%s params=%s video_id=%s asset_id=%s",
+                sorted(set(dropped_fields)),
+                _serialise_for_log(query or {}, limit=512),
+                video_id,
+                asset_id,
+            )
+        body, headers = await self._request_binary("GET", path, params=query or None)
         log.debug(
             "openai.video.content video_id=%s asset_id=%s bytes=%s",
             video_id,
@@ -363,46 +476,199 @@ class OpenAIVideoClient(BaseProviderClient):
         settings: Dict[str, Any],
         payload: Dict[str, Any],
         allow_empty_prompt: bool = False,
-    ) -> Dict[str, Any]:
-        normalized_payload = normalize_sora_payload(dict(payload or {}))
-        sanitized_payload = sanitize_payload(normalized_payload, SORA_VIDEO_ALLOWED)
-        log_removed_keys("openai-video", normalized_payload, sanitized_payload, logger=log)
-        request: Dict[str, Any] = dict(sanitized_payload)
-        prompt_text = str(request.get("prompt") or "").strip()
-        if not prompt_text and prompt:
-            prompt_text = str(prompt).strip()
+    ) -> Tuple[Dict[str, Any], List[str], Optional[str]]:
+        prepared_settings, prepared_payload, dropped_fields, corr_id = self._prepare_request_data(
+            settings, payload
+        )
+        request: Dict[str, Any] = {}
+        request.update(
+            self._filter_allowed_fields(prepared_payload, ALLOWED_CREATE_FIELDS, dropped_fields, source="payload")
+        )
+        allowed_settings = self._filter_allowed_fields(
+            prepared_settings, ALLOWED_CREATE_FIELDS, dropped_fields, source="settings"
+        )
+        for key, value in allowed_settings.items():
+            request.setdefault(key, value)
+        prompt_text = str(request.get("prompt") or prompt or "").strip()
         if not prompt_text and not allow_empty_prompt:
             raise ValueError("prompt must not be empty")
         if prompt_text:
             request["prompt"] = prompt_text
-        model_name = (settings.get("model") or request.get("model") or self._default_model).strip()
-        if not model_name:
-            model_name = self._default_model
-        request["model"] = model_name
-        self._supported_models.add(model_name)
-        metadata = dict(request.get("metadata") or {})
-        aspect_ratio = settings.get("aspect_ratio") or request.get("aspect_ratio")
-        if aspect_ratio and isinstance(aspect_ratio, str):
-            metadata.setdefault("aspect_ratio", aspect_ratio)
-        duration = (
-            settings.get("duration")
-            or settings.get("duration_seconds")
-            or settings.get("duration_sec")
-            or request.get("duration_sec")
+        model_value = request.get("model") or self._default_model
+        model_text = str(model_value or self._default_model).strip()
+        if not model_text:
+            model_text = self._default_model
+        request["model"] = model_text
+        self._supported_models.add(model_text)
+        if "seconds" in request:
+            normalised_seconds = self._normalise_seconds(request["seconds"])
+            if normalised_seconds is not None:
+                request["seconds"] = normalised_seconds
+            else:
+                request.pop("seconds", None)
+        if "size" in request:
+            size_value = str(request["size"]).strip()
+            if size_value:
+                request["size"] = size_value
+            else:
+                request.pop("size", None)
+        if "input_reference" in request and request["input_reference"] in {None, ""}:
+            request.pop("input_reference", None)
+        return request, sorted(set(dropped_fields)), corr_id
+
+    def _build_remix_payload(
+        self,
+        *,
+        prompt: str,
+        settings: Dict[str, Any],
+        payload: Dict[str, Any],
+        allow_empty_prompt: bool = False,
+    ) -> Tuple[Dict[str, Any], List[str], Optional[str]]:
+        prepared_settings, prepared_payload, dropped_fields, corr_id = self._prepare_request_data(
+            settings, payload
         )
-        if isinstance(duration, (int, float)) and duration > 0:
-            metadata.setdefault("duration_sec", str(int(duration)))
-        elif isinstance(duration, str) and duration.isdigit():
-            metadata.setdefault("duration_sec", duration)
-        if metadata:
-            request["metadata"] = metadata
-        for key, value in settings.items():
+        allowed_payload = self._filter_allowed_fields(
+            prepared_payload, ALLOWED_REMIX_FIELDS, dropped_fields, source="payload"
+        )
+        allowed_settings = self._filter_allowed_fields(
+            prepared_settings, ALLOWED_REMIX_FIELDS, dropped_fields, source="settings"
+        )
+        prompt_text = str(
+            allowed_payload.get("prompt")
+            or allowed_settings.get("prompt")
+            or prompt
+            or ""
+        ).strip()
+        if not prompt_text and not allow_empty_prompt:
+            raise ValueError("prompt must not be empty")
+        request: Dict[str, Any] = {}
+        if prompt_text:
+            request["prompt"] = prompt_text
+        return request, sorted(set(dropped_fields)), corr_id
+
+    def _record_last_request(
+        self,
+        *,
+        method: str,
+        path: str,
+        payload: Optional[Dict[str, Any]] = None,
+        params: Optional[Dict[str, Any]] = None,
+        headers: Optional[Dict[str, str]] = None,
+        dropped_fields: Optional[List[str]] = None,
+        correlation_id: Optional[str] = None,
+    ) -> None:
+        self._last_request = {
+            "method": method,
+            "path": path,
+            "dropped_fields": tuple(sorted(set(dropped_fields or []))),
+            "correlation_id": correlation_id or "",
+            "timestamp": time.monotonic(),
+        }
+        if payload is not None:
+            self._last_request["payload"] = payload
+        if params is not None:
+            self._last_request["params"] = params
+        if headers is not None:
+            self._last_request["headers"] = headers
+
+    def _log_request(
+        self,
+        *,
+        method: str,
+        path: str,
+        payload: Optional[Mapping[str, Any]],
+        headers: Mapping[str, str],
+        dropped_fields: List[str],
+        correlation_id: str,
+    ) -> None:
+        log.warning(
+            "openai.video.request corr_id=%s method=%s endpoint=%s payload=%s headers=%s dropped_fields=%s",
+            correlation_id,
+            method,
+            path,
+            _serialise_for_log(payload or {}, limit=_LOG_PAYLOAD_LIMIT),
+            _serialise_for_log(headers, limit=1024),
+            sorted(set(dropped_fields)),
+        )
+
+    def _prepare_request_data(
+        self,
+        settings: Mapping[str, Any],
+        payload: Mapping[str, Any],
+    ) -> Tuple[Dict[str, Any], Dict[str, Any], List[str], Optional[str]]:
+        dropped_fields: List[str] = []
+        settings_copy = dict(settings or {})
+        payload_copy = dict(payload or {})
+        corr_id = self._extract_correlation_id(settings_copy, payload_copy, dropped_fields)
+        self._apply_aliases(settings_copy, "settings", dropped_fields)
+        self._apply_aliases(payload_copy, "payload", dropped_fields)
+        return settings_copy, payload_copy, dropped_fields, corr_id
+
+    def _filter_allowed_fields(
+        self,
+        data: Mapping[str, Any],
+        allowed: FrozenSet[str],
+        dropped_fields: List[str],
+        *,
+        source: str,
+    ) -> Dict[str, Any]:
+        filtered: Dict[str, Any] = {}
+        for key, value in data.items():
             if value is None:
                 continue
-            if key in {"model", "prompt", "duration", "duration_sec", "duration_seconds", "aspect_ratio"}:
-                continue
-            request.setdefault(key, value)
-        return request
+            if key in allowed:
+                filtered[key] = value
+            else:
+                dropped_fields.append(f"{source}.{key}")
+        return filtered
+
+    def _extract_correlation_id(
+        self,
+        settings: Dict[str, Any],
+        payload: Dict[str, Any],
+        dropped_fields: List[str],
+    ) -> Optional[str]:
+        correlation_id: Optional[str] = None
+        for container, label in ((settings, "settings"), (payload, "payload")):
+            for key in ("corr_id", "correlation_id", "correlationId"):
+                if key in container:
+                    value = container.pop(key)
+                    if value and correlation_id is None:
+                        correlation_id = str(value)
+                    dropped_fields.append(f"{label}.{key}")
+        return correlation_id
+
+    def _apply_aliases(
+        self,
+        data: Dict[str, Any],
+        label: str,
+        dropped_fields: List[str],
+    ) -> None:
+        alias_map = {
+            "duration": "seconds",
+            "duration_sec": "seconds",
+            "duration_seconds": "seconds",
+        }
+        for alias, target in alias_map.items():
+            if alias in data:
+                value = data.pop(alias)
+                if value is not None and target not in data:
+                    data[target] = value
+                dropped_fields.append(f"{label}.{alias}")
+
+    def _normalise_seconds(self, value: Any) -> Optional[str]:
+        if isinstance(value, (int, float)):
+            if value <= 0:
+                return None
+            return str(int(value))
+        if isinstance(value, str):
+            text = value.strip()
+            if not text:
+                return None
+            if text.isdigit():
+                return str(int(text))
+            return text
+        return None
 
     async def _request_json(
         self,

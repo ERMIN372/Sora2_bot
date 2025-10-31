@@ -6,14 +6,14 @@ def test_duration_sec_top_level_to_string() -> None:
     payload = {"prompt": "x", "duration_sec": 5}
     cleaned = normalize_sora_payload(payload)
     assert isinstance(cleaned["duration_sec"], str)
-    assert cleaned["metadata"]["duration_sec"] == cleaned["duration_sec"]
+    assert "metadata" not in cleaned
 
 
 def test_duration_sec_in_metadata_to_string_and_sync() -> None:
     payload = {"prompt": "x", "metadata": {"duration_sec": 7}}
     cleaned = normalize_sora_payload(payload)
-    assert isinstance(cleaned["metadata"]["duration_sec"], str)
-    assert cleaned["duration_sec"] == cleaned["metadata"]["duration_sec"]
+    assert isinstance(cleaned["duration_sec"], str)
+    assert "metadata" not in cleaned
 
 
 def test_aspect_ratio_and_format_to_string() -> None:
@@ -29,4 +29,5 @@ def test_metadata_seed_to_string_if_weird_type() -> None:
 
     payload = {"metadata": {"seed": Weird()}}
     cleaned = normalize_sora_payload(payload)
-    assert isinstance(cleaned["metadata"]["seed"], str)
+    assert isinstance(cleaned["seed"], str)
+    assert "metadata" not in cleaned
