@@ -916,6 +916,130 @@ class JobQueue:
         )
         return record
 
+    async def register_external_job(
+        self,
+        *,
+        job_id: str,
+        user_id: int,
+        prompt: str,
+        size: str,
+        model: str,
+        corr_id: str,
+        provider: Optional[str],
+        username: Optional[str],
+        video_id: Optional[str] = None,
+        idempotency_key: Optional[str] = None,
+        content_type: str = "video",
+        task_type: str = VIDEO_TASK_RETRIEVE,
+        sanitized_prompt: Optional[str] = None,
+        original_prompt: Optional[str] = None,
+        auto_sanitized: bool = False,
+        preflight_reason: Optional[str] = None,
+        preflight_scope: Optional[str] = None,
+        operation_name: Optional[str] = None,
+        status_code: Optional[int] = None,
+        duration_ms: Optional[int] = None,
+    ) -> GenerationJobRecord:
+        provider_key = provider or model
+        sanitized = sanitized_prompt or prompt
+        original = original_prompt or prompt
+        existing = await self._db.get_job(job_id)
+        if existing is not None:
+            if video_id or operation_name:
+                try:
+                    await self._db.update_job(
+                        job_id,
+                        existing.status or "queued",
+                        video_id=video_id or existing.video_id,
+                        operation_name=operation_name or existing.operation_name,
+                    )
+                except Exception:  # pragma: no cover - defensive
+                    log.exception("Failed to update existing job metadata job_id=%s", job_id)
+            await self.enqueue(
+                job_id=existing.id,
+                user_id=existing.user_id,
+                prompt=existing.prompt or sanitized,
+                corr_id=existing.corr_id or corr_id,
+                size=existing.size or size,
+                model=existing.model or model,
+                provider=provider_key,
+                username=existing.username,
+                original_prompt=existing.prompt or original,
+                sanitized_prompt=existing.prompt or sanitized,
+                auto_sanitized=auto_sanitized,
+                preflight_reason=preflight_reason,
+                preflight_scope=preflight_scope,
+                task_type=task_type,
+                provider_job_id=existing.id,
+                video_id=video_id or existing.video_id,
+            )
+            return existing
+
+        now = datetime.utcnow()
+        record = GenerationJobRecord(
+            id=job_id,
+            user_id=user_id,
+            prompt=sanitized,
+            status="queued",
+            video_url=None,
+            video_id=video_id,
+            error=None,
+            created_at=now,
+            updated_at=now,
+            image_file_id=None,
+            size=size,
+            model=model,
+            cost_credits=self._config.generation_cost_credits,
+            username=username,
+            corr_id=corr_id,
+            content_type=content_type,
+            idempotency_key=idempotency_key,
+            operation_name=operation_name,
+        )
+        await self._db.create_job(record)
+        await self.enqueue(
+            job_id=job_id,
+            user_id=user_id,
+            prompt=sanitized,
+            corr_id=corr_id,
+            size=size,
+            model=model,
+            provider=provider_key,
+            username=username,
+            original_prompt=original,
+            sanitized_prompt=sanitized,
+            auto_sanitized=auto_sanitized,
+            preflight_reason=preflight_reason,
+            preflight_scope=preflight_scope,
+            task_type=task_type,
+            provider_job_id=job_id,
+            video_id=video_id,
+        )
+        log_event(
+            level="INFO",
+            event="request",
+            corr_id=corr_id,
+            job_id=job_id,
+            user_id=user_id,
+            username=username,
+            model=model,
+            provider=provider_key,
+            size=size,
+            credits_cost=self._config.generation_cost_credits,
+            duration_ms=duration_ms,
+            status_code=status_code,
+            prompt=None,
+            gsheets_ok=True,
+            extra={
+                "preflight_blocked": False,
+                "preflight_reason": preflight_reason,
+                "preflight_scope": preflight_scope,
+                "preflight_auto_sanitized": auto_sanitized,
+                "video_id": video_id,
+            },
+        )
+        return record
+
     async def enqueue(
         self,
         *,

@@ -88,6 +88,7 @@ def _init_application(config: Config) -> ApplicationState:
     error_reporter = ErrorReporter(bot=bot, config=config)
     providers: Dict[str, BaseProviderClient] = {}
     chat_client: Optional[OpenAIChatClient] = None
+    openai_video_client: Optional[OpenAIVideoClient] = None
 
     if config.gemini_enabled:
         gemini_client = GeminiImageClient(config=config)
@@ -182,6 +183,7 @@ def _init_application(config: Config) -> ApplicationState:
         archive_publisher=archive_publisher,
         error_reporter=error_reporter,
         chatgpt_client=chat_client,
+        openai_video_client=openai_video_client,
     )
 
     app, yookassa_processor = create_app(config=config, dp=dp, bot=bot, db=db)
