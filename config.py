@@ -153,6 +153,8 @@ class Config:
     # Значение "sora" больше не поддерживается и приведёт к ошибке "Model not found" в Sora API.
     sora_model_video: str = "sora-2"
     openai_api_base: str = "https://api.openai.com/v1"
+    sora_requests_per_minute: int = 60
+    gemini_requests_per_minute: int = 120
     default_video_model: str = "veo-3.0-generate-001"
     database_path: str = "./bot.db"
     jobs_concurrency: int = 2
@@ -527,6 +529,12 @@ def load_config() -> Config:
         sora_api_key=sora_api_key,
         sora_model_video=sora_model_video,
         openai_api_base=openai_api_base,
+        sora_requests_per_minute=_get_env_int(
+            "SORA_REQUESTS_PER_MINUTE", Config.sora_requests_per_minute
+        ),
+        gemini_requests_per_minute=_get_env_int(
+            "GEMINI_REQUESTS_PER_MINUTE", Config.gemini_requests_per_minute
+        ),
         default_video_model=default_video_model,
         database_path=database_path,
         google_sheet_id=google_sheet_id,
