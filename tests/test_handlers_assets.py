@@ -18,6 +18,7 @@ def _make_job(*, video_url=None, extra=None):
         prompt="",
         status="completed",
         video_url=video_url,
+        video_id=None,
         error=None,
         created_at=datetime.utcnow(),
         updated_at=datetime.utcnow(),

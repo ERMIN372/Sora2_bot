@@ -11,7 +11,7 @@ import time
 import uuid
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
+from typing import Any, Awaitable, Callable, Dict, List, Mapping, Optional, Tuple
 
 from config import Config
 from db import Database, ErrorLogRecord, GenerationJobRecord
@@ -50,6 +50,14 @@ _UPDATE_KEYS: Tuple[str, ...] = (
     "last_update_time",
     "lastUpdateTime",
 )
+
+
+VIDEO_TASK_CREATE = "video_create"
+VIDEO_TASK_REMIX = "video_remix"
+VIDEO_TASK_RETRIEVE = "video_retrieve"
+VIDEO_TASK_DOWNLOAD = "video_download"
+
+_DOWNLOAD_MAX_ATTEMPTS = 3
 
 
 @dataclass(slots=True)
@@ -156,6 +164,55 @@ def _extract_progress_markers(data: Dict[str, Any]) -> Tuple[Optional[float], Op
                 if isinstance(item, (dict, list, tuple)):
                     stack.append(item)
     return progress, update_token
+
+
+def _extract_video_id(data: Any, *, client: Optional[BaseProviderClient] = None) -> Optional[str]:
+    def _pick(mapping: Mapping[str, Any]) -> Optional[str]:
+        for key in ("video_id", "videoId", "id", "job_id"):
+            value = mapping.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        return None
+
+    if isinstance(data, Mapping):
+        direct = _pick(data)
+        if direct:
+            return direct
+        response = data.get("response")
+        if isinstance(response, Mapping):
+            candidate = _pick(response)
+            if candidate:
+                return candidate
+        video_payload = data.get("video") or data.get("asset")
+        if isinstance(video_payload, Mapping):
+            candidate = _pick(video_payload)
+            if candidate:
+                return candidate
+        inner_data = data.get("data")
+        if isinstance(inner_data, list):
+            for item in inner_data:
+                if isinstance(item, Mapping):
+                    candidate = _pick(item)
+                    if candidate:
+                        return candidate
+    elif isinstance(data, list):
+        for item in data:
+            candidate = _extract_video_id(item, client=client)
+            if candidate:
+                return candidate
+
+    if client is not None:
+        getter = getattr(client, "get_video_object", None)
+        if callable(getter):
+            try:
+                video_obj = getter(data)
+            except Exception:  # pragma: no cover - defensive
+                video_obj = None
+            if isinstance(video_obj, Mapping):
+                candidate = _pick(video_obj)
+                if candidate:
+                    return candidate
+    return None
 
 
 def _find_error_payload(data: Any) -> Optional[Dict[str, Any]]:
@@ -291,6 +348,12 @@ class PendingJob:
     auto_sanitized: bool = False
     preflight_reason: Optional[str] = None
     preflight_scope: Optional[str] = None
+    task_type: str = VIDEO_TASK_RETRIEVE
+    provider_job_id: Optional[str] = None
+    video_id: Optional[str] = None
+    asset_id: Optional[str] = None
+    attempt: int = 0
+    max_attempts: int = 0
 
 
 class JobQueue:
@@ -776,6 +839,7 @@ class JobQueue:
             request_settings = fallback.settings
             stable_idempotency_key = fallback.idempotency_key
         job_id = submission.job_id
+        video_id = _extract_video_id(submission.data, client=client)
         operation_name = submission.data.get("operation_name") if isinstance(submission.data, dict) else None
         now = datetime.utcnow()
         record = GenerationJobRecord(
@@ -784,6 +848,7 @@ class JobQueue:
             prompt=effective_prompt,
             status="queued",
             video_url=None,
+            video_id=video_id,
             error=None,
             created_at=now,
             updated_at=now,
@@ -812,6 +877,9 @@ class JobQueue:
             auto_sanitized=auto_sanitized,
             preflight_reason=preflight_reason,
             preflight_scope=preflight_scope,
+            task_type=VIDEO_TASK_RETRIEVE,
+            provider_job_id=submission.job_id,
+            video_id=video_id,
         )
         log.debug(
             "Job queued corr_id=%s job_id=%s provider=%s user_id=%s queue_size=%s",
@@ -843,6 +911,7 @@ class JobQueue:
                 "preflight_reason": preflight_reason,
                 "preflight_scope": preflight_scope,
                 "preflight_auto_sanitized": auto_sanitized,
+                "video_id": video_id,
             },
         )
         return record
@@ -863,10 +932,16 @@ class JobQueue:
         auto_sanitized: bool = False,
         preflight_reason: Optional[str] = None,
         preflight_scope: Optional[str] = None,
+        task_type: str = "video_retrieve",
+        provider_job_id: Optional[str] = None,
+        video_id: Optional[str] = None,
+        asset_id: Optional[str] = None,
+        attempt: int = 0,
+        max_attempts: int = 0,
     ) -> None:
         provider_key = provider or model
         log.debug(
-            "Enqueueing pending job job_id=%s provider=%s corr_id=%s user_id=%s", 
+            "Enqueueing pending job job_id=%s provider=%s corr_id=%s user_id=%s",
             job_id,
             provider_key,
             corr_id,
@@ -887,6 +962,12 @@ class JobQueue:
                 auto_sanitized=auto_sanitized,
                 preflight_reason=preflight_reason,
                 preflight_scope=preflight_scope,
+                task_type=task_type,
+                provider_job_id=provider_job_id,
+                video_id=video_id,
+                asset_id=asset_id,
+                attempt=attempt,
+                max_attempts=max_attempts,
             )
         )
 
@@ -904,6 +985,8 @@ class JobQueue:
                 username=job.username,
                 original_prompt=job.prompt,
                 sanitized_prompt=job.prompt,
+                provider_job_id=job.id,
+                video_id=job.video_id,
             )
         if pending:
             log.info("Recovered %s pending jobs", len(pending))
@@ -928,22 +1011,28 @@ class JobQueue:
             finally:
                 self._queue.task_done()
 
-    async def _process_job(self, pending: PendingJob) -> None:
+    async def _handle_video_retrieve(self, pending: PendingJob) -> None:
         provider_hint = pending.provider or ""
+        provider_job_id = pending.provider_job_id or pending.job_id
+        task_type = pending.task_type or VIDEO_TASK_RETRIEVE
         key_mask = self._gemini_key_mask if provider_hint.startswith(("veo", "gemini")) else ""
         log.info(
-            "Processing job %s corr_id=%s provider=%s key_mask=%s env=%s",
+            "Processing job %s corr_id=%s provider=%s key_mask=%s env=%s task=%s provider_job=%s",
             pending.job_id,
             pending.corr_id,
             provider_hint,
             key_mask or "",
             self._environment,
+            task_type,
+            provider_job_id,
         )
-        await self._db.update_job(pending.job_id, "running")
+        await self._db.update_job(pending.job_id, "running", video_id=pending.video_id)
         result: Optional[ProviderJobStatus] = None
         inline_assets: List[Dict[str, Any]] = []
         assets_meta: List[Dict[str, Any]] = []
         job_extra: Dict[str, Any] = {}
+        if pending.video_id:
+            job_extra["video_id"] = pending.video_id
         asset_label: Optional[str] = None
         tracker: Optional[_OperationTracker] = None
         try:
@@ -958,12 +1047,13 @@ class JobQueue:
                 key_mask = ""
             try:
                 log.debug(
-                    "Polling provider job job_id=%s provider=%s corr_id=%s",
+                    "Polling provider job job_id=%s provider_job=%s provider=%s corr_id=%s",
                     pending.job_id,
+                    provider_job_id,
                     provider_key,
                     pending.corr_id,
                 )
-                result = await client.get_job_status(pending.job_id)
+                result = await client.get_job_status(provider_job_id)
             except ProviderAPIError as exc:
                 log.warning(
                     "Provider polling failed job_id=%s corr_id=%s provider=%s status=%s error_type=%s error_code=%s message=%s",
@@ -1008,6 +1098,9 @@ class JobQueue:
                     auto_sanitized=pending.auto_sanitized,
                     preflight_reason=pending.preflight_reason,
                     preflight_scope=pending.preflight_scope,
+                    task_type=VIDEO_TASK_RETRIEVE,
+                    provider_job_id=provider_job_id,
+                    video_id=pending.video_id,
                 )
                 return
             except Exception as exc:  # pragma: no cover - defensive network guard
@@ -1041,6 +1134,9 @@ class JobQueue:
                     auto_sanitized=pending.auto_sanitized,
                     preflight_reason=pending.preflight_reason,
                     preflight_scope=pending.preflight_scope,
+                    task_type=VIDEO_TASK_RETRIEVE,
+                    provider_job_id=provider_job_id,
+                    video_id=pending.video_id,
                 )
                 return
             provider_data: Dict[str, Any] = {}
@@ -1070,6 +1166,16 @@ class JobQueue:
             raw_payload = provider_data.get("payload") if provider_data else None
             if isinstance(raw_payload, dict):
                 provider_payload = raw_payload
+
+            extracted_video_id = pending.video_id
+            if not extracted_video_id:
+                extracted_video_id = _extract_video_id(provider_data, client=client)
+            if not extracted_video_id and result is not None:
+                extracted_video_id = _extract_video_id(result.data, client=client)
+            if extracted_video_id:
+                if extracted_video_id != pending.video_id:
+                    pending.video_id = extracted_video_id
+                job_extra.setdefault("video_id", extracted_video_id)
                 job_extra["payload"] = provider_payload
             if provider_payload:
                 data_uri = provider_payload.get("data_uri")
@@ -1215,6 +1321,8 @@ class JobQueue:
                     )
                     return
             poll_extra: Dict[str, Any] = {"status": result.status, "gemini_key_mask": key_mask or None}
+            if pending.video_id:
+                poll_extra["video_id"] = pending.video_id
             if progress_value is not None:
                 poll_extra["progress_percent"] = progress_value
                 job_extra["progress_percent"] = progress_value
@@ -1259,6 +1367,11 @@ class JobQueue:
                         pending.corr_id,
                         provider_key,
                     )
+                    await self._db.update_job(
+                        pending.job_id,
+                        result.status,
+                        video_id=pending.video_id,
+                    )
                     await asyncio.sleep(self._poll_interval_seconds())
                     await self.enqueue(
                         job_id=pending.job_id,
@@ -1274,6 +1387,9 @@ class JobQueue:
                         auto_sanitized=pending.auto_sanitized,
                         preflight_reason=pending.preflight_reason,
                         preflight_scope=pending.preflight_scope,
+                        task_type=VIDEO_TASK_RETRIEVE,
+                        provider_job_id=provider_job_id,
+                        video_id=pending.video_id,
                     )
                     return
 
@@ -1293,6 +1409,7 @@ class JobQueue:
                         "completed",
                         video_url=video_url_value,
                         file_url=video_url_value,
+                        video_id=pending.video_id,
                         error=None,
                     )
                 except Exception:
@@ -1309,6 +1426,8 @@ class JobQueue:
                     done_extra["assets_recovery_attempted"] = True
                 if key_mask:
                     done_extra["gemini_key_mask"] = key_mask
+                if pending.video_id:
+                    done_extra["video_id"] = pending.video_id
                 done_extra["video_label"] = display_label
                 log_event(
                     level="INFO",
@@ -1324,6 +1443,14 @@ class JobQueue:
                     duration_ms=result.duration_ms,
                     gsheets_ok=gsheets_ok,
                     extra=done_extra,
+                )
+                await self._schedule_video_download(
+                    pending,
+                    provider_key=provider_key,
+                    client=client,
+                    primary_asset=primary_asset,
+                    assets_meta=assets_meta,
+                    result=result,
                 )
                 await self._release_gate(pending, reason="success", status="completed")
             elif result.status in {"failed", "errored", "stopped"}:
@@ -1389,6 +1516,7 @@ class JobQueue:
                         pending.job_id,
                         "failed",
                         file_url="",
+                        video_id=pending.video_id,
                         error=error_message,
                     )
                 except Exception:
@@ -1501,7 +1629,11 @@ class JobQueue:
                     provider_key,
                     result.status,
                 )
-                await self._db.update_job(pending.job_id, result.status)
+                await self._db.update_job(
+                    pending.job_id,
+                    result.status,
+                    video_id=pending.video_id,
+                )
                 await asyncio.sleep(self._poll_interval_seconds())
                 await self.enqueue(
                     job_id=pending.job_id,
@@ -1517,11 +1649,18 @@ class JobQueue:
                     auto_sanitized=pending.auto_sanitized,
                     preflight_reason=pending.preflight_reason,
                     preflight_scope=pending.preflight_scope,
+                    task_type=VIDEO_TASK_RETRIEVE,
+                    provider_job_id=provider_job_id,
+                    video_id=pending.video_id,
                 )
                 return
         finally:
             job = await self._db.get_job(pending.job_id)
             if job:
+                if "payload" not in job_extra and isinstance(
+                    job_extra.get("provider_data"), dict
+                ) and "payload" in job_extra["provider_data"]:
+                    job_extra["payload"] = job_extra["provider_data"]["payload"]
                 if job_extra:
                     job.extra.update(job_extra)
                 await self._notify(job)
@@ -1545,6 +1684,230 @@ class JobQueue:
                 pending.corr_id,
             )
 
+    async def _schedule_video_download(
+        self,
+        pending: PendingJob,
+        *,
+        provider_key: str,
+        client: BaseProviderClient,
+        primary_asset: Optional[Dict[str, Any]],
+        assets_meta: List[Dict[str, Any]],
+        result: ProviderJobStatus,
+    ) -> None:
+        video_id = pending.video_id
+        if not video_id:
+            return
+        content_handler = getattr(client, "content", None)
+        if not callable(content_handler):
+            log.debug(
+                "Provider %s does not expose content endpoint; skipping download scheduling job_id=%s",
+                provider_key,
+                pending.job_id,
+            )
+            return
+        asset_id: Optional[str] = None
+        if isinstance(primary_asset, dict):
+            for key in ("asset_id", "id", "key", "name"):
+                value = primary_asset.get(key)
+                if isinstance(value, str) and value.strip():
+                    asset_id = value.strip()
+                    break
+        if not asset_id:
+            for entry in assets_meta:
+                candidate = entry.get("asset_id") or entry.get("key")
+                if isinstance(candidate, str) and candidate.strip():
+                    asset_id = candidate.strip()
+                    break
+        if not asset_id and result.assets:
+            first_key = next(iter(result.assets.keys()), None)
+            if isinstance(first_key, str) and first_key.strip():
+                asset_id = first_key.strip()
+        await self.enqueue(
+            job_id=pending.job_id,
+            user_id=pending.user_id,
+            prompt=pending.prompt,
+            corr_id=pending.corr_id,
+            size=pending.size,
+            model=pending.model,
+            provider=provider_key,
+            username=pending.username,
+            original_prompt=pending.original_prompt,
+            sanitized_prompt=pending.sanitized_prompt,
+            auto_sanitized=pending.auto_sanitized,
+            preflight_reason=pending.preflight_reason,
+            preflight_scope=pending.preflight_scope,
+            task_type=VIDEO_TASK_DOWNLOAD,
+            provider_job_id=pending.provider_job_id or pending.job_id,
+            video_id=video_id,
+            asset_id=asset_id,
+            attempt=0,
+            max_attempts=_DOWNLOAD_MAX_ATTEMPTS,
+        )
+
+    async def _handle_video_download(self, pending: PendingJob) -> None:
+        provider_hint = pending.provider or ""
+        provider_job_id = pending.provider_job_id or pending.job_id
+        video_id = pending.video_id or ""
+        asset_id = pending.asset_id or ""
+        attempt = max(0, pending.attempt or 0)
+        max_attempts = pending.max_attempts or _DOWNLOAD_MAX_ATTEMPTS
+        job_extra: Dict[str, Any] = {}
+        if pending.video_id:
+            job_extra["video_id"] = pending.video_id
+        download_meta: Dict[str, Any] = {"asset_id": asset_id, "attempt": attempt + 1}
+        try:
+            client, provider_key = self._resolve_provider(provider_hint or pending.model)
+        except Exception:  # pragma: no cover - defensive
+            log.exception("Failed to resolve provider for download job %s", pending.job_id)
+            return
+        content_handler = getattr(client, "content", None)
+        if not callable(content_handler):
+            log.debug(
+                "Provider %s has no content handler; skipping download job job_id=%s",
+                provider_key,
+                pending.job_id,
+            )
+            return
+        if not video_id:
+            log.debug(
+                "Skipping download for job_id=%s provider=%s - missing video_id",
+                pending.job_id,
+                provider_key,
+            )
+            return
+        log.debug(
+            "Downloading content job_id=%s provider_job=%s provider=%s video_id=%s asset_id=%s attempt=%s/%s",
+            pending.job_id,
+            provider_job_id,
+            provider_key,
+            video_id,
+            asset_id or "",
+            attempt + 1,
+            max_attempts,
+        )
+        try:
+            body, headers = await content_handler(video_id, asset_id=asset_id or None)
+        except ProviderAPIError as exc:
+            key_mask = self._gemini_key_mask if provider_key.startswith(("veo", "gemini")) else None
+            log.warning(
+                "Download failed job_id=%s corr_id=%s provider=%s video_id=%s asset_id=%s status=%s error=%s attempt=%s/%s",
+                pending.job_id,
+                pending.corr_id,
+                provider_key,
+                video_id,
+                asset_id or "",
+                exc.status_code,
+                exc,
+                attempt + 1,
+                max_attempts,
+            )
+            log_event(
+                level="ERROR",
+                event="content",
+                corr_id=pending.corr_id,
+                job_id=pending.job_id,
+                user_id=pending.user_id,
+                username=pending.username,
+                model=pending.model,
+                provider=provider_key,
+                size=pending.size,
+                status_code=exc.status_code,
+                duration_ms=exc.duration_ms,
+                extra={
+                    "video_id": video_id,
+                    "asset_id": asset_id or "",
+                    "attempt": attempt + 1,
+                    "max_attempts": max_attempts,
+                    "error_code": exc.error_code,
+                    "error_type": exc.error_type,
+                    "gemini_key_mask": key_mask,
+                },
+            )
+            if attempt + 1 < max_attempts:
+                await asyncio.sleep(self._poll_interval_seconds())
+                await self.enqueue(
+                    job_id=pending.job_id,
+                    user_id=pending.user_id,
+                    prompt=pending.prompt,
+                    corr_id=pending.corr_id,
+                    size=pending.size,
+                    model=pending.model,
+                    provider=provider_key,
+                    username=pending.username,
+                    original_prompt=pending.original_prompt,
+                    sanitized_prompt=pending.sanitized_prompt,
+                    auto_sanitized=pending.auto_sanitized,
+                    preflight_reason=pending.preflight_reason,
+                    preflight_scope=pending.preflight_scope,
+                    task_type=VIDEO_TASK_DOWNLOAD,
+                    provider_job_id=provider_job_id,
+                    video_id=video_id,
+                    asset_id=asset_id,
+                    attempt=attempt + 1,
+                    max_attempts=max_attempts,
+                )
+            return
+        except Exception as exc:  # pragma: no cover - defensive
+            log.exception("Unexpected error while downloading content for job %s", pending.job_id)
+            if attempt + 1 < max_attempts:
+                await asyncio.sleep(self._poll_interval_seconds())
+                await self.enqueue(
+                    job_id=pending.job_id,
+                    user_id=pending.user_id,
+                    prompt=pending.prompt,
+                    corr_id=pending.corr_id,
+                    size=pending.size,
+                    model=pending.model,
+                    provider=provider_key,
+                    username=pending.username,
+                    original_prompt=pending.original_prompt,
+                    sanitized_prompt=pending.sanitized_prompt,
+                    auto_sanitized=pending.auto_sanitized,
+                    preflight_reason=pending.preflight_reason,
+                    preflight_scope=pending.preflight_scope,
+                    task_type=VIDEO_TASK_DOWNLOAD,
+                    provider_job_id=provider_job_id,
+                    video_id=video_id,
+                    asset_id=asset_id,
+                    attempt=attempt + 1,
+                    max_attempts=max_attempts,
+                )
+            return
+        size_bytes = len(body)
+        content_type = ""
+        if isinstance(headers, dict):
+            for key, value in headers.items():
+                if isinstance(key, str) and key.lower() == "content-type" and isinstance(value, str):
+                    content_type = value
+                    break
+        download_meta["bytes"] = size_bytes
+        if content_type:
+            download_meta["content_type"] = content_type
+        del body
+        job_extra["download"] = download_meta
+        log_event(
+            level="INFO",
+            event="content",
+            corr_id=pending.corr_id,
+            job_id=pending.job_id,
+            user_id=pending.user_id,
+            username=pending.username,
+            model=pending.model,
+            provider=provider_key,
+            size=pending.size,
+            extra={
+                "video_id": video_id,
+                "asset_id": asset_id or "",
+                "bytes": size_bytes,
+                "content_type": content_type,
+                "attempt": attempt + 1,
+            },
+        )
+        job = await self._db.get_job(pending.job_id)
+        if job:
+            job.extra.update(job_extra)
+            await self._notify(job)
+
     async def _handle_no_media_assets(
         self,
         pending: PendingJob,
@@ -1564,7 +1927,12 @@ class JobQueue:
             provider_key,
         )
         try:
-            await self._db.update_job(pending.job_id, "failed", error=message)
+            await self._db.update_job(
+                pending.job_id,
+                "failed",
+                error=message,
+                video_id=pending.video_id,
+            )
         except Exception:
             log.exception("Failed to update job %s after empty assets", pending.job_id)
         refunded = False
@@ -1667,6 +2035,31 @@ class JobQueue:
             extra={"gemini_key_mask": key_mask or None, "reason": "no_media_assets"},
         )
         await self._release_gate(pending, reason="no_media", status="failed")
+
+    async def _process_job(self, pending: PendingJob) -> None:
+        task_type = pending.task_type or VIDEO_TASK_RETRIEVE
+        if task_type == VIDEO_TASK_DOWNLOAD:
+            await self._handle_video_download(pending)
+            return
+        if task_type in {VIDEO_TASK_CREATE, VIDEO_TASK_REMIX}:
+            stage = "create" if task_type == VIDEO_TASK_CREATE else "remix"
+            provider_key = pending.provider or pending.model
+            log_event(
+                level="INFO",
+                event=stage,
+                corr_id=pending.corr_id,
+                job_id=pending.job_id,
+                user_id=pending.user_id,
+                username=pending.username,
+                model=pending.model,
+                provider=provider_key,
+                size=pending.size,
+                extra={
+                    "task_type": task_type,
+                    "video_id": pending.video_id,
+                },
+            )
+        await self._handle_video_retrieve(pending)
 
 
 __all__ = ["JobQueue"]

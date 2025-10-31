@@ -108,6 +108,7 @@ _JOBS_HEADERS = [
     "sora_req_id",
     "status",
     "video_url",
+    "video_id",
     "file_url",
     "operation_name",
     "error",
@@ -1068,6 +1069,7 @@ async def create_job(
     idempotency_key: str = "",
     operation_name: Optional[str] = None,
     file_url: Optional[str] = None,
+    video_id: Optional[str] = None,
 ) -> None:
     state = await _ensure_jobs_state()
     async with state.lock:
@@ -1084,6 +1086,7 @@ async def create_job(
             "sora_req_id": "",
             "status": "queued",
             "video_url": "",
+            "video_id": video_id or "",
             "file_url": file_url or "",
             "operation_name": operation_name or "",
             "error": "",

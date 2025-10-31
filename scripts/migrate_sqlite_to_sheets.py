@@ -86,7 +86,18 @@ async def _migrate_jobs(conn: sqlite3.Connection) -> int:
         status = row["status"] or "queued"
         video_url = row["video_url"] or None
         error = row["error"] or None
-        await gsheets_db.create_job(job_id, user_id, prompt, None, "", 0, "", 0)
+        await gsheets_db.create_job(
+            job_id,
+            user_id,
+            prompt,
+            None,
+            "",
+            0,
+            "",
+            0,
+            None,
+            video_id=None,
+        )
         await gsheets_db.update_job_status(
             job_id,
             status,

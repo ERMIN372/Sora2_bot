@@ -25,6 +25,7 @@ class GenerationJobRecord:
     prompt: str
     status: str
     video_url: Optional[str]
+    video_id: Optional[str]
     error: Optional[str]
     created_at: datetime
     updated_at: datetime
@@ -91,6 +92,7 @@ class FakeDB:
         status: str,
         video_url: Optional[str] = None,
         file_url: Optional[str] = None,
+        video_id: Optional[str] = None,
         operation_name: Optional[str] = None,
         error: Optional[str] = None,
         status_message_id: Optional[int] = None,
@@ -103,6 +105,7 @@ class FakeDB:
                 status,
                 video_url,
                 file_url,
+                video_id,
                 operation_name,
                 error,
                 status_message_id,
@@ -117,6 +120,8 @@ class FakeDB:
                 job.video_url = video_url
             if file_url is not None:
                 job.file_url = file_url
+            if video_id is not None:
+                job.video_id = video_id
             if operation_name is not None:
                 job.operation_name = operation_name
             if error is not None:
@@ -191,6 +196,7 @@ def fake_db(config: Config) -> FakeDB:
         prompt="make a video",
         status="queued",
         video_url=None,
+        video_id=None,
         error=None,
         created_at=datetime.utcnow(),
         updated_at=datetime.utcnow(),
