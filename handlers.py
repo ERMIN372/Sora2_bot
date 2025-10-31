@@ -581,9 +581,18 @@ def _main_keyboard() -> ReplyKeyboardMarkup:
             [KeyboardButton(text=i18n.t("buttons.balance"))],
             [KeyboardButton(text=i18n.t("buttons.top_up"))],
             [KeyboardButton(text=i18n.t("buttons.help"))],
-            [KeyboardButton(text="/video_models"), KeyboardButton(text="/video_list")],
-            [KeyboardButton(text="/video_info"), KeyboardButton(text="/video_get")],
-            [KeyboardButton(text="/video_create"), KeyboardButton(text="/video_remix")],
+            [
+                KeyboardButton(text=i18n.t("buttons.video_models")),
+                KeyboardButton(text=i18n.t("buttons.video_list")),
+            ],
+            [
+                KeyboardButton(text=i18n.t("buttons.video_info")),
+                KeyboardButton(text=i18n.t("buttons.video_get")),
+            ],
+            [
+                KeyboardButton(text=i18n.t("buttons.video_create")),
+                KeyboardButton(text=i18n.t("buttons.video_remix")),
+            ],
             [KeyboardButton(text=i18n.t("buttons.chatgpt"))],
         ],
         resize_keyboard=True,
@@ -3071,23 +3080,23 @@ async def video_models_command(
     openai_video_client: Optional[OpenAIVideoClient] = None,
 ) -> None:
     if not config.sora_video_enabled:
-        await message.answer("OpenAI Sora 2 недоступна в конфигурации.")
+        await message.answer(i18n.t("video.models.disabled"))
         return
     client = _resolve_openai_video_client(job_queue, config, openai_video_client)
     if client is None:
-        await message.answer("Не удалось инициализировать OpenAI Videos API.")
+        await message.answer(i18n.t("video.common.init_failed"))
         return
     try:
         models = await client.list_models()
     except Exception as exc:  # pragma: no cover - network/config guard
         log.warning("Failed to list OpenAI video models error=%s", exc, exc_info=True)
-        await message.answer("Список моделей Sora 2 временно недоступен.")
+        await message.answer(i18n.t("video.models.fetch_failed"))
         return
     visible_models = models or list(client.supported_models)
     if not visible_models:
-        await message.answer("API не вернул список моделей Sora 2.")
+        await message.answer(i18n.t("video.models.empty"))
         return
-    lines = ["Доступные модели Sora 2:"]
+    lines = [i18n.t("video.models.header")]
     for model_name in sorted(dict.fromkeys(visible_models)):
         lines.append(f"• {escape_html(model_name)}")
     await message.answer("\n".join(lines))
@@ -3102,7 +3111,7 @@ async def video_create_command(
     openai_video_client: Optional[OpenAIVideoClient] = None,
 ) -> None:
     if not config.sora_video_enabled:
-        await message.answer("Видео через OpenAI Sora недоступно.")
+        await message.answer(i18n.t("video.create.disabled"))
         return
     user = message.from_user
     if user is None:  # pragma: no cover - defensive guard
@@ -3112,13 +3121,11 @@ async def video_create_command(
     prompt, settings, payload, size, model, idempotency_key = _parse_video_command_args(args)
     prompt = prompt.strip()
     if not prompt:
-        await message.answer(
-            "Укажите описание. Пример: /video_create {\"prompt\": \"кот идёт по неону\"}"
-        )
+        await message.answer(i18n.t("video.create.prompt_hint"))
         return
     client = _resolve_openai_video_client(job_queue, config, openai_video_client)
     if client is None:
-        await message.answer("Не удалось инициализировать OpenAI Videos API.")
+        await message.answer(i18n.t("video.common.init_failed"))
         return
     model_name = (
         (model or str(settings.get("model") or "").strip())
@@ -3157,7 +3164,7 @@ async def video_create_command(
                 await db.add_credits(user.id, credits_cost)
             except Exception:  # pragma: no cover - external dependency
                 log.exception("Failed to refund credits after create error")
-        await message.answer(f"Не удалось отправить запрос: {escape_html(str(exc))}")
+        await message.answer(i18n.t("video.common.send_failed", error=str(exc)))
         return
     job_id, video_id, operation_name = _extract_video_identifiers(data)
     if not job_id:
@@ -3171,10 +3178,10 @@ async def video_create_command(
             snippet = json.dumps(data, ensure_ascii=False)[:400] if data else ""
         except Exception:  # pragma: no cover - defensive
             snippet = str(data)[:400]
-        await message.answer(
-            "API не вернул идентификатор задачи. Повторите попытку позднее."
-            + (f"\nОтвет: {escape_html(snippet)}" if snippet else "")
-        )
+        message_text = i18n.t("video.create.missing_job_id")
+        if snippet:
+            message_text += "\n" + i18n.t("video.common.response_snippet", snippet=snippet)
+        await message.answer(message_text)
         return
     try:
         record = await job_queue.register_external_job(
@@ -3204,17 +3211,20 @@ async def video_create_command(
                 await db.add_credits(user.id, credits_cost)
             except Exception:
                 log.exception("Failed to refund credits after registration error")
-        await message.answer(f"Не удалось зарегистрировать задачу: {escape_html(str(exc))}")
+        await message.answer(i18n.t("video.create.registration_failed", error=str(exc)))
         return
     lines = [
-        "Задача отправлена в очередь.",
-        f"job_id: {escape_html(record.id)}",
-        f"video_id: {escape_html(video_id or record.video_id or '-')}",
-        f"corr_id: {escape_html(corr_id)}",
-        f"модель: {escape_html(model_name)}",
+        i18n.t("video.create.enqueued"),
+        i18n.t("video.common.job_id", job_id=record.id),
+        i18n.t(
+            "video.common.video_id",
+            video_id=video_id or record.video_id or "-",
+        ),
+        i18n.t("video.common.corr_id", corr_id=corr_id),
+        i18n.t("video.common.model", model=model_name),
     ]
     if deducted and credits_cost > 0:
-        lines.append(f"Списано кредитов: {credits_cost}")
+        lines.append(i18n.t("video.common.credits_deducted", credits=credits_cost))
     await message.answer("\n".join(lines))
 
 
@@ -3227,7 +3237,7 @@ async def video_remix_command(
     openai_video_client: Optional[OpenAIVideoClient] = None,
 ) -> None:
     if not config.sora_video_enabled:
-        await message.answer("Видео через OpenAI Sora недоступно.")
+        await message.answer(i18n.t("video.create.disabled"))
         return
     user = message.from_user
     if user is None:  # pragma: no cover - defensive guard
@@ -3235,9 +3245,7 @@ async def video_remix_command(
     await _ensure_user(message, db)
     args = (message.get_args() or "").strip()
     if not args:
-        await message.answer(
-            "Использование: /video_remix <video_id> {\"prompt\": \"описание\"}"
-        )
+        await message.answer(i18n.t("video.remix.usage"))
         return
     video_id: Optional[str] = None
     payload_text = ""
@@ -3245,10 +3253,10 @@ async def video_remix_command(
         try:
             data = json.loads(args)
         except json.JSONDecodeError:
-            await message.answer("Не удалось разобрать параметры. Передайте корректный JSON.")
+            await message.answer(i18n.t("video.common.invalid_json"))
             return
         if not isinstance(data, dict):
-            await message.answer("Ожидался JSON-объект с параметрами.")
+            await message.answer(i18n.t("video.common.expected_object"))
             return
         video_id = str(data.get("video_id") or data.get("id") or "").strip() or None
         payload_text = json.dumps({k: v for k, v in data.items() if k not in {"video_id", "id"}}, ensure_ascii=False)
@@ -3258,7 +3266,7 @@ async def video_remix_command(
         if len(parts) > 1:
             payload_text = parts[1]
     if not video_id:
-        await message.answer("Укажите video_id исходного ролика.")
+        await message.answer(i18n.t("video.remix.missing_video_id"))
         return
     prompt, settings, payload, size, model, idempotency_key = _parse_video_command_args(
         payload_text,
@@ -3266,7 +3274,7 @@ async def video_remix_command(
     )
     client = _resolve_openai_video_client(job_queue, config, openai_video_client)
     if client is None:
-        await message.answer("Не удалось инициализировать OpenAI Videos API.")
+        await message.answer(i18n.t("video.common.init_failed"))
         return
     model_name = (
         (model or str(settings.get("model") or "").strip())
@@ -3307,7 +3315,7 @@ async def video_remix_command(
                 await db.add_credits(user.id, credits_cost)
             except Exception:
                 log.exception("Failed to refund credits after remix error")
-        await message.answer(f"Не удалось отправить запрос: {escape_html(str(exc))}")
+        await message.answer(i18n.t("video.common.send_failed", error=str(exc)))
         return
     job_id, new_video_id, operation_name = _extract_video_identifiers(data)
     if not job_id:
@@ -3316,7 +3324,7 @@ async def video_remix_command(
                 await db.add_credits(user.id, credits_cost)
             except Exception:
                 log.exception("Failed to refund credits after remix missing job id")
-        await message.answer("API не вернул идентификатор ремикса.")
+        await message.answer(i18n.t("video.remix.missing_job_id"))
         return
     effective_video_id = new_video_id or video_id
     try:
@@ -3347,17 +3355,17 @@ async def video_remix_command(
                 await db.add_credits(user.id, credits_cost)
             except Exception:
                 log.exception("Failed to refund credits after remix registration error")
-        await message.answer(f"Не удалось зарегистрировать ремикс: {escape_html(str(exc))}")
+        await message.answer(i18n.t("video.remix.registration_failed", error=str(exc)))
         return
     lines = [
-        "Ремикс запущен.",
-        f"job_id: {escape_html(record.id)}",
-        f"video_id: {escape_html(effective_video_id or '-')}",
-        f"corr_id: {escape_html(corr_id)}",
-        f"модель: {escape_html(model_name)}",
+        i18n.t("video.remix.started"),
+        i18n.t("video.common.job_id", job_id=record.id),
+        i18n.t("video.common.video_id", video_id=effective_video_id or "-"),
+        i18n.t("video.common.corr_id", corr_id=corr_id),
+        i18n.t("video.common.model", model=model_name),
     ]
     if deducted and credits_cost > 0:
-        lines.append(f"Списано кредитов: {credits_cost}")
+        lines.append(i18n.t("video.common.credits_deducted", credits=credits_cost))
     await message.answer("\n".join(lines))
 
 
@@ -3369,11 +3377,11 @@ async def video_list_command(
     openai_video_client: Optional[OpenAIVideoClient] = None,
 ) -> None:
     if not config.sora_video_enabled:
-        await message.answer("OpenAI Sora 2 недоступна.")
+        await message.answer(i18n.t("video.list.disabled"))
         return
     client = _resolve_openai_video_client(job_queue, config, openai_video_client)
     if client is None:
-        await message.answer("Не удалось инициализировать OpenAI Videos API.")
+        await message.answer(i18n.t("video.common.init_failed"))
         return
     args = (message.get_args() or "").strip()
     params: Dict[str, Any] = {}
@@ -3382,7 +3390,7 @@ async def video_list_command(
             try:
                 data = json.loads(args)
             except json.JSONDecodeError:
-                await message.answer("Не удалось разобрать параметры. Передайте корректный JSON.")
+                await message.answer(i18n.t("video.common.invalid_json"))
                 return
             if isinstance(data, dict):
                 for key in ("limit", "order", "after", "before"):
@@ -3405,7 +3413,7 @@ async def video_list_command(
         )
     except Exception as exc:  # pragma: no cover - network/config guard
         log.exception("OpenAI video list failed")
-        await message.answer(f"Не удалось получить список: {escape_html(str(exc))}")
+        await message.answer(i18n.t("video.list.fetch_failed", error=str(exc)))
         return
     entries: List[Dict[str, Any]] = []
     if isinstance(data, dict):
@@ -3413,17 +3421,26 @@ async def video_list_command(
         if isinstance(raw_entries, list):
             entries = [entry for entry in raw_entries if isinstance(entry, dict)]
     lines = [
-        f"Статус: {status_code} · время: {duration_ms} мс",
-        "Видео:" if entries else "Видео не найдены.",
+        i18n.t("video.list.status", status=status_code, duration=duration_ms),
+        i18n.t("video.list.header" if entries else "video.list.empty"),
     ]
     for entry in entries[:10]:
-        vid = escape_html(str(entry.get("id") or entry.get("video_id") or "-"))
-        status = escape_html(str(entry.get("status") or entry.get("state") or "-"))
+        vid = str(entry.get("id") or entry.get("video_id") or "-")
+        status = str(entry.get("status") or entry.get("state") or "-")
         created = entry.get("created_at") or entry.get("createdAt") or entry.get("created")
-        created_label = f" · {escape_html(str(created))}" if created else ""
-        lines.append(f"• {vid} · {status}{created_label}")
+        created_label = (
+            SafeText(i18n.t("video.list.entry_created", created=created)) if created else SafeText("")
+        )
+        lines.append(
+            i18n.t(
+                "video.list.entry",
+                video_id=vid,
+                status=status,
+                created_label=created_label,
+            )
+        )
     if len(entries) > 10:
-        lines.append(f"… и ещё {len(entries) - 10}")
+        lines.append(i18n.t("video.list.more", count=len(entries) - 10))
     await message.answer("\n".join(lines))
 
 
@@ -3435,33 +3452,33 @@ async def video_info_command(
     openai_video_client: Optional[OpenAIVideoClient] = None,
 ) -> None:
     if not config.sora_video_enabled:
-        await message.answer("OpenAI Sora 2 недоступна.")
+        await message.answer(i18n.t("video.list.disabled"))
         return
     video_id = (message.get_args() or "").strip()
     if not video_id:
-        await message.answer("Использование: /video_info <video_id>")
+        await message.answer(i18n.t("video.info.usage"))
         return
     client = _resolve_openai_video_client(job_queue, config, openai_video_client)
     if client is None:
-        await message.answer("Не удалось инициализировать OpenAI Videos API.")
+        await message.answer(i18n.t("video.common.init_failed"))
         return
     try:
         data, status_code, duration_ms = await client.retrieve(video_id, return_meta=True)
     except Exception as exc:  # pragma: no cover - network/config guard
         log.exception("OpenAI video retrieve failed video_id=%s", video_id)
-        await message.answer(f"Не удалось получить информацию: {escape_html(str(exc))}")
+        await message.answer(i18n.t("video.info.fetch_failed", error=str(exc)))
         return
     video_obj = client.get_video_object(data) if isinstance(client, OpenAIVideoClient) else None
     info_lines = [
-        f"Видео: {escape_html(video_id)}",
-        f"Статус запроса: {status_code} · {duration_ms} мс",
+        i18n.t("video.info.header", video_id=video_id),
+        i18n.t("video.info.status", status=status_code, duration=duration_ms),
     ]
     if isinstance(video_obj, dict):
-        status = escape_html(str(video_obj.get("status") or video_obj.get("state") or "unknown"))
-        info_lines.append(f"Статус: {status}")
+        status = str(video_obj.get("status") or video_obj.get("state") or "unknown")
+        info_lines.append(i18n.t("video.info.state", status=status))
         created = video_obj.get("created_at") or video_obj.get("createdAt")
         if created:
-            info_lines.append(f"Создано: {escape_html(str(created))}")
+            info_lines.append(i18n.t("video.info.created", created=created))
     try:
         pretty = json.dumps(video_obj or data, ensure_ascii=False, indent=2)
     except Exception:  # pragma: no cover - defensive
@@ -3481,7 +3498,7 @@ async def video_get_command(
 ) -> None:
     args = (message.get_args() or "").strip()
     if not args:
-        await message.answer("Использование: /video_get <job_id> [asset_id]")
+        await message.answer(i18n.t("video.get.usage"))
         return
     job_id: Optional[str] = None
     asset_id: Optional[str] = None
@@ -3490,7 +3507,7 @@ async def video_get_command(
         try:
             data = json.loads(args)
         except json.JSONDecodeError:
-            await message.answer("Не удалось разобрать параметры. Передайте корректный JSON.")
+            await message.answer(i18n.t("video.common.invalid_json"))
             return
         if isinstance(data, dict):
             job_id = str(data.get("job_id") or data.get("id") or "").strip() or None
@@ -3504,19 +3521,19 @@ async def video_get_command(
         if len(parts) > 2:
             video_id = parts[2]
     if not job_id:
-        await message.answer("Укажите job_id задачи.")
+        await message.answer(i18n.t("video.get.missing_job_id"))
         return
     job = await db.get_job(job_id)
     if job is None:
-        await message.answer("Задача не найдена в журнале.")
+        await message.answer(i18n.t("video.get.job_not_found"))
         return
     user = message.from_user
     if user and job.user_id != user.id and not _is_admin(user.id, config):
-        await message.answer("У вас нет доступа к этой задаче.")
+        await message.answer(i18n.t("video.get.access_denied"))
         return
     resolved_video_id = video_id or job.video_id
     if not resolved_video_id:
-        await message.answer("Для задачи нет video_id. Укажите его явно: /video_get <job_id> <asset_id?> <video_id>")
+        await message.answer(i18n.t("video.get.missing_video_id"))
         return
     provider_key = job.model or "openai-video-api"
     await job_queue.enqueue(
@@ -3535,7 +3552,7 @@ async def video_get_command(
         video_id=resolved_video_id,
         asset_id=asset_id or None,
     )
-    await message.answer("Скачивание поставлено в очередь. Ожидайте файл в чате.")
+    await message.answer(i18n.t("video.get.queued"))
 
 
 async def diag_openai_video_command(
