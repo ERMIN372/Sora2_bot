@@ -333,6 +333,27 @@ def _prompt_preview(prompt: str, limit: int = 120) -> str:
     return snippet
 
 
+def _extract_duration_seconds(extra: Mapping[str, Any]) -> Optional[int]:
+    for key in ("duration_seconds", "seconds", "duration"):
+        value = extra.get(key)
+        if value in (None, ""):
+            continue
+        text_value: Optional[str]
+        if isinstance(value, str):
+            text_value = value.strip()
+            if not text_value:
+                continue
+        else:
+            text_value = None
+        try:
+            numeric = float(text_value or value)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            continue
+        if numeric > 0:
+            return int(numeric)
+    return None
+
+
 @dataclass
 class PendingJob:
     job_id: str
@@ -939,12 +960,19 @@ class JobQueue:
         operation_name: Optional[str] = None,
         status_code: Optional[int] = None,
         duration_ms: Optional[int] = None,
+        extra: Optional[Mapping[str, Any]] = None,
     ) -> GenerationJobRecord:
         provider_key = provider or model
         sanitized = sanitized_prompt or prompt
         original = original_prompt or prompt
+        extras_payload = dict(extra or {})
         existing = await self._db.get_job(job_id)
         if existing is not None:
+            if extras_payload:
+                existing.extra.update(extras_payload)
+                seconds_override = _extract_duration_seconds(extras_payload)
+                if seconds_override is not None:
+                    existing.seconds = seconds_override
             if video_id or operation_name:
                 try:
                     await self._db.update_job(
@@ -996,6 +1024,11 @@ class JobQueue:
             idempotency_key=idempotency_key,
             operation_name=operation_name,
         )
+        if extras_payload:
+            record.extra.update(extras_payload)
+            seconds_override = _extract_duration_seconds(extras_payload)
+            if seconds_override is not None:
+                record.seconds = seconds_override
         await self._db.create_job(record)
         await self.enqueue(
             job_id=job_id,
@@ -1036,6 +1069,15 @@ class JobQueue:
                 "preflight_scope": preflight_scope,
                 "preflight_auto_sanitized": auto_sanitized,
                 "video_id": video_id,
+                **({} if not extras_payload else {
+                    key: value for key, value in extras_payload.items() if key not in {
+                        "preflight_blocked",
+                        "preflight_reason",
+                        "preflight_scope",
+                        "preflight_auto_sanitized",
+                        "video_id",
+                    }
+                }),
             },
         )
         return record

@@ -326,3 +326,47 @@ def test_process_job_requeues_running_status(monkeypatch, config: Config, fake_d
         queue._queue.task_done()
 
     asyncio.run(_run())
+
+
+def test_register_external_job_persists_extras(monkeypatch, config: Config, fake_db: FakeDB) -> None:
+    async def _run() -> None:
+        provider_status = ProviderJobStatus(
+            job_id="job-extra",
+            status="queued",
+            status_code=202,
+            duration_ms=100,
+            assets={},
+            error=None,
+            data={},
+        )
+
+        provider = StubProvider(provider_status)
+        queue = JobQueue(
+            db=fake_db,
+            providers={"veo": provider},
+            default_provider="veo",
+            config=config,
+            gate=None,
+        )
+
+        events: list[dict] = []
+        monkeypatch.setattr("jobs.log_event", lambda **kwargs: events.append(kwargs))
+
+        record = await queue.register_external_job(
+            job_id="job-extra",
+            user_id=7,
+            prompt="make a short clip",
+            size="1024x768",
+            model=config.gemini_model_video,
+            corr_id="corr-extra",
+            provider="veo",
+            username="tester",
+            extra={"duration_seconds": 9, "aspect_ratio": "4:3"},
+        )
+
+        assert record.seconds == 9
+        assert record.extra.get("duration_seconds") == 9
+        assert record.extra.get("aspect_ratio") == "4:3"
+        assert any(event.get("extra", {}).get("duration_seconds") == 9 for event in events)
+
+    asyncio.run(_run())

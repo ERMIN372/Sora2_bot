@@ -3146,6 +3146,12 @@ async def video_create_command(
         size_value = SIZE_OPTIONS.get("horizontal", "")
     if size_value:
         settings.setdefault("size", size_value)
+    prepared_request = client.prepare_create_request(
+        prompt=prompt,
+        settings=settings,
+        payload=payload,
+    )
+    local_extras = dict(prepared_request.extras)
     credits_cost = config.generation_cost_credits
     deducted = False
     if credits_cost > 0:
@@ -3157,10 +3163,11 @@ async def video_create_command(
     try:
         data, status_code, duration_ms = await client.create(
             prompt=prompt,
-            settings=settings or None,
-            payload=payload or None,
+            settings=None,
+            payload=None,
             idempotency_key=idempotency_key,
             return_meta=True,
+            prepared=prepared_request,
         )
     except Exception as exc:  # pragma: no cover - network/config guard
         log.exception("OpenAI video create failed")
@@ -3188,6 +3195,8 @@ async def video_create_command(
             message_text += "\n" + i18n.t("video.common.response_snippet", snippet=snippet)
         await message.answer(message_text)
         return
+    last_request = client.last_request
+    dropped_fields_snapshot = tuple(last_request.get("dropped_fields", ())) if isinstance(last_request, dict) else ()
     try:
         record = await job_queue.register_external_job(
             job_id=job_id,
@@ -3208,6 +3217,7 @@ async def video_create_command(
             operation_name=operation_name,
             status_code=status_code,
             duration_ms=duration_ms,
+            extra=local_extras,
         )
     except Exception as exc:  # pragma: no cover - defensive
         log.exception("Failed to register OpenAI video job")
@@ -3231,6 +3241,10 @@ async def video_create_command(
     if deducted and credits_cost > 0:
         lines.append(i18n.t("video.common.credits_deducted", credits=credits_cost))
     await message.answer("\n".join(lines))
+    if dropped_fields_snapshot and _is_admin(user.id, config):
+        filtered_fields = sorted({str(field) for field in dropped_fields_snapshot if field})
+        if filtered_fields:
+            await message.answer("Отброшенные параметры: " + ", ".join(filtered_fields))
 
 
 async def video_remix_command(
