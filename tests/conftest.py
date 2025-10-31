@@ -24,6 +24,21 @@ except ModuleNotFoundError:  # pragma: no cover - test environment shim
     sys.modules["dotenv"] = dotenv_stub
 
 try:  # pragma: no cover - prefer real dependency
+    from aiogram import Bot as _AiogramBot  # type: ignore
+except ModuleNotFoundError:  # pragma: no cover - test environment shim
+    aiogram_stub = types.ModuleType("aiogram")
+
+    class Bot:  # pragma: no cover - minimal stub for tests
+        def __init__(self, *_: Any, **__: Any) -> None:
+            return None
+
+        async def send_message(self, *_: Any, **__: Any) -> None:
+            return None
+
+    aiogram_stub.Bot = Bot
+    sys.modules["aiogram"] = aiogram_stub
+
+try:  # pragma: no cover - prefer real dependency
     import aiohttp  # type: ignore
 except ModuleNotFoundError:  # pragma: no cover - test environment shim
     aiohttp_stub = types.ModuleType("aiohttp")

@@ -230,3 +230,21 @@ def test_openai_video_unknown_parameter_error(make_openai_video_config) -> None:
     assert "payload.extra" in error_info.get("message", "")
     offending = error_info.get("offending_parameters") or ()
     assert "extra" in offending
+
+
+def test_prepare_create_request_returns_extras(make_openai_video_config) -> None:
+    config = make_openai_video_config()
+    client = OpenAIVideoClient(config=config)
+
+    prepared = client.prepare_create_request(
+        prompt="Create a video",
+        settings={"duration_seconds": "12", "aspect_ratio": "4:3", "size": "1440x1080"},
+        payload={"metadata": {"notes": "test"}},
+    )
+
+    assert prepared.request["prompt"] == "Create a video"
+    assert prepared.request["seconds"] == "12"
+    assert prepared.request["size"] == "1440x1080"
+    assert prepared.extras["duration_seconds"] == 12
+    assert prepared.extras["aspect_ratio"] == "4:3"
+    assert prepared.extras["size"] == "1440x1080"

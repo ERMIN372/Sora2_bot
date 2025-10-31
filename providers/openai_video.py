@@ -7,6 +7,7 @@ import logging
 import re
 import time
 from collections import deque
+from dataclasses import dataclass
 from typing import Any, Deque, Dict, FrozenSet, Iterable, List, Mapping, Optional, Tuple
 
 from config import Config
@@ -100,6 +101,14 @@ def _guess_mime(entry: Mapping[str, Any]) -> Optional[str]:
     return None
 
 
+@dataclass(frozen=True)
+class PreparedCreateRequest:
+    request: Dict[str, Any]
+    extras: Dict[str, Any]
+    dropped_fields: Tuple[str, ...]
+    correlation_id: Optional[str]
+
+
 class OpenAIVideoClient(BaseProviderClient):
     """Client for the OpenAI Videos API used by Sora 2 models."""
 
@@ -178,12 +187,21 @@ class OpenAIVideoClient(BaseProviderClient):
         payload: Optional[Mapping[str, Any]] = None,
         idempotency_key: Optional[str] = None,
         return_meta: bool = False,
+        prepared: Optional[PreparedCreateRequest] = None,
     ) -> Any:
-        request, dropped_fields, correlation_id = self._build_create_payload(
-            prompt=prompt,
-            settings=dict(settings or {}),
-            payload=dict(payload or {}),
-        )
+        if prepared is None:
+            prepared = self.prepare_create_request(
+                prompt=prompt,
+                settings=settings,
+                payload=payload,
+            )
+        request = dict(prepared.request)
+        if "prompt" not in request:
+            prompt_text = str(prompt or "").strip()
+            if prompt_text:
+                request["prompt"] = prompt_text
+        dropped_fields = list(prepared.dropped_fields)
+        correlation_id = prepared.correlation_id
         path = self._videos_path()
         headers = self._build_headers()
         if idempotency_key:
@@ -217,6 +235,25 @@ class OpenAIVideoClient(BaseProviderClient):
             "openai.video.create status=%s duration_ms=%s model=%s", status_code, duration_ms, request.get("model")
         )
         return (data, status_code, duration_ms) if return_meta else data
+
+    def prepare_create_request(
+        self,
+        *,
+        prompt: str,
+        settings: Optional[Mapping[str, Any]] = None,
+        payload: Optional[Mapping[str, Any]] = None,
+    ) -> PreparedCreateRequest:
+        request, extras, dropped_fields, correlation_id = self._prepare_create_request(
+            prompt=prompt,
+            settings=settings,
+            payload=payload,
+        )
+        return PreparedCreateRequest(
+            request=dict(request),
+            extras=dict(extras),
+            dropped_fields=tuple(sorted(set(dropped_fields))),
+            correlation_id=correlation_id,
+        )
 
     async def remix(
         self,
@@ -508,8 +545,27 @@ class OpenAIVideoClient(BaseProviderClient):
         payload: Dict[str, Any],
         allow_empty_prompt: bool = False,
     ) -> Tuple[Dict[str, Any], List[str], Optional[str]]:
+        request, _extras, dropped_fields, corr_id = self._prepare_create_request(
+            prompt=prompt,
+            settings=settings,
+            payload=payload,
+            allow_empty_prompt=allow_empty_prompt,
+        )
+        return request, sorted(set(dropped_fields)), corr_id
+
+    def _prepare_create_request(
+        self,
+        *,
+        prompt: str,
+        settings: Optional[Mapping[str, Any]],
+        payload: Optional[Mapping[str, Any]],
+        allow_empty_prompt: bool = False,
+    ) -> Tuple[Dict[str, Any], Dict[str, Any], List[str], Optional[str]]:
+        original_settings = dict(settings or {})
+        original_payload = dict(payload or {})
         prepared_settings, prepared_payload, dropped_fields, corr_id = self._prepare_request_data(
-            settings, payload
+            original_settings,
+            original_payload,
         )
         request: Dict[str, Any] = {}
         request.update(
@@ -545,7 +601,12 @@ class OpenAIVideoClient(BaseProviderClient):
                 request.pop("size", None)
         if "input_reference" in request and request["input_reference"] in {None, ""}:
             request.pop("input_reference", None)
-        return request, sorted(set(dropped_fields)), corr_id
+        extras = self._extract_local_extras(
+            original_settings=original_settings,
+            original_payload=original_payload,
+            request=request,
+        )
+        return request, extras, dropped_fields, corr_id
 
     def _build_remix_payload(
         self,
@@ -688,6 +749,59 @@ class OpenAIVideoClient(BaseProviderClient):
         self._apply_aliases(payload_copy, "payload", dropped_fields)
         return settings_copy, payload_copy, dropped_fields, corr_id
 
+    def _extract_local_extras(
+        self,
+        *,
+        original_settings: Mapping[str, Any],
+        original_payload: Mapping[str, Any],
+        request: Mapping[str, Any],
+    ) -> Dict[str, Any]:
+        extras: Dict[str, Any] = {}
+        seconds_value: Any = request.get("seconds")
+        if seconds_value is None:
+            seconds_value = self._search_nested(original_settings, ("seconds", "duration", "duration_seconds", "duration_sec"))
+            if seconds_value is None:
+                seconds_value = self._search_nested(
+                    original_payload, ("seconds", "duration", "duration_seconds", "duration_sec")
+                )
+        normalised_seconds = self._normalise_seconds(seconds_value)
+        if normalised_seconds is not None:
+            try:
+                numeric_seconds = int(float(normalised_seconds))
+            except (TypeError, ValueError):
+                numeric_seconds = None
+            if numeric_seconds and numeric_seconds > 0:
+                extras["duration_seconds"] = numeric_seconds
+            else:
+                extras["duration_seconds"] = normalised_seconds
+        aspect_ratio = self._search_nested(
+            original_settings, ("aspect_ratio", "aspectRatio")
+        )
+        if aspect_ratio is None:
+            aspect_ratio = self._search_nested(original_payload, ("aspect_ratio", "aspectRatio"))
+        if isinstance(aspect_ratio, str):
+            aspect_value = aspect_ratio.strip()
+        elif aspect_ratio is not None:
+            aspect_value = str(aspect_ratio)
+        else:
+            aspect_value = ""
+        if aspect_value:
+            extras["aspect_ratio"] = aspect_value
+        size_value: Any = request.get("size")
+        if not size_value:
+            size_value = self._search_nested(original_settings, ("size",))
+            if not size_value:
+                size_value = self._search_nested(original_payload, ("size",))
+        if isinstance(size_value, str):
+            size_text = size_value.strip()
+        elif size_value is not None:
+            size_text = str(size_value)
+        else:
+            size_text = ""
+        if size_text:
+            extras.setdefault("size", size_text)
+        return extras
+
     def _filter_allowed_fields(
         self,
         data: Mapping[str, Any],
@@ -752,6 +866,24 @@ class OpenAIVideoClient(BaseProviderClient):
             if text.isdigit():
                 return str(int(text))
             return text
+        return None
+
+    def _search_nested(self, data: Any, keys: Iterable[str]) -> Optional[Any]:
+        if isinstance(data, Mapping):
+            for key in keys:
+                if key in data:
+                    value = data[key]
+                    if value not in (None, ""):
+                        return value
+            for value in data.values():
+                nested = self._search_nested(value, keys)
+                if nested is not None:
+                    return nested
+        elif isinstance(data, (list, tuple)):
+            for item in data:
+                nested = self._search_nested(item, keys)
+                if nested is not None:
+                    return nested
         return None
 
     async def _request_json(
@@ -1176,5 +1308,5 @@ class OpenAIVideoClient(BaseProviderClient):
         return assets
 
 
-__all__ = ["OpenAIVideoClient"]
+__all__ = ["OpenAIVideoClient", "PreparedCreateRequest"]
 
