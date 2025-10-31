@@ -20,7 +20,6 @@ from db import Database
 from generation_gate import GenerationRequestGate
 from handlers import register_handlers
 from jobs import JobQueue
-from healthcheck import run_startup_healthcheck
 from providers import (
     BaseProviderClient,
     GeminiImageClient,
@@ -31,6 +30,7 @@ from providers import (
 )
 from services.gemini_key import ensure_gemini_key_logged
 from services.error_reporter import ErrorReporter
+from services.healthcheck import OPENAI_CHAT_ENABLED, run_all_probes
 import yookassa_client
 
 _LOG_LEVEL_NAME = os.getenv("LOG_LEVEL", "INFO").upper()
@@ -206,7 +206,9 @@ async def _startup(state: ApplicationState, *, mode: str) -> None:
         log.info("Webhook configured at %s", CFG.WEBHOOK_URL)
 
     await state.db.init()
-    await run_startup_healthcheck(config=state.config, mode=mode)
+    await run_all_probes(config=state.config, mode=mode)
+    if not OPENAI_CHAT_ENABLED:
+        state.openai_chat_client = None
 
     async def _fetch_profile(user_id: int) -> Optional[Dict[str, Optional[str]]]:
         try:
