@@ -53,12 +53,6 @@ from services.gemini_downloader import (
     GeminiKeyMismatchError,
     download_asset,
 )
-from services.healthcheck import (
-    GEMINI_IMAGE_ENABLED,
-    OPENAI_CHAT_ENABLED,
-    SORA_ENABLED,
-    VEO_ENABLED,
-)
 from services.sora_downloader import SoraDownloadError, download_sora_asset
 from services.error_reporter import ErrorReporter
 from services.status_tracker import StatusMessageManager
@@ -234,7 +228,7 @@ def _video_model_options(config: Config) -> list[VideoModelOption]:
             )
         )
 
-    if config.gemini_video_enabled and VEO_ENABLED:
+    if config.gemini_video_enabled:
         fallback_label = i18n.t("video.models.veo")
         default_name = _normalise_video_model_name(config.gemini_model_video)
         if default_name:
@@ -245,7 +239,7 @@ def _video_model_options(config: Config) -> list[VideoModelOption]:
             if _is_veo_video_model_name(normalised):
                 _register(normalised, "veo", normalised)
 
-    if config.sora_video_enabled and SORA_ENABLED:
+    if config.sora_video_enabled:
         fallback_label = i18n.t("video.models.sora")
         default_sora = _normalise_video_model_name(config.sora_model_video)
         if default_sora:
@@ -264,35 +258,23 @@ def _find_video_model_option(config: Config, key: str) -> Optional[VideoModelOpt
 
 def _provider_for_model(model: Optional[str], config: Config) -> str:
     name = _normalise_video_model_name(model or "")
-    if name and _is_veo_video_model_name(name) and VEO_ENABLED:
+    if name and _is_veo_video_model_name(name):
         return "veo"
-    if name and _is_sora_video_model_name(name) and SORA_ENABLED:
+    if name and _is_sora_video_model_name(name):
         return "sora"
-    if (
-        name
-        and SORA_ENABLED
-        and config.sora_model_video
-        and name == _normalise_video_model_name(config.sora_model_video)
-    ):
+    if name and config.sora_model_video and name == _normalise_video_model_name(config.sora_model_video):
         return "sora"
-    if (
-        name
-        and VEO_ENABLED
-        and config.gemini_model_video
-        and name == _normalise_video_model_name(config.gemini_model_video)
-    ):
+    if name and config.gemini_model_video and name == _normalise_video_model_name(config.gemini_model_video):
         return "veo"
     lowered = (model or "").strip().lower()
-    if lowered in {"sora", "sora-video", "openai-video"} and SORA_ENABLED:
+    if lowered in {"sora", "sora-video", "openai-video"}:
         return "sora"
-    if lowered in {"veo", "veo2", "gemini-video"} and VEO_ENABLED:
+    if lowered in {"veo", "veo2", "gemini-video"}:
         return "veo"
-    if SORA_ENABLED and not VEO_ENABLED:
+    if config.sora_video_enabled and not config.gemini_video_enabled:
         return "sora"
-    if VEO_ENABLED:
+    if config.gemini_video_enabled:
         return "veo"
-    if SORA_ENABLED:
-        return "sora"
     return "video"
 
 
@@ -340,7 +322,7 @@ def _video_models_description(config: Config) -> str:
 
 
 def _image_model_description(config: Config) -> str:
-    if config.gemini_enabled and GEMINI_IMAGE_ENABLED:
+    if config.gemini_enabled:
         return i18n.t("image.model.gemini")
     return i18n.t("image.model.unavailable")
 
@@ -477,16 +459,17 @@ STATUS_MESSAGES = StatusMessageManager()
 
 
 def _main_keyboard() -> ReplyKeyboardMarkup:
-    rows: List[List[KeyboardButton]] = [
-        [KeyboardButton(text=i18n.t("buttons.generate_text"))],
-        [KeyboardButton(text=i18n.t("buttons.generate_photo"))],
-        [KeyboardButton(text=i18n.t("buttons.balance"))],
-        [KeyboardButton(text=i18n.t("buttons.top_up"))],
-        [KeyboardButton(text=i18n.t("buttons.help"))],
-    ]
-    if OPENAI_CHAT_ENABLED:
-        rows.append([KeyboardButton(text=i18n.t("buttons.chatgpt"))])
-    return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True)
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text=i18n.t("buttons.generate_text"))],
+            [KeyboardButton(text=i18n.t("buttons.generate_photo"))],
+            [KeyboardButton(text=i18n.t("buttons.balance"))],
+            [KeyboardButton(text=i18n.t("buttons.top_up"))],
+            [KeyboardButton(text=i18n.t("buttons.help"))],
+            [KeyboardButton(text=i18n.t("buttons.chatgpt"))],
+        ],
+        resize_keyboard=True,
+    )
 
 
 def _mark_selected(label: str, selected: bool) -> str:
@@ -2299,8 +2282,6 @@ async def chatgpt_menu(
     chat_client: Optional[OpenAIChatClient],
 ) -> None:
     await state.finish()
-    if not OPENAI_CHAT_ENABLED:
-        chat_client = None
     if chat_client is None:
         await message.answer(i18n.t("errors.chatgpt_unavailable"))
         await _send_main_menu(message, config)
@@ -2315,8 +2296,6 @@ async def chatgpt_respond(
     config: Config,
     chat_client: Optional[OpenAIChatClient],
 ) -> None:
-    if not OPENAI_CHAT_ENABLED:
-        chat_client = None
     if chat_client is None:
         await message.answer(i18n.t("errors.chatgpt_unavailable"))
         await state.finish()
@@ -2369,7 +2348,7 @@ async def generate_image_menu(
     await state.finish()
     user_id = await _ensure_user(message, db)
     SESSION_MANAGER.get(user_id)
-    if not (config.gemini_enabled and GEMINI_IMAGE_ENABLED):
+    if not config.gemini_enabled:
         await message.answer(i18n.t("errors.image_generation_disabled"))
         await _send_main_menu(message, config)
         return

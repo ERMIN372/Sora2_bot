@@ -21,12 +21,6 @@ from handlers import resend_pending_order
 from i18n import format_credits, i18n
 import yookassa_client
 
-from services.healthcheck import (
-    PROBE_REFRESH_INTERVAL_SECONDS,
-    run_all_probes,
-    schedule_probe_refresh,
-)
-
 log = logging.getLogger(__name__)
 
 YOOKASSA_IP_RANGES = [
@@ -485,30 +479,6 @@ def create_app(
 
     app = FastAPI()
     app.add_middleware(BodySizeLimitMiddleware, max_body_size=MAX_REQUEST_SIZE)
-
-    app.state.probe_task: Optional[asyncio.Task[None]] = None
-    app.state.probe_interval: float = PROBE_REFRESH_INTERVAL_SECONDS
-
-    @app.on_event("startup")
-    async def _startup_probes() -> None:
-        await run_all_probes(config=config, mode=CFG.BOT_MODE)
-        interval = getattr(app.state, "probe_interval", PROBE_REFRESH_INTERVAL_SECONDS)
-        if interval and interval > 0:
-            app.state.probe_task = asyncio.create_task(
-                schedule_probe_refresh(
-                    config=config,
-                    interval_seconds=interval,
-                    mode=CFG.BOT_MODE,
-                )
-            )
-
-    @app.on_event("shutdown")
-    async def _shutdown_probes() -> None:
-        task = getattr(app.state, "probe_task", None)
-        if task:
-            task.cancel()
-            await asyncio.gather(task, return_exceptions=True)
-            app.state.probe_task = None
 
     app.include_router(_health_router())
     app.include_router(_telegram_router(dp))
