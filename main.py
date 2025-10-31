@@ -24,6 +24,7 @@ from healthcheck import run_startup_healthcheck
 from providers import (
     BaseProviderClient,
     GeminiImageClient,
+    OpenAIChatClient,
     OpenAIImageClient,
     SoraVideoClient,
     VeoVideoClient,
@@ -65,6 +66,7 @@ class ApplicationState:
     uvicorn_server: Optional[uvicorn.Server] = None
     archive_publisher: Optional[ArchivePublisher] = None
     error_reporter: Optional[ErrorReporter] = None
+    openai_chat_client: Optional[OpenAIChatClient] = None
 
 
 def _parse_args() -> argparse.Namespace:
@@ -84,6 +86,7 @@ def _init_application(config: Config) -> ApplicationState:
     gate = GenerationRequestGate()
     error_reporter = ErrorReporter(bot=bot, config=config)
     providers: Dict[str, BaseProviderClient] = {}
+    chat_client: Optional[OpenAIChatClient] = None
 
     if config.gemini_enabled:
         gemini_client = GeminiImageClient(config=config)
@@ -134,6 +137,13 @@ def _init_application(config: Config) -> ApplicationState:
                 "OpenAI image fallback enabled models=%s",
                 ",".join(entries.keys()),
             )
+    if config.sora_enabled:
+        try:
+            chat_client = OpenAIChatClient(config=config)
+        except RuntimeError:
+            log.warning("OpenAI chat client is not configured; skipping ChatGPT menu", exc_info=True)
+        else:
+            log.info("OpenAI ChatGPT client initialised model=gpt-4.1-turbo")
 
     default_provider = config.default_video_model
     if default_provider not in providers:
@@ -158,6 +168,7 @@ def _init_application(config: Config) -> ApplicationState:
         gate=gate,
         archive_publisher=archive_publisher,
         error_reporter=error_reporter,
+        chatgpt_client=chat_client,
     )
 
     app, yookassa_processor = create_app(config=config, dp=dp, bot=bot, db=db)
@@ -173,6 +184,7 @@ def _init_application(config: Config) -> ApplicationState:
         yookassa_processor=yookassa_processor,
         archive_publisher=archive_publisher,
         error_reporter=error_reporter,
+        openai_chat_client=chat_client,
     )
 
 

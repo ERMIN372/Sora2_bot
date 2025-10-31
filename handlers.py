@@ -24,6 +24,7 @@ from aiogram.types import (
     KeyboardButton,
     Message,
     ReplyKeyboardMarkup,
+    ReplyKeyboardRemove,
 )
 
 from archive import ArchivePayload, ArchivePublisher
@@ -43,6 +44,7 @@ from observability import (
 )
 from moderation import policy_message, run_preflight
 from providers import ProviderAPIError
+from providers.openai_chat import OpenAIChatClient
 from services.gemini_catalog import list_veo_video_models
 from services.gemini_client import get_media_client, get_text_client
 from services.gemini_downloader import (
@@ -92,6 +94,7 @@ MAIN_MENU_BUTTONS = {
     i18n.t("buttons.balance"),
     i18n.t("buttons.top_up"),
     i18n.t("buttons.help"),
+    i18n.t("buttons.chatgpt"),
 }
 
 _PRO_REQUEST_PATTERN = re.compile(
@@ -118,6 +121,12 @@ class GenerationStates(StatesGroup):
     image_mode = State()
     text_prompt = State()
     photo_prompt = State()
+
+
+class ChatGPTState(StatesGroup):
+    """Conversation states for the GPT-4.1 assistant."""
+
+    awaiting_input = State()
 
 
 @dataclass
@@ -457,6 +466,7 @@ def _main_keyboard() -> ReplyKeyboardMarkup:
             [KeyboardButton(text=i18n.t("buttons.balance"))],
             [KeyboardButton(text=i18n.t("buttons.top_up"))],
             [KeyboardButton(text=i18n.t("buttons.help"))],
+            [KeyboardButton(text=i18n.t("buttons.chatgpt"))],
         ],
         resize_keyboard=True,
     )
@@ -2265,6 +2275,45 @@ async def help_command(
     )
 
 
+async def chatgpt_menu(
+    message: Message,
+    state: FSMContext,
+    config: Config,
+    chat_client: Optional[OpenAIChatClient],
+) -> None:
+    await state.finish()
+    if chat_client is None:
+        await message.answer(i18n.t("errors.chatgpt_unavailable"))
+        await _send_main_menu(message, config)
+        return
+    await ChatGPTState.awaiting_input.set()
+    await message.answer(i18n.t("help.chatgpt"), reply_markup=ReplyKeyboardRemove())
+
+
+async def chatgpt_respond(
+    message: Message,
+    state: FSMContext,
+    config: Config,
+    chat_client: Optional[OpenAIChatClient],
+) -> None:
+    if chat_client is None:
+        await message.answer(i18n.t("errors.chatgpt_unavailable"))
+        await state.finish()
+        await _send_main_menu(message, config)
+        return
+    user_text = (message.text or "").strip()
+    if not user_text:
+        await message.answer(i18n.t("errors.chatgpt_empty"))
+        return
+    try:
+        response = await chat_client.generate_reply(user_text)
+    except Exception:
+        log.exception("ChatGPT response failed")
+        await message.answer(i18n.t("errors.chatgpt_failed"))
+        return
+    await message.answer(response)
+
+
 async def balance_command(message: Message, db: Database, state: FSMContext) -> None:
     await _send_balance_info(message, db)
 
@@ -2981,6 +3030,7 @@ def register_handlers(
     gate: GenerationRequestGate,
     archive_publisher: ArchivePublisher,
     error_reporter: ErrorReporter,
+    chatgpt_client: Optional[OpenAIChatClient] = None,
 ) -> None:
     job_queue.register_notification_callback(
         name="telegram",
@@ -3065,6 +3115,13 @@ def register_handlers(
         state="*",
     )
     dp.register_message_handler(
+        lambda message, state: chatgpt_menu(
+            message, state, config, chatgpt_client
+        ),
+        lambda message: message.text == i18n.t("buttons.chatgpt"),
+        state="*",
+    )
+    dp.register_message_handler(
         lambda message, state: handle_text_input(message, state, db, config),
         state=GenerationStates.text_prompt,
     )
@@ -3082,6 +3139,13 @@ def register_handlers(
         lambda message, state: successful_text_handler(message, state, db, config),
         content_types=["text"],
         state=None,
+    )
+    dp.register_message_handler(
+        lambda message, state: chatgpt_respond(
+            message, state, config, chatgpt_client
+        ),
+        state=ChatGPTState.awaiting_input,
+        content_types=["text"],
     )
 
     dp.register_callback_query_handler(
@@ -3132,6 +3196,8 @@ __all__ = [
     "register_handlers",
     "start_command",
     "help_command",
+    "chatgpt_menu",
+    "chatgpt_respond",
     "balance_command",
     "top_up_menu",
     "resend_pending_order",

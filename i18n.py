@@ -106,6 +106,8 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
             "Опишите идею 1–2 фразами. Пример: <code>кот идёт по неону и что-то рассказывает, стиль: киберпанк</code>  \n"
             "2) Сгенерировать по фото  \n"
             "Пришлите фото и, при желании, подпись-промпт.\n\n"
+            "3) ChatGPT  \n"
+            "Нажмите «ChatGPT», чтобы задать вопрос модели GPT-4.1 и получить ответ.\n\n"
             "💳 Оплата и кредиты  \n"
             "• 1 видео = 5 кредитов (~129 ₽)  \n"
             "• Пополнение — по ссылке оплаты (ЮKassa), кредиты начисляются автоматически.\n\n"
@@ -121,6 +123,7 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "buttons.balance": "💼 Баланс",
         "buttons.top_up": "💳 Пополнить баланс",
         "buttons.help": "ℹ️ Помощь",
+        "buttons.chatgpt": "ChatGPT",
         "buttons.offer": "📄 Оферта",
         "buttons.launch": "🚀 Запустить",
         "buttons.edit": "✏️ Изменить",
@@ -203,6 +206,9 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "errors.video_models_unavailable": "Нет доступных моделей видеогенерации. Обратитесь к оператору или попробуйте позже.",
         "errors.image_generation_disabled": "Генерация изображений недоступна. Обратитесь к оператору или попробуйте позже.",
         "errors.unknown": "неизвестная ошибка",
+        "errors.chatgpt_unavailable": "ChatGPT временно недоступен. Попробуйте позже.",
+        "errors.chatgpt_failed": "Не удалось получить ответ от GPT-4.1. Попробуйте ещё раз.",
+        "errors.chatgpt_empty": "Отправьте текстовый запрос для GPT-4.1.",
         "balance.info": "Ваш баланс: {credits} кредит(ов).",
         "payment.unavailable": "Оплата картой временно недоступна.",
         "payment.packages.title": "Доступные пакеты:",
@@ -213,6 +219,7 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "payment.creation_failed": "Не удалось создать платёж. Попробуйте позже.",
         "payment.link_failed": "Не удалось получить ссылку оплаты. Попробуйте позже.",
         "payment.received": "Оплата получена. Зачислено: {items}. Спасибо!",
+        "help.chatgpt": "Спросите GPT-4.1 любой вопрос, и я отвечу.",
         "web.return.unavailable": "<h1>Сервис временно недоступен</h1>",
         "web.return.not_found": "<h1>Платёж не найден</h1>",
         "web.return.success": "<h1>Оплата принята</h1><p>Спасибо за покупку!</p>",
