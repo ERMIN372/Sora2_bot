@@ -1,15 +1,16 @@
 """Google Sheets-backed data access layer for the video generation bot."""
 from __future__ import annotations
 
-import asyncio
-import copy
 import base64
 import binascii
 import json
 import logging
 import os
+import asyncio
+import copy
 from dataclasses import dataclass
 from datetime import datetime
+from decimal import ROUND_HALF_UP, Decimal
 from typing import Any, Awaitable, Callable, Dict, Iterable, List, Optional, Set, Tuple
 
 import gspread
@@ -86,6 +87,10 @@ _PAYMENTS_HEADERS = [
     "user_id",
     "amount_cp",
     "items",
+    "price_rub",
+    "credits_bought",
+    "bonus_credits",
+    "bonus_pct",
     "status",
     "payload",
     "metadata",
@@ -99,6 +104,31 @@ _PAYMENTS_HEADERS = [
     "type",
     "ref_payment_id",
 ]
+
+
+def _derive_payment_breakdown(
+    amount_cp: int, purchased_credits: Optional[int]
+) -> Tuple[Decimal, int, int, Decimal]:
+    amount_dec = Decimal(int(amount_cp)) / Decimal(100)
+    price_rub = amount_dec.quantize(Decimal("0.01"))
+    credits_bought = int(
+        price_rub.to_integral_value(rounding=ROUND_HALF_UP)
+    )
+    total_credits: Optional[int] = None
+    if purchased_credits is not None:
+        try:
+            total_credits = int(purchased_credits)
+        except (TypeError, ValueError):
+            total_credits = None
+    if total_credits is None:
+        total_credits = credits_bought
+    bonus_credits = max(0, total_credits - credits_bought)
+    bonus_pct = Decimal("0")
+    if credits_bought > 0 and bonus_credits > 0:
+        bonus_pct = (
+            Decimal(bonus_credits) / Decimal(credits_bought)
+        ).quantize(Decimal("0.0001"))
+    return price_rub, credits_bought, bonus_credits, bonus_pct
 
 _JOBS_HEADERS = [
     "job_id",
@@ -872,6 +902,12 @@ async def create_payment_record(
         record = state.rows.get(key)
         now = _now()
         metadata_str = json.dumps(metadata) if isinstance(metadata, dict) else _parse_str(metadata)
+        price_rub_val, credits_bought_val, bonus_credits_val, bonus_pct_val = _derive_payment_breakdown(
+            amount_cp, purchased_credits if purchased_credits is not None else items
+        )
+        price_str = f"{price_rub_val:.2f}"
+        bonus_pct_str = f"{bonus_pct_val:.4f}".rstrip("0").rstrip(".") or "0"
+
         if record:
             updates: Dict[str, Tuple[int, Any]] = {}
             row = state.index[key]
@@ -902,6 +938,27 @@ async def create_payment_record(
             if ref_payment_id is not None and record.get("ref_payment_id") != ref_payment_id:
                 record["ref_payment_id"] = ref_payment_id
                 updates["ref_payment_id"] = (row, ref_payment_id)
+            current_amount = record.get("amount_cp") or amount_cp
+            try:
+                amount_int = int(current_amount)
+            except (TypeError, ValueError):
+                amount_int = int(amount_cp)
+            purchased_total = record.get("purchased_credits")
+            price_rub_val, credits_bought_val, bonus_credits_val, bonus_pct_val = _derive_payment_breakdown(
+                amount_int, purchased_total if purchased_total is not None else purchased_credits
+            )
+            price_str = f"{price_rub_val:.2f}"
+            bonus_pct_str = f"{bonus_pct_val:.4f}".rstrip("0").rstrip(".") or "0"
+            derived_values = {
+                "price_rub": price_str,
+                "credits_bought": credits_bought_val,
+                "bonus_credits": bonus_credits_val,
+                "bonus_pct": bonus_pct_str,
+            }
+            for field, value in derived_values.items():
+                if record.get(field) != value:
+                    record[field] = value
+                    updates[field] = (row, value)
             if updates:
                 record["updated_at"] = now
                 updates["updated_at"] = (row, record["updated_at"])
@@ -914,6 +971,10 @@ async def create_payment_record(
             "user_id": user_id,
             "amount_cp": amount_cp,
             "items": items,
+            "price_rub": price_str,
+            "credits_bought": credits_bought_val,
+            "bonus_credits": bonus_credits_val,
+            "bonus_pct": bonus_pct_str,
             "status": status or "pending",
             "payload": payload or "",
             "metadata": metadata_str,
@@ -982,6 +1043,26 @@ async def update_payment_status_by_ext(
         if ref_payment_id is not None and ref_payment_id != record.get("ref_payment_id"):
             record["ref_payment_id"] = ref_payment_id
             updates["ref_payment_id"] = (row, ref_payment_id)
+        amount_raw = record.get("amount_cp")
+        try:
+            amount_int = int(amount_raw)
+        except (TypeError, ValueError):
+            amount_int = int(record.get("amount_cp") or 0)
+        price_rub_val, credits_bought_val, bonus_credits_val, bonus_pct_val = _derive_payment_breakdown(
+            amount_int, record.get("purchased_credits") if purchased_credits is None else purchased_credits
+        )
+        price_str = f"{price_rub_val:.2f}"
+        bonus_pct_str = f"{bonus_pct_val:.4f}".rstrip("0").rstrip(".") or "0"
+        derived_updates = {
+            "price_rub": price_str,
+            "credits_bought": credits_bought_val,
+            "bonus_credits": bonus_credits_val,
+            "bonus_pct": bonus_pct_str,
+        }
+        for field, value in derived_updates.items():
+            if record.get(field) != value:
+                record[field] = value
+                updates[field] = (row, value)
         if updates:
             record["updated_at"] = _now()
             updates["updated_at"] = (row, record["updated_at"])

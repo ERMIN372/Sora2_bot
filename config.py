@@ -4,7 +4,7 @@ from __future__ import annotations
 import logging
 import os
 from dataclasses import dataclass, field
-from decimal import ROUND_CEILING, Decimal
+from decimal import ROUND_CEILING, ROUND_HALF_UP, Decimal
 from typing import Dict, Iterable, List, Mapping, Optional, Tuple
 
 from dotenv import load_dotenv
@@ -63,7 +63,31 @@ def env_float(key: str, default: float) -> float:
 # Pricing constants
 # ---------------------------------------------------------------------------
 
-DEFAULT_CREDIT_PRICE_RUB = Decimal("25.8")
+CREDIT_COST = Decimal("1")
+
+PRODUCT_PRICING: Dict[str, Decimal] = {
+    "sora": Decimal("80"),
+    "veo3": Decimal("89"),
+    "image": Decimal("5"),
+}
+
+PRODUCT_PRICE_ALIASES: Dict[str, str] = {
+    "sora_video": "sora",
+    "veo_video": "veo3",
+    "gemini_video": "veo3",
+    "veo": "veo3",
+    "gemini-image": "image",
+    "image_generation": "image",
+}
+
+TOP_UP_PACKAGES: Dict[str, Dict[str, Decimal]] = {
+    "300": {"amount": Decimal("300"), "bonus": Decimal("0.05")},
+    "700": {"amount": Decimal("700"), "bonus": Decimal("0.08")},
+    "1500": {"amount": Decimal("1500"), "bonus": Decimal("0.12")},
+    "3000": {"amount": Decimal("3000"), "bonus": Decimal("0.15")},
+}
+
+DEFAULT_CREDIT_PRICE_RUB = CREDIT_COST
 DEFAULT_MARKUP_PCT = Decimal("30")
 DEFAULT_FIX_FEE_RUB = Decimal("0")
 _DEFAULT_PROVIDER_COSTS: Mapping[str, Decimal] = {
@@ -71,17 +95,19 @@ _DEFAULT_PROVIDER_COSTS: Mapping[str, Decimal] = {
 }
 
 DEFAULT_PRODUCTS: Dict[str, Decimal] = {
-    "sora_video": Decimal("5"),
+    name: Decimal(value) for name, value in PRODUCT_PRICING.items()
 }
+for alias, target in PRODUCT_PRICE_ALIASES.items():
+    DEFAULT_PRODUCTS[alias] = DEFAULT_PRODUCTS[target]
 
 @dataclass(frozen=True)
 class CreditPackage:
-    """A bundle of credits sold for a fixed price in rubles."""
+    """A bundle of credits sold for a fixed price in rubles with bonus support."""
 
     package_id: str
     credits: int
     price_rub: Decimal
-    discount_pct: Decimal = Decimal("0")
+    bonus_pct: Decimal = Decimal("0")
 
     def __post_init__(self) -> None:  # pragma: no cover - dataclass validation
         if self.credits <= 0:
@@ -107,38 +133,52 @@ class CreditPackage:
         value = self.price_rub.quantize(Decimal("0.01"))
         return f"{value:.2f}".replace(".", ",")
 
+    @property
+    def base_credits(self) -> int:
+        """Return credits purchased excluding the bonus."""
 
-_DEFAULT_PACKAGE_LAYOUT: Tuple[Tuple[str, int], ...] = (
-    ("c5", 5),
-    ("c10", 10),
-    ("c25", 25),
-    ("c50", 50),
-    ("c150", 150),
-)
+        return int((self.price_rub / CREDIT_COST).to_integral_value(rounding=ROUND_HALF_UP))
+
+    @property
+    def bonus_credits(self) -> int:
+        """Return the number of bonus credits included in the package."""
+
+        return max(0, self.credits_int - self.base_credits)
+
+    @property
+    def bonus_percent(self) -> Decimal:
+        """Return the bonus percentage scaled to 0-100."""
+
+        return (self.bonus_pct * Decimal("100")).quantize(Decimal("0.01"))
 
 
-def _build_packages(
-    credit_price_rub: Decimal, discounts: Optional[Mapping[str, Decimal]] = None
+def _build_credit_packages(
+    packages: Mapping[str, Mapping[str, Decimal]]
 ) -> Tuple[CreditPackage, ...]:
-    discounts = discounts or {}
-    packages: list[CreditPackage] = []
-    for package_id, credits in _DEFAULT_PACKAGE_LAYOUT:
-        discount = discounts.get(package_id, Decimal("0"))
-        base_price = credit_price_rub * Decimal(credits)
-        price = base_price * (Decimal("100") - discount) / Decimal("100")
-        packages.append(
+    result: list[CreditPackage] = []
+    for package_id, data in packages.items():
+        amount = Decimal(data.get("amount") or package_id)
+        bonus_pct = Decimal(data.get("bonus", Decimal("0")))
+        base_credits = int(
+            (amount / CREDIT_COST).to_integral_value(rounding=ROUND_HALF_UP)
+        )
+        bonus_credits = int(
+            (amount * bonus_pct).to_integral_value(rounding=ROUND_HALF_UP)
+        )
+        total_credits = max(1, base_credits + bonus_credits)
+        result.append(
             CreditPackage(
-                package_id,
-                credits,
-                price.quantize(Decimal("0.01")),
-                discount_pct=discount,
+                package_id=package_id,
+                credits=total_credits,
+                price_rub=amount.quantize(Decimal("0.01")),
+                bonus_pct=bonus_pct,
             )
         )
-    return tuple(packages)
+    return tuple(result)
 
 
-DEFAULT_CREDIT_PACKAGES: Tuple[CreditPackage, ...] = _build_packages(
-    DEFAULT_CREDIT_PRICE_RUB
+DEFAULT_CREDIT_PACKAGES: Tuple[CreditPackage, ...] = _build_credit_packages(
+    TOP_UP_PACKAGES
 )
 
 
@@ -240,7 +280,6 @@ class Config:
     )
     products: Mapping[str, Decimal] = field(default_factory=lambda: DEFAULT_PRODUCTS.copy())
     credit_packages: Tuple[CreditPackage, ...] = DEFAULT_CREDIT_PACKAGES
-    package_discounts: Mapping[str, Decimal] = field(default_factory=dict)
     payments_read_only: bool = False
     terms_url: str = "https://telegra.ph/Oferta-10-15-3"
     admin_ids: Tuple[int, ...] = ()
@@ -351,19 +390,25 @@ class Config:
 
     def format_price_tag(self, credits: int) -> str:
         rub_str = self.format_rubles(self.rubles_for_credits(credits))
-        return f"{credits} кредитов (~{rub_str})"
+        return f"{rub_str} (спишем {credits} кредитов)"
 
-    def get_product_credits(self, key: str = "sora_video") -> int:
+    def get_product_credits(self, key: str = "sora") -> int:
         value = self.products.get(key)
+        if value is None:
+            alias = PRODUCT_PRICE_ALIASES.get(key)
+            if alias:
+                value = self.products.get(alias) or DEFAULT_PRODUCTS.get(alias)
+            else:
+                value = DEFAULT_PRODUCTS.get(key)
         if value is None:
             return 0
         return int(Decimal(value))
 
     @property
     def generation_cost_credits(self) -> int:
-        return self.get_product_credits("sora_video")
+        return self.get_product_credits("sora")
 
-    def generation_cost_approx_rubles(self, key: str = "sora_video") -> Decimal:
+    def generation_cost_approx_rubles(self, key: str = "sora") -> Decimal:
         credits = self.get_product_credits(key)
         if credits <= 0:
             return Decimal("0")
@@ -437,26 +482,6 @@ def _get_env_int_list(key: str) -> Tuple[int, ...]:
         except ValueError as exc:  # pragma: no cover - configuration guard
             raise RuntimeError(f"Environment variable {key!r} must contain integers") from exc
     return tuple(result)
-
-
-def _parse_package_discounts(raw: Optional[str]) -> Dict[str, Decimal]:
-    if not raw:
-        return {}
-    items = {}
-    for part in raw.split(","):
-        if not part:
-            continue
-        key, _, value = part.partition(":")
-        key = key.strip()
-        if not key or not value:
-            continue
-        try:
-            items[key] = Decimal(value)
-        except Exception as exc:  # pragma: no cover - config guard
-            raise RuntimeError(
-                f"Invalid discount value for package {key!r}: {value!r}"
-            ) from exc
-    return items
 
 
 def load_config() -> Config:
@@ -596,8 +621,6 @@ def load_config() -> Config:
         fix_fee_rub=_get_env_decimal("FIX_FEE_RUB", DEFAULT_FIX_FEE_RUB),
         provider_costs=_load_provider_costs(prefixes),
     )
-    package_discounts = _parse_package_discounts(os.getenv("CREDIT_PACKAGE_DISCOUNTS"))
-
     return Config(
         bot_token=bot_token,
         gemini_api_key=gemini_api_key,
@@ -632,8 +655,7 @@ def load_config() -> Config:
         gs_jobs_sheet=jobs_sheet,
         gs_errors_sheet=errors_sheet,
         pricing=pricing,
-        credit_packages=_build_packages(pricing.credit_price_rub, package_discounts),
-        package_discounts=package_discounts,
+        credit_packages=_build_credit_packages(TOP_UP_PACKAGES),
         jobs_concurrency=_get_env_int("JOBS_CONCURRENCY", Config.jobs_concurrency),
         max_jobs_per_user=_get_env_int("MAX_JOBS_PER_USER", Config.max_jobs_per_user),
         request_timeout=_get_env_float("REQUEST_TIMEOUT", Config.request_timeout),

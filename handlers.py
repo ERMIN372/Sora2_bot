@@ -150,7 +150,7 @@ class OrderContext:
     size: str
     model: str
     provider: Optional[str] = None
-    product: str = "sora_video"
+    product: str = "sora"
     credits_cost: int = 0
     model_label: str = ""
     image_file_id: Optional[str] = None
@@ -287,6 +287,29 @@ def _provider_for_model(model: Optional[str], config: Config) -> str:
     if config.gemini_video_enabled:
         return "veo"
     return "video"
+
+
+def _resolve_product_key(
+    category: str,
+    provider: Optional[str],
+    model: Optional[str],
+    product_hint: Optional[str] = None,
+) -> str:
+    if product_hint:
+        return product_hint
+    if category == "image":
+        return "image"
+    provider_key = (provider or "").lower()
+    if provider_key in {"gemini-image", "image", "gemini"}:
+        return "image"
+    if provider_key.startswith("veo") or provider_key in {"gemini-video", "veo"}:
+        return "veo3"
+    model_key = _normalise_video_model_name(model or "")
+    if _is_veo_video_model_name(model_key):
+        return "veo3"
+    if _is_sora_video_model_name(model_key):
+        return "sora"
+    return "sora"
 
 
 def _resolve_model_label(model: str, config: Config) -> str:
@@ -775,7 +798,8 @@ def _create_order(
 ) -> OrderContext:
     size = session.last_size if include_size else ""
     aspect_ratio = session.last_aspect_ratio if include_size else None
-    credits_cost = config.get_product_credits(product)
+    resolved_product = _resolve_product_key(category, provider, model, product)
+    credits_cost = config.get_product_credits(resolved_product)
     if credits_cost <= 0:
         credits_cost = config.generation_cost_credits
     return OrderContext(
@@ -785,7 +809,7 @@ def _create_order(
         size=size,
         model=model,
         provider=provider,
-        product=product,
+        product=resolved_product,
         credits_cost=credits_cost,
         model_label=model_label or _resolve_model_label(model, config),
         image_file_id=image_file_id,
@@ -910,7 +934,9 @@ async def flow_back_callback_handler(
         return
     data = await state.get_data()
     if target == "video_model":
-        product = data.get("product", "sora_video")
+        current_model = data.get("model")
+        current_provider = data.get("provider")
+        product = _resolve_product_key("video", current_provider, current_model, data.get("product"))
         await state.update_data(
             flow_type="video",
             model=None,
@@ -935,7 +961,7 @@ async def flow_back_callback_handler(
         model = data.get("model") or config.default_video_model
         provider = data.get("provider") or model
         model_label = data.get("model_label") or _resolve_model_label(model, config)
-        product = data.get("product", "sora_video")
+        product = _resolve_product_key("video", provider, model, data.get("product"))
         await state.update_data(
             flow_type="video",
             model=model,
@@ -960,7 +986,7 @@ async def flow_back_callback_handler(
         model = data.get("model") or config.gemini_model_image
         provider = data.get("provider") or "gemini-image"
         model_label = data.get("model_label") or _resolve_model_label(model, config)
-        product = data.get("product", "sora_video")
+        product = _resolve_product_key("image", provider, model, data.get("product"))
         await state.update_data(
             flow_type="image",
             model=model,
@@ -986,9 +1012,19 @@ async def flow_back_callback_handler(
 def _format_packages_list(config: Config) -> str:
     lines: list[str] = [i18n.t("payment.packages.title")]
     for package in config.credit_packages:
-        credits_label = format_credits(package.credits_int)
         price_label = config.format_rubles(package.price_rub)
-        lines.append(i18n.t("payment.packages.line", credits=credits_label, price=price_label))
+        total_label = format_credits(package.credits_int)
+        bonus_label = format_credits(package.bonus_credits)
+        bonus_pct = int(package.bonus_percent)
+        lines.append(
+            i18n.t(
+                "payment.packages.line",
+                price=price_label,
+                total=total_label,
+                bonus=bonus_label,
+                bonus_pct=bonus_pct,
+            )
+        )
     lines.append("")
     lines.append(i18n.t("payment.store.instructions"))
     terms_url = (config.terms_url or "").strip()
@@ -1005,7 +1041,12 @@ def _build_packages_keyboard(config: Config) -> Optional[InlineKeyboardMarkup]:
         return None
     rows: list[list[InlineKeyboardButton]] = []
     for package in config.credit_packages:
-        text = format_credits(package.credits_int)
+        amount_value = int(package.price_rub)
+        bonus_pct = int(package.bonus_percent)
+        if bonus_pct > 0:
+            text = f"{amount_value}₽ +{bonus_pct}%"
+        else:
+            text = f"{amount_value}₽"
         rows.append(
             [
                 InlineKeyboardButton(
@@ -2506,13 +2547,16 @@ async def generate_video_menu(
         await _send_main_menu(message, config)
         return
     keyboard = _build_video_models_keyboard(options)
+    default_model = config.default_video_model
+    default_provider = _provider_for_model(default_model, config)
+    default_product = _resolve_product_key("video", default_provider, default_model)
     await state.update_data(
         flow_type="video",
         model=None,
         provider=None,
         model_label=None,
         include_size=True,
-        product="sora_video",
+        product=default_product,
     )
     await GenerationStates.video_model.set()
     await message.answer(i18n.t("video.models.prompt"), reply_markup=keyboard)
@@ -2535,7 +2579,7 @@ async def generate_image_menu(
         provider="gemini-image",
         model_label=model_label,
         include_size=False,
-        product="sora_video",
+        product=_resolve_product_key("image", "gemini-image", config.gemini_model_image),
     )
     await GenerationStates.image_mode.set()
     await message.answer(
@@ -2570,7 +2614,6 @@ async def handle_text_input(
     provider = state_data.get("provider") or model
     model_label = state_data.get("model_label") or _resolve_model_label(model, config)
     include_size = bool(state_data.get("include_size", category == "video"))
-    product = state_data.get("product", "sora_video")
     model, provider, model_label = await _ensure_supported_video_model(
         message,
         category=category,
@@ -2579,6 +2622,7 @@ async def handle_text_input(
         model_label=model_label,
         config=config,
     )
+    product = _resolve_product_key(category, provider, model, state_data.get("product"))
     raw_prompt = (message.text or "").strip()
     prompt = raw_prompt
     if _detect_pro_request(raw_prompt):
@@ -2623,7 +2667,6 @@ async def handle_photo_input(
     provider = state_data.get("provider") or model
     model_label = state_data.get("model_label") or _resolve_model_label(model, config)
     include_size = bool(state_data.get("include_size", category == "video"))
-    product = state_data.get("product", "sora_video")
     model, provider, model_label = await _ensure_supported_video_model(
         message,
         category=category,
@@ -2632,6 +2675,7 @@ async def handle_photo_input(
         model_label=model_label,
         config=config,
     )
+    product = _resolve_product_key(category, provider, model, state_data.get("product"))
     if not message.photo:
         await _send_generation_prompt(
             message,
@@ -2689,7 +2733,7 @@ async def video_model_callback_handler(
         provider=option.provider,
         model_label=option.label,
         include_size=True,
-        product="sora_video",
+        product=_resolve_product_key("video", option.provider, option.model),
     )
     await GenerationStates.video_mode.set()
     try:
@@ -2722,7 +2766,7 @@ async def video_mode_callback_handler(
     provider = data.get("provider") or model
     model_label = data.get("model_label") or _resolve_model_label(model, config)
     include_size = True
-    product = data.get("product", "sora_video")
+    product = _resolve_product_key("video", provider, model, data.get("product"))
     await state.update_data(
         flow_type="video",
         mode=mode,
@@ -2766,7 +2810,7 @@ async def image_mode_callback_handler(
     model = data.get("model") or config.gemini_model_image
     provider = data.get("provider") or "gemini-image"
     model_label = data.get("model_label") or _resolve_model_label(model, config)
-    product = data.get("product", "sora_video")
+    product = _resolve_product_key("image", provider, model, data.get("product"))
     await state.update_data(
         flow_type="image",
         mode=mode,
@@ -2877,7 +2921,9 @@ async def order_callback_handler(
             provider=order.provider,
             model_label=model_label,
             include_size=include_size,
-            product=order.product or "sora_video",
+            product=_resolve_product_key(
+                order.category, order.provider, order.model, order.product
+            ),
         )
         await _send_generation_prompt(
             callback.message,
