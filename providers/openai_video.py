@@ -985,7 +985,6 @@ class OpenAIVideoClient(BaseProviderClient):
                 request["size"] = size_value
             else:
                 request.pop("size", None)
-        request["n"] = 1
         request["response_format"] = "url"
         extras = self._extract_local_extras(
             original_settings=original_settings,
