@@ -157,7 +157,7 @@ def _init_application(config: Config) -> ApplicationState:
         except RuntimeError:
             log.warning("OpenAI chat client is not configured; skipping ChatGPT menu", exc_info=True)
         else:
-            log.info("OpenAI ChatGPT client initialised model=gpt-4.1-turbo")
+            log.info("OpenAI ChatGPT client initialised model=gpt-4o")
 
     default_provider = config.default_video_model
     if default_provider not in providers:

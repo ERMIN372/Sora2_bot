@@ -18,7 +18,7 @@ log = logging.getLogger(__name__)
 class OpenAIChatClient:
     """Thin wrapper around the OpenAI Chat Completions API."""
 
-    def __init__(self, *, config: Config, model: str = "gpt-4.1-turbo") -> None:
+    def __init__(self, *, config: Config, model: str = "gpt-4o") -> None:
         if AsyncOpenAI is None:
             raise RuntimeError("openai package is required for ChatGPT integration")
         api_key = (config.openai_key or "").strip()
