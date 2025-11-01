@@ -3625,6 +3625,12 @@ async def diag_openai_video_command(
     last_request_id = diagnostics.get("last_content_request_id") or "—"
     last_video_id = diagnostics.get("last_content_video_id") or "—"
     last_timestamp = diagnostics.get("last_content_timestamp")
+    last_download_url = diagnostics.get("last_content_url") or "—"
+    last_download_note = diagnostics.get("last_content_note") or "—"
+    last_download_duration = diagnostics.get("last_content_duration_ms")
+    last_download_asset = diagnostics.get("last_content_asset_id") or "—"
+    last_download_variant = diagnostics.get("last_content_variant") or "—"
+    last_request_url = diagnostics.get("last_request_url") or "—"
     if last_status is None:
         last_status_text = "—"
     else:
@@ -3639,7 +3645,19 @@ async def diag_openai_video_command(
         f"organization_id: {escape_html(diagnostics.get('organization_id') or '—')}",
         f"headers: {headers_text}",
         f"content_endpoint: {escape_html(content_endpoint)}",
-        f"download_status: status={escape_html(last_status_text)} request_id={escape_html(str(last_request_id))} video_id={escape_html(str(last_video_id))} ts={escape_html(last_timestamp_text)}",
+        f"last_request_url: {escape_html(str(last_request_url))}",
+        (
+            "download_status: "
+            f"status={escape_html(last_status_text)} "
+            f"request_id={escape_html(str(last_request_id))} "
+            f"video_id={escape_html(str(last_video_id))} "
+            f"url={escape_html(str(last_download_url))} "
+            f"note={escape_html(str(last_download_note))} "
+            f"asset={escape_html(str(last_download_asset))} "
+            f"variant={escape_html(str(last_download_variant))} "
+            f"ts={escape_html(last_timestamp_text)} "
+            f"duration_ms={escape_html(str(last_download_duration) if last_download_duration is not None else '—')}"
+        ),
         f"available_models: {escape_html(available_models_text)}",
     ]
     queue_obj = getattr(job_queue, "_queue", None)
@@ -3680,7 +3698,7 @@ async def diag_openai_video_command(
         lines.append(f"models.list: error={escape_html(str(exc))}")
     else:
         models_text = ", ".join(models) if models else "—"
-        lines.append(f"models: {escape_html(models_text)}")
+        lines.append(f"models.list: {escape_html(models_text)}")
         filtered_models = _filter_video_model_ids(models)
         if filtered_models:
             preview = ", ".join(filtered_models[:5])
@@ -3717,6 +3735,7 @@ async def diag_openai_video_command(
         for entry in list(history)[-3:][::-1]:
             method = str(entry.get("method") or "?")
             path = str(entry.get("path") or "?")
+            url = str(entry.get("url") or "")
             dropped = entry.get("dropped_fields") or ()
             dropped_text = ", ".join(dropped) if dropped else "—"
             correlation = str(entry.get("correlation_id") or "")
@@ -3748,6 +3767,8 @@ async def diag_openai_video_command(
                 if err_parts:
                     meta_parts.append("error: " + " — ".join(err_parts))
             base_text = escape_html(f"{method} {path}")
+            if url and url != path:
+                meta_parts.append(f"url={url}")
             details = "; ".join(escape_html(part) for part in meta_parts if part)
             if details:
                 lines.append(f"• {base_text} ({details})")

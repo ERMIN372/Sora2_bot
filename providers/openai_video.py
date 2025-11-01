@@ -202,11 +202,19 @@ class OpenAIVideoClient(BaseProviderClient):
             "content_endpoint": f"{self._content_api_root}/v1beta/videos/{{video_id}}/content",
             "available_models": list(self._available_models),
         }
+        if self._last_request:
+            diagnostics["last_request_url"] = self._last_request.get("url")
+            diagnostics["last_request_endpoint"] = self._last_request.get("path")
         if self._last_download_meta:
             diagnostics["last_content_status"] = self._last_download_meta.get("status_code")
             diagnostics["last_content_request_id"] = self._last_download_meta.get("request_id")
             diagnostics["last_content_video_id"] = self._last_download_meta.get("video_id")
             diagnostics["last_content_timestamp"] = self._last_download_meta.get("timestamp")
+            diagnostics["last_content_url"] = self._last_download_meta.get("url")
+            diagnostics["last_content_duration_ms"] = self._last_download_meta.get("duration_ms")
+            diagnostics["last_content_note"] = self._last_download_meta.get("note")
+            diagnostics["last_content_asset_id"] = self._last_download_meta.get("asset_id")
+            diagnostics["last_content_variant"] = self._last_download_meta.get("variant")
         return diagnostics
 
     async def create(
@@ -738,7 +746,12 @@ class OpenAIVideoClient(BaseProviderClient):
             "GET",
             path,
             params=query or None,
-            diagnostic={"dropped_fields": dropped_fields},
+            diagnostic={
+                "dropped_fields": dropped_fields,
+                "video_id": video_id,
+                "asset_id": asset_id,
+                "variant": query.get("variant") if query else None,
+            },
         )
         log.debug(
             "openai.video.content video_id=%s asset_id=%s bytes=%s",
@@ -750,24 +763,18 @@ class OpenAIVideoClient(BaseProviderClient):
 
     async def list_models(self) -> List[str]:
         data, status_code, duration_ms = await self._request_json(
-            "GET", "/models", diagnostic={"dropped_fields": []}
+            "GET", "/models/list", diagnostic={"dropped_fields": []}
         )
         log.debug("openai.video.list_models status=%s duration_ms=%s", status_code, duration_ms)
-        models: List[str] = []
-        if isinstance(data, Mapping):
-            entries = data.get("data")
-            if isinstance(entries, list):
-                for item in entries:
-                    if isinstance(item, Mapping):
-                        model_id = item.get("id")
-                        if isinstance(model_id, str) and model_id:
-                            models.append(model_id)
+        models = self._extract_model_ids(data)
         if models:
-            for model in models:
-                if model.startswith("sora") or model.startswith("gpt"):
-                    self._supported_models.add(model)
+            preserved: set[str] = set(_DEFAULT_VIDEO_MODELS)
+            if self._default_model:
+                preserved.add(self._default_model)
+            preserved.update(models)
+            self._supported_models = preserved
         self._available_models = tuple(sorted(models))
-        return models
+        return sorted(models)
 
     def get_video_object(self, payload: Any) -> Optional[Dict[str, Any]]:
         if isinstance(payload, Mapping):
@@ -971,10 +978,12 @@ class OpenAIVideoClient(BaseProviderClient):
         dropped_fields: Optional[List[str]] = None,
         correlation_id: Optional[str] = None,
     ) -> None:
+        absolute_url = self._absolute_url(path)
         entry: Dict[str, Any] = {
             "method": method,
             "path": path,
             "endpoint": path,
+            "url": absolute_url,
             "dropped_fields": tuple(sorted(set(dropped_fields or []))),
             "correlation_id": correlation_id or "",
             "timestamp": time.monotonic(),
@@ -1003,6 +1012,7 @@ class OpenAIVideoClient(BaseProviderClient):
             else:
                 normalised.pop("dropped_fields", None)
         normalised.setdefault("endpoint", self._last_request.get("path", ""))
+        normalised.setdefault("url", self._last_request.get("url", ""))
         normalised.setdefault("method", self._last_request.get("method", ""))
         if "status" not in normalised and "status_code" in normalised:
             normalised["status"] = normalised["status_code"]
@@ -1037,9 +1047,11 @@ class OpenAIVideoClient(BaseProviderClient):
             dropped_fields = diagnostic.get("dropped_fields")
         elif self._last_request.get("dropped_fields"):
             dropped_fields = self._last_request["dropped_fields"]
+        absolute_url = self._absolute_url(path)
         updates = {
             "method": method,
             "endpoint": path,
+            "url": absolute_url,
             "status_code": status_code,
             "status": status_code,
             "duration_ms": duration_ms,
@@ -1047,6 +1059,70 @@ class OpenAIVideoClient(BaseProviderClient):
             "dropped_fields": dropped_fields,
         }
         self._update_last_diagnostic(**updates)
+
+    def _absolute_url(self, path: str) -> str:
+        if not path:
+            return self._base_url
+        if isinstance(path, str) and re.match(r"^https?://", path):
+            return path
+        normalised = path if isinstance(path, str) else str(path)
+        if not normalised.startswith("/"):
+            normalised = f"/{normalised}"
+        return f"{self._base_url}{normalised}"
+
+    def _update_last_download_meta(
+        self,
+        *,
+        status_code: int,
+        request_id: str,
+        url: str,
+        duration_ms: int,
+        diagnostic: Optional[Mapping[str, Any]],
+        note: Optional[str] = None,
+    ) -> None:
+        meta: Dict[str, Any] = {
+            "status_code": status_code,
+            "request_id": request_id or "",
+            "url": url,
+            "duration_ms": duration_ms,
+            "timestamp": time.time(),
+        }
+        if diagnostic:
+            video_id = diagnostic.get("video_id")
+            if video_id:
+                meta["video_id"] = str(video_id)
+            asset_id = diagnostic.get("asset_id")
+            if asset_id:
+                meta["asset_id"] = str(asset_id)
+            variant = diagnostic.get("variant")
+            if variant:
+                meta["variant"] = str(variant)
+        if note:
+            meta["note"] = note
+        self._last_download_meta = meta
+
+    def _extract_model_ids(self, payload: Any) -> List[str]:
+        results: set[str] = set()
+
+        def visit(node: Any, *, context: Optional[str] = None) -> None:
+            if isinstance(node, Mapping):
+                model_id = node.get("id")
+                if isinstance(model_id, str) and model_id.strip():
+                    results.add(model_id.strip())
+                for key in ("data", "models", "items", "owned", "available", "results"):
+                    if key in node:
+                        visit(node[key], context=key)
+            elif isinstance(node, list):
+                for item in node:
+                    visit(item, context=context)
+            elif isinstance(node, str):
+                if context in {"models", "data", "items", "owned", "available", "results"}:
+                    candidate = node.strip()
+                    if candidate:
+                        results.add(candidate)
+
+        visit(payload)
+        return sorted(results)
 
     def _log_request(
         self,
@@ -1291,7 +1367,7 @@ class OpenAIVideoClient(BaseProviderClient):
         diagnostic: Optional[Dict[str, Any]] = None,
     ) -> Tuple[bytes, Dict[str, str]]:
         session = await self._ensure_session()
-        url = f"{self._base_url}{path}"
+        url = self._absolute_url(path)
         headers = self._build_headers()
         merged_params = self._merge_params(params)
         if merged_params is None:
@@ -1324,6 +1400,7 @@ class OpenAIVideoClient(BaseProviderClient):
                     context=diagnostic,
                 )
                 meta = getattr(self, "_last_response_meta", {}) or {}
+                request_id = meta.get("request_id", "")
                 if response.status >= 400:
                     message = body.decode("utf-8", errors="ignore")
                     api_error = ProviderAPIError(
@@ -1341,8 +1418,16 @@ class OpenAIVideoClient(BaseProviderClient):
                         path=path,
                         status_code=response.status,
                         duration_ms=duration_ms,
-                        request_id=meta.get("request_id", ""),
+                        request_id=request_id,
                         diagnostic=diagnostic,
+                    )
+                    self._update_last_download_meta(
+                        status_code=response.status,
+                        request_id=request_id,
+                        url=url,
+                        duration_ms=duration_ms,
+                        diagnostic=diagnostic,
+                        note="error",
                     )
                     self._update_last_diagnostic(
                         error={
@@ -1358,7 +1443,14 @@ class OpenAIVideoClient(BaseProviderClient):
                     path=path,
                     status_code=response.status,
                     duration_ms=duration_ms,
-                    request_id=meta.get("request_id", ""),
+                    request_id=request_id,
+                    diagnostic=diagnostic,
+                )
+                self._update_last_download_meta(
+                    status_code=response.status,
+                    request_id=request_id,
+                    url=url,
+                    duration_ms=duration_ms,
                     diagnostic=diagnostic,
                 )
                 return body, dict(response.headers)
@@ -1389,6 +1481,14 @@ class OpenAIVideoClient(BaseProviderClient):
                 request_id=(self._last_response_meta or {}).get("request_id", ""),
                 diagnostic=diagnostic,
             )
+            self._update_last_download_meta(
+                status_code=api_error.status_code,
+                request_id=(self._last_response_meta or {}).get("request_id", ""),
+                url=url,
+                duration_ms=duration_ms,
+                diagnostic=diagnostic,
+                note="timeout",
+            )
             raise api_error from exc
         except ProviderAPIError:
             raise
@@ -1400,6 +1500,14 @@ class OpenAIVideoClient(BaseProviderClient):
                 duration_ms=int((time.monotonic() - start) * 1000),
                 request_id=(self._last_response_meta or {}).get("request_id", ""),
                 diagnostic=diagnostic,
+            )
+            self._update_last_download_meta(
+                status_code=0,
+                request_id=(self._last_response_meta or {}).get("request_id", ""),
+                url=url,
+                duration_ms=int((time.monotonic() - start) * 1000),
+                diagnostic=diagnostic,
+                note="exception",
             )
             raise
 
