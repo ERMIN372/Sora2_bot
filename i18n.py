@@ -109,11 +109,13 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
             "3) ChatGPT  \n"
             "Нажмите «ChatGPT», чтобы задать вопрос модели GPT-4.1 и получить ответ.\n\n"
             "💳 Оплата и кредиты  \n"
-            "• 1 видео = 5 кредитов (~129 ₽)  \n"
-            "• Пополнение — по ссылке оплаты (ЮKassa), кредиты начисляются автоматически.\n\n"
+            "• OpenAI Sora 2 — 80 ₽ за видео  \n"
+            "• Gemini Veo 3 — 89 ₽ за видео  \n"
+            "• Фото — 5 ₽ за изображение  \n"
+            "• Пополнение: 300₽ (+5%), 700₽ (+8%), 1500₽ (+12%), 3000₽ (+15%) — YooKassa, бонус начисляется автоматически.\n\n"
             "🔁 Статусы  \n"
             "После запуска увидите: «заказ принят», затем «генерирую…», по готовности пришлём ролик.  \n"
-            "Если генерация не удалась, 5 кредитов возвращаются.\n\n"
+            "Если генерация не удалась, стоимость возвращается.\n\n"
             "📘 Команды  \n"
             "/start — меню  \n"
             "/balance — баланс и пополнение"
@@ -159,7 +161,7 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "video.common.video_id": "video_id: {video_id}",
         "video.common.corr_id": "corr_id: {corr_id}",
         "video.common.model": "модель: {model}",
-        "video.common.credits_deducted": "Списано кредитов: {credits}",
+        "video.common.credits_deducted": "Списано: {credits} ₽",
         "video.common.invalid_json": "Не удалось разобрать параметры. Передайте корректный JSON.",
         "video.common.expected_object": "Ожидался JSON-объект с параметрами.",
         "video.remix.usage": "Использование: /video_remix <video_id> {\"prompt\": \"описание\"}",
@@ -262,8 +264,8 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "errors.chatgpt_empty": "Отправьте текстовый запрос для GPT-4.1.",
         "balance.info": "Ваш баланс: {credits} кредит(ов).",
         "payment.unavailable": "Оплата картой временно недоступна.",
-        "payment.packages.title": "Доступные пакеты:",
-        "payment.packages.line": "{credits} — {price}",
+        "payment.packages.title": "Пополните баланс (1 кредит = 1 ₽):",
+        "payment.packages.line": "{price} → {total} (бонус {bonus} · +{bonus_pct}%)",
         "payment.store.instructions": "Перейдите по ссылке для оплаты. После оплаты кредиты начислятся автоматически.",
         "payment.terms_notice": "«Оплачивая, вы принимаете условия Оферты: {terms_url}»",
         "payment.unknown_package": "Неизвестный пакет оплаты.",

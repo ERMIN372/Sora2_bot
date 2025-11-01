@@ -39,6 +39,10 @@ def build_return_url(order_id: str) -> str:
 
 
 def _build_metadata(package: CreditPackage, user_id: int, idemp: str) -> Dict[str, Any]:
+    base_credits = package.base_credits
+    bonus_credits = package.bonus_credits
+    bonus_pct = package.bonus_pct
+    price_rub = package.price_rub.quantize(Decimal("0.01"))
     return {
         "kind": "credits",
         "package_id": package.package_id,
@@ -48,6 +52,10 @@ def _build_metadata(package: CreditPackage, user_id: int, idemp: str) -> Dict[st
         "idempotency_key": idemp,
         "idemp": idemp,
         "order_id": idemp,
+        "price_rub": str(price_rub),
+        "credits_bought": base_credits,
+        "bonus_credits": bonus_credits,
+        "bonus_pct": str(bonus_pct),
     }
 
 
