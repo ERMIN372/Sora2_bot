@@ -11,6 +11,7 @@ import time
 import uuid
 from dataclasses import dataclass
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Mapping, Optional, Tuple
 
 from config import Config
@@ -1568,19 +1569,6 @@ class JobQueue:
                     provider_key,
                     list(result.assets.keys()),
                 )
-                gsheets_ok = True
-                try:
-                    await self._db.update_job(
-                        pending.job_id,
-                        "completed",
-                        video_url=video_url_value,
-                        file_url=video_url_value,
-                        video_id=pending.video_id,
-                        error=None,
-                    )
-                except Exception:
-                    log.exception("Failed to update job %s as completed", pending.job_id)
-                    gsheets_ok = False
                 if primary_asset:
                     job_extra.setdefault("primary_asset", primary_asset)
                 done_extra: Dict[str, Any] = {"assets": list(result.assets.keys())}
@@ -1595,6 +1583,40 @@ class JobQueue:
                 if pending.video_id:
                     done_extra["video_id"] = pending.video_id
                 done_extra["video_label"] = display_label
+                download_handler = getattr(client, "download_content", None)
+                if callable(download_handler) and pending.video_id:
+                    handled = await self._handle_inline_download(
+                        pending,
+                        client=client,
+                        provider_key=provider_key,
+                        result=result,
+                        video_url_value=video_url_value,
+                        display_label=display_label,
+                        done_extra=done_extra,
+                        job_extra=job_extra,
+                    )
+                    if handled:
+                        await self._release_gate(pending, reason="success", status="completed")
+                    else:
+                        await self._release_gate(
+                            pending,
+                            reason="download_failed",
+                            status="failed_to_download",
+                        )
+                    return
+                gsheets_ok = True
+                try:
+                    await self._db.update_job(
+                        pending.job_id,
+                        "completed",
+                        video_url=video_url_value,
+                        file_url=video_url_value,
+                        video_id=pending.video_id,
+                        error=None,
+                    )
+                except Exception:
+                    log.exception("Failed to update job %s as completed", pending.job_id)
+                    gsheets_ok = False
                 log_event(
                     level="INFO",
                     event="done",
@@ -1941,6 +1963,27 @@ class JobQueue:
                 provider_key,
             )
             return
+        download_handler = getattr(client, "download_content", None)
+        if callable(download_handler):
+            await self._handle_inline_download(
+                pending,
+                client=client,
+                provider_key=provider_key,
+                result=ProviderJobStatus(
+                    job_id=pending.job_id,
+                    status="completed",
+                    assets={},
+                    error=None,
+                    data={},
+                    status_code=0,
+                    duration_ms=0,
+                ),
+                video_url_value="",
+                display_label="",
+                done_extra={},
+                job_extra=job_extra,
+            )
+            return
         log.debug(
             "Downloading content job_id=%s provider_job=%s provider=%s video_id=%s asset_id=%s attempt=%s/%s",
             pending.job_id,
@@ -2073,6 +2116,206 @@ class JobQueue:
         if job:
             job.extra.update(job_extra)
             await self._notify(job)
+
+    async def _handle_inline_download(
+        self,
+        pending: PendingJob,
+        *,
+        client: BaseProviderClient,
+        provider_key: str,
+        result: ProviderJobStatus,
+        video_url_value: str,
+        display_label: str,
+        done_extra: Dict[str, Any],
+        job_extra: Dict[str, Any],
+    ) -> bool:
+        download_handler = getattr(client, "download_content", None)
+        if not callable(download_handler) or not pending.video_id:
+            return False
+        try:
+            file_path = await download_handler(pending.video_id)
+        except ProviderAPIError as exc:
+            await self._handle_download_failure_inline(
+                pending,
+                provider_key=provider_key,
+                error=exc,
+                job_extra=job_extra,
+            )
+            return False
+        except Exception as exc:  # pragma: no cover - defensive
+            log.exception(
+                "Unexpected error during download job_id=%s video_id=%s provider=%s",
+                pending.job_id,
+                pending.video_id,
+                provider_key,
+            )
+            fallback_error = ProviderAPIError(
+                provider=provider_key,
+                status_code=0,
+                message="Unexpected download error",
+                error_type="unknown",
+                error_code="unknown",
+                provider_message=str(exc),
+            )
+            await self._handle_download_failure_inline(
+                pending,
+                provider_key=provider_key,
+                error=fallback_error,
+                job_extra=job_extra,
+            )
+            return False
+        meta = getattr(client, "_last_download_meta", {}) or {}
+        request_id = str(meta.get("request_id") or "")
+        status_code = int(meta.get("status_code") or result.status_code)
+        duration_ms = int(meta.get("duration_ms") or result.duration_ms)
+        attempt = int(meta.get("attempt") or 1)
+        size_bytes = 0
+        try:
+            size_bytes = file_path.stat().st_size
+        except Exception:
+            size_bytes = 0
+        download_meta: Dict[str, Any] = {
+            "status": "success",
+            "file_path": str(file_path),
+            "bytes": size_bytes,
+            "format": file_path.suffix.lstrip("."),
+            "request_id": request_id,
+            "status_code": status_code,
+            "attempt": attempt,
+            "url": meta.get("url", ""),
+        }
+        job_extra.setdefault("download", {}).update(download_meta)
+        log_event(
+            level="INFO",
+            event="content",
+            corr_id=pending.corr_id,
+            job_id=pending.job_id,
+            user_id=pending.user_id,
+            username=pending.username,
+            model=pending.model,
+            provider=provider_key,
+            size=pending.size,
+            status_code=status_code,
+            duration_ms=duration_ms,
+            extra={
+                "video_id": pending.video_id or "",
+                "bytes": size_bytes,
+                "request_id": request_id,
+                "attempt": attempt,
+                "file_path": str(file_path),
+            },
+        )
+        gsheets_ok = True
+        try:
+            await self._db.update_job(
+                pending.job_id,
+                "completed",
+                video_url=video_url_value,
+                file_url=video_url_value or str(file_path),
+                video_id=pending.video_id,
+                error=None,
+            )
+        except Exception:
+            log.exception("Failed to update job %s as completed", pending.job_id)
+            gsheets_ok = False
+        done_extra = dict(done_extra)
+        download_meta_shallow = {
+            "bytes": size_bytes,
+            "request_id": request_id,
+            "attempt": attempt,
+        }
+        done_extra["download"] = download_meta_shallow
+        log_event(
+            level="INFO",
+            event="done",
+            corr_id=pending.corr_id,
+            job_id=pending.job_id,
+            user_id=pending.user_id,
+            username=pending.username,
+            model=pending.model,
+            provider=provider_key,
+            size=pending.size,
+            status_code=result.status_code,
+            duration_ms=result.duration_ms,
+            gsheets_ok=gsheets_ok,
+            extra=done_extra,
+        )
+        return True
+
+    async def _handle_download_failure_inline(
+        self,
+        pending: PendingJob,
+        *,
+        provider_key: str,
+        error: ProviderAPIError,
+        job_extra: Dict[str, Any],
+    ) -> None:
+        message = "Видео сгенерировано, но скачать его не удалось; попробуйте позже"
+        log.warning(
+            "Download failed job_id=%s video_id=%s provider=%s status=%s error_code=%s",
+            pending.job_id,
+            pending.video_id,
+            provider_key,
+            error.status_code,
+            error.error_code or error.code,
+        )
+        download_info = job_extra.setdefault("download", {})
+        download_info.update(
+            {
+                "status": "failed",
+                "error_code": error.error_code or error.code,
+                "status_code": error.status_code,
+                "provider_message": error.provider_message,
+                "request_id": getattr(error, "request_id", ""),
+                "message": message,
+            }
+        )
+        gsheets_ok = True
+        try:
+            await self._db.update_job(
+                pending.job_id,
+                "failed_to_download",
+                video_id=pending.video_id,
+                error=message,
+            )
+        except Exception:
+            log.exception("Failed to mark job %s as failed_to_download", pending.job_id)
+            gsheets_ok = False
+        refunded = False
+        try:
+            await self._db.add_credits(
+                pending.user_id, self._config.generation_cost_credits
+            )
+            refunded = True
+            increment_metric("refunds_total")
+            increment_metric("refund_total")
+        except Exception:
+            log.exception(
+                "Refunding credits failed for download failure job %s", pending.job_id
+            )
+        log_event(
+            level="ERROR",
+            event="download_failed",
+            corr_id=pending.corr_id,
+            job_id=pending.job_id,
+            user_id=pending.user_id,
+            username=pending.username,
+            model=pending.model,
+            provider=provider_key,
+            size=pending.size,
+            status_code=error.status_code,
+            duration_ms=error.duration_ms,
+            error_type=error.error_type or "download_failed",
+            error_msg_short=message,
+            gsheets_ok=gsheets_ok,
+            refund_done=refunded,
+            extra={
+                "video_id": pending.video_id or "",
+                "provider_message": error.provider_message,
+                "error_code": error.error_code or error.code,
+                "request_id": getattr(error, "request_id", ""),
+            },
+        )
 
     async def _handle_no_media_assets(
         self,

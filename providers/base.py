@@ -121,6 +121,10 @@ class ProviderAPIError(RuntimeError):
         provider_message: Optional[str] = None,
         retryable: bool = False,
         duration_ms: Optional[int] = None,
+        code: Optional[str] = None,
+        body: Optional[str] = None,
+        request_id: Optional[str] = None,
+        status: Optional[int] = None,
     ) -> None:
         super().__init__(message)
         self.provider = provider
@@ -130,6 +134,10 @@ class ProviderAPIError(RuntimeError):
         self.provider_message = provider_message
         self.retryable = retryable
         self.duration_ms = duration_ms
+        self.code = code or error_code
+        self.body = body or provider_message
+        self.request_id = request_id
+        self.status = status if status is not None else status_code
 
 
 class BaseProviderClient:

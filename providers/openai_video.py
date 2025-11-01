@@ -5,10 +5,14 @@ import asyncio
 import json
 import logging
 import re
+import tempfile
 import time
 from collections import deque
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Deque, Dict, FrozenSet, Iterable, List, Mapping, Optional, Tuple
+
+import aiohttp
 
 from config import Config
 
@@ -18,6 +22,7 @@ from .base import (
     ProviderAPIError,
     ProviderJobStatus,
     ProviderJobSubmission,
+    _extract_request_id,
     _mask_secret,
     _sanitize_headers,
     _serialise_for_log,
@@ -148,6 +153,9 @@ class OpenAIVideoClient(BaseProviderClient):
         self._last_request: Dict[str, Any] = {}
         self._diagnostic_history: Deque[Dict[str, Any]] = deque(maxlen=10)
         self._error_snapshots: Deque[Dict[str, Any]] = deque(maxlen=10)
+        self._last_download_meta: Dict[str, Any] = {}
+        self._available_models: Tuple[str, ...] = ()
+        self._content_api_root = self._resolve_content_api_root(base_url)
         log.debug(
             "OpenAIVideoClient configured base_url=%s api_version=%s beta=%s org_id=%s api_key=%s",
             base_url,
@@ -185,13 +193,21 @@ class OpenAIVideoClient(BaseProviderClient):
 
     def get_diagnostics(self) -> Dict[str, Any]:
         safe_headers = _sanitize_headers(self._build_headers())
-        return {
+        diagnostics: Dict[str, Any] = {
             "api_version": self._api_version or "",
             "beta_header": self._beta_header,
             "organization_id": self._organization_id,
             "headers": safe_headers,
             "error_snapshots": [dict(snapshot) for snapshot in self._error_snapshots],
+            "content_endpoint": f"{self._content_api_root}/v1beta/videos/{{video_id}}/content",
+            "available_models": list(self._available_models),
         }
+        if self._last_download_meta:
+            diagnostics["last_content_status"] = self._last_download_meta.get("status_code")
+            diagnostics["last_content_request_id"] = self._last_download_meta.get("request_id")
+            diagnostics["last_content_video_id"] = self._last_download_meta.get("video_id")
+            diagnostics["last_content_timestamp"] = self._last_download_meta.get("timestamp")
+        return diagnostics
 
     async def create(
         self,
@@ -401,6 +417,288 @@ class OpenAIVideoClient(BaseProviderClient):
         )
         return (data, status_code, duration_ms) if return_meta else data
 
+    async def download_content(self, video_id: str, format: str = "mp4") -> Path:
+        if not video_id:
+            raise ValueError("video_id must not be empty")
+        allowed_formats = {"mp4", "webm"}
+        fmt = (format or "mp4").strip().lower()
+        if fmt not in allowed_formats:
+            fmt = "mp4"
+        url = f"{self._content_api_root}/v1beta/videos/{video_id}/content"
+        path = f"/v1beta/videos/{video_id}/content"
+        params = {"format": fmt}
+        headers: Dict[str, str] = {
+            "Authorization": f"Bearer {self._api_key}",
+            "Accept": "video/mp4",
+        }
+        if self._beta_header:
+            headers["OpenAI-Beta"] = self._beta_header
+        if self._organization_id:
+            headers["OpenAI-Organization"] = self._organization_id
+        safe_headers = _sanitize_headers(headers)
+        correlation_id = f"download:{video_id}"
+        self._record_last_request(
+            method="GET",
+            path=path,
+            params=dict(params),
+            headers=safe_headers,
+            dropped_fields=[],
+            correlation_id=correlation_id,
+        )
+        session = await self._ensure_session()
+        timeout = aiohttp.ClientTimeout(
+            total=self._config.request_read_timeout or None,
+            sock_read=self._config.request_read_timeout or None,
+        )
+        delays = (1, 3, 7, 15)
+        for attempt, delay in enumerate(delays, start=1):
+            payload = {"params": params, "attempt": attempt}
+            self._log_request(
+                method="GET",
+                path=path,
+                payload=payload,
+                headers=safe_headers,
+                dropped_fields=[],
+                correlation_id=correlation_id,
+            )
+            started = time.monotonic()
+            try:
+                async with session.get(
+                    url,
+                    params=params,
+                    headers=headers,
+                    allow_redirects=True,
+                    timeout=timeout,
+                ) as response:
+                    duration_ms = int((time.monotonic() - started) * 1000)
+                    response_headers = dict(response.headers)
+                    request_id = _extract_request_id(response_headers) or ""
+                    status = int(response.status)
+                    self._last_download_meta = {
+                        "video_id": video_id,
+                        "status_code": status,
+                        "request_id": request_id,
+                        "duration_ms": duration_ms,
+                        "attempt": attempt,
+                        "url": url,
+                        "format": fmt,
+                        "timestamp": time.time(),
+                    }
+                    self._record_response_history(
+                        method="GET",
+                        path=path,
+                        status_code=status,
+                        duration_ms=duration_ms,
+                        request_id=request_id,
+                        diagnostic=None,
+                    )
+                    note = None
+                    if status == 200:
+                        target_dir = Path(tempfile.mkdtemp(prefix="openai-video-"))
+                        file_path = target_dir / f"{video_id}.{fmt}"
+                        size = 0
+                        with open(file_path, "wb") as output:
+                            if hasattr(response, "aiter_bytes"):
+                                async for chunk in response.aiter_bytes():
+                                    if chunk:
+                                        output.write(chunk)
+                                        size += len(chunk)
+                            else:
+                                async for chunk in response.content.iter_chunked(65536):
+                                    if chunk:
+                                        output.write(chunk)
+                                        size += len(chunk)
+                        self._last_download_meta["bytes"] = size
+                        self._last_download_meta["file_path"] = str(file_path)
+                        self._log_response(
+                            method="GET",
+                            path=path,
+                            status_code=status,
+                            duration_ms=duration_ms,
+                            request_id=request_id,
+                            correlation_id=correlation_id,
+                            attempt=attempt,
+                            note=f"bytes={size}",
+                        )
+                        log.info(
+                            "openai.video.download success video_id=%s status=%s bytes=%s request_id=%s",
+                            video_id,
+                            status,
+                            size,
+                            request_id,
+                        )
+                        return file_path
+                    if status in (404, 409):
+                        note = f"retrying delay={delay}s"
+                        self._last_download_meta["note"] = note
+                        self._log_response(
+                            method="GET",
+                            path=path,
+                            status_code=status,
+                            duration_ms=duration_ms,
+                            request_id=request_id,
+                            correlation_id=correlation_id,
+                            attempt=attempt,
+                            note=note,
+                        )
+                        if attempt < len(delays):
+                            await asyncio.sleep(delay)
+                        continue
+                    if status in (429, 500, 502, 503, 504):
+                        note = f"server_retry delay={delay}s"
+                        self._last_download_meta["note"] = note
+                        self._log_response(
+                            method="GET",
+                            path=path,
+                            status_code=status,
+                            duration_ms=duration_ms,
+                            request_id=request_id,
+                            correlation_id=correlation_id,
+                            attempt=attempt,
+                            note=note,
+                        )
+                        if attempt < len(delays):
+                            await asyncio.sleep(delay)
+                        continue
+                    body = await response.text()
+                    self._last_download_meta["note"] = "error"
+                    self._log_response(
+                        method="GET",
+                        path=path,
+                        status_code=status,
+                        duration_ms=duration_ms,
+                        request_id=request_id,
+                        correlation_id=correlation_id,
+                        attempt=attempt,
+                        note="error",
+                    )
+                    raise ProviderAPIError(
+                        provider=self.provider_name,
+                        status_code=status,
+                        message=f"HTTP {status}: {body}",
+                        error_type=(
+                            "invalid_request"
+                            if status == 400
+                            else "auth"
+                            if status == 401
+                            else "region_blocked"
+                            if status == 403
+                            else "unknown"
+                        ),
+                        error_code=(
+                            "invalid_request"
+                            if status == 400
+                            else "auth"
+                            if status == 401
+                            else "region_blocked"
+                            if status == 403
+                            else "unknown"
+                        ),
+                        provider_message=body,
+                        retryable=status in (429, 500, 502, 503, 504),
+                        code=(
+                            "invalid_request"
+                            if status == 400
+                            else "auth"
+                            if status == 401
+                            else "region_blocked"
+                            if status == 403
+                            else "unknown"
+                        ),
+                        body=body,
+                        request_id=request_id,
+                        status=status,
+                    )
+            except asyncio.TimeoutError as exc:
+                duration_ms = int((time.monotonic() - started) * 1000)
+                self._last_download_meta = {
+                    "video_id": video_id,
+                    "status_code": 0,
+                    "request_id": "",
+                    "duration_ms": duration_ms,
+                    "attempt": attempt,
+                    "url": url,
+                    "format": fmt,
+                    "timestamp": time.time(),
+                    "note": "timeout",
+                }
+                self._log_response(
+                    method="GET",
+                    path=path,
+                    status_code=0,
+                    duration_ms=duration_ms,
+                    request_id="",
+                    correlation_id=correlation_id,
+                    attempt=attempt,
+                    note="timeout",
+                )
+                raise ProviderAPIError(
+                    provider=self.provider_name,
+                    status_code=0,
+                    message="OpenAI Video download timed out",
+                    error_type="timeout",
+                    error_code="timeout",
+                    provider_message=str(exc),
+                    retryable=True,
+                    duration_ms=duration_ms,
+                    code="timeout",
+                ) from exc
+            except aiohttp.ClientError as exc:
+                duration_ms = int((time.monotonic() - started) * 1000)
+                self._last_download_meta = {
+                    "video_id": video_id,
+                    "status_code": 0,
+                    "request_id": "",
+                    "duration_ms": duration_ms,
+                    "attempt": attempt,
+                    "url": url,
+                    "format": fmt,
+                    "timestamp": time.time(),
+                    "note": "client_error",
+                }
+                self._log_response(
+                    method="GET",
+                    path=path,
+                    status_code=0,
+                    duration_ms=duration_ms,
+                    request_id="",
+                    correlation_id=correlation_id,
+                    attempt=attempt,
+                    note="client_error",
+                )
+                raise ProviderAPIError(
+                    provider=self.provider_name,
+                    status_code=0,
+                    message="OpenAI Video download failed",
+                    error_type="network",
+                    error_code="network_error",
+                    provider_message=str(exc),
+                    retryable=True,
+                    duration_ms=duration_ms,
+                    code="network_error",
+                ) from exc
+        self._last_download_meta = {
+            "video_id": video_id,
+            "status_code": 0,
+            "request_id": "",
+            "duration_ms": 0,
+            "attempt": len(delays),
+            "url": url,
+            "format": fmt,
+            "timestamp": time.time(),
+            "note": "content_not_ready",
+        }
+        raise ProviderAPIError(
+            provider=self.provider_name,
+            status_code=0,
+            message="Не удалось скачать видео после всех попыток; попробуйте позже",
+            error_type="content_not_ready",
+            error_code="content_not_ready",
+            provider_message="",
+            retryable=True,
+            code="content_not_ready",
+        )
+
     async def content(
         self,
         video_id: str,
@@ -468,6 +766,7 @@ class OpenAIVideoClient(BaseProviderClient):
             for model in models:
                 if model.startswith("sora") or model.startswith("gpt"):
                     self._supported_models.add(model)
+        self._available_models = tuple(sorted(models))
         return models
 
     def get_video_object(self, payload: Any) -> Optional[Dict[str, Any]]:
@@ -550,6 +849,15 @@ class OpenAIVideoClient(BaseProviderClient):
 
     def _videos_path(self) -> str:
         return "/videos"
+
+    def _resolve_content_api_root(self, base_url: str) -> str:
+        root = (base_url or "").rstrip("/")
+        if not root:
+            return "https://api.openai.com"
+        if root.endswith("/v1beta") or root.endswith("/v1"):
+            parent, _ = root.rsplit("/", 1)
+            return parent or root
+        return root
 
     def _build_create_payload(
         self,
@@ -758,6 +1066,30 @@ class OpenAIVideoClient(BaseProviderClient):
             _serialise_for_log(payload or {}, limit=_LOG_PAYLOAD_LIMIT),
             _serialise_for_log(headers, limit=1024),
             sorted(set(dropped_fields)),
+        )
+
+    def _log_response(
+        self,
+        *,
+        method: str,
+        path: str,
+        status_code: int,
+        duration_ms: int,
+        request_id: str,
+        correlation_id: str,
+        attempt: int,
+        note: Optional[str] = None,
+    ) -> None:
+        log.info(
+            "openai.video.response corr_id=%s method=%s endpoint=%s status=%s duration_ms=%s request_id=%s attempt=%s note=%s",
+            correlation_id,
+            method,
+            path,
+            status_code,
+            duration_ms,
+            request_id or "",
+            attempt,
+            note or "",
         )
 
     def _prepare_request_data(
