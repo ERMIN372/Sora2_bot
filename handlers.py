@@ -1799,7 +1799,7 @@ def _select_remote_video_asset(job: GenerationJobRecord) -> Optional[Dict[str, A
         if fallback:
             candidate = fallback.strip()
             if candidate and not candidate.startswith("["):
-                if candidate.startswith(("http://", "https://", "files/", "file-")):
+                if candidate.startswith(("http://", "https://", "files/", "file-", "/tmp/")):
                     return {
                         "key": "video_url",
                         "url": candidate,
@@ -2035,27 +2035,70 @@ async def _deliver_remote_video(
         return None
     expected_mask = _expected_key_mask(job)
     provider_key = _provider_for_model(job.model, config)
-    try:
-        if provider_key == "sora":
-            downloaded = await download_sora_asset(
-                asset_url=str(asset_reference),
-                config=config,
-                corr_id=corr_id or "",
-                asset_name=asset_name,
-                expected_mask=expected_mask,
-                mime_hint=mime_hint,
-                filename_hint=filename_hint,
+    
+    if asset_reference.startswith("/tmp/"):
+        from pathlib import Path
+        try:
+            local_path = Path(asset_reference)
+            if not local_path.exists():
+                log.error("Local file not found: %s job_id=%s", asset_reference, job.id)
+                await _handle_delivery_failure(
+                    dp,
+                    job,
+                    config,
+                    db,
+                    error_reporter=error_reporter,
+                    message=i18n.t("status.delivery_generic"),
+                    reason="file_not_found",
+                    extra_log={"local_path": asset_reference},
+                    key_mask=expected_mask,
+                )
+                return None
+            content = local_path.read_bytes()
+            size = len(content)
+            downloaded = type('DownloadedAsset', (), {
+                'content': content,
+                'size': size,
+                'mime': mime_hint or 'video/mp4',
+                'filename': filename_hint or local_path.name,
+                'key_mask': expected_mask
+            })()
+        except Exception as exc:
+            log.exception("Failed to read local file %s job_id=%s", asset_reference, job.id)
+            await _handle_delivery_failure(
+                dp,
+                job,
+                config,
+                db,
+                error_reporter=error_reporter,
+                message=i18n.t("status.delivery_generic"),
+                reason="file_read_error",
+                extra_log={"local_path": asset_reference, "error": str(exc)},
+                key_mask=expected_mask,
             )
-        else:
-            downloaded = await download_asset(
-                asset_url=str(asset_reference),
-                config=config,
-                corr_id=corr_id or "",
-                asset_name=asset_name,
-                expected_mask=expected_mask,
-                mime_hint=mime_hint,
-                filename_hint=filename_hint,
-            )
+            return None
+    else:
+        try:
+            if provider_key == "sora":
+                downloaded = await download_sora_asset(
+                    asset_url=str(asset_reference),
+                    config=config,
+                    corr_id=corr_id or "",
+                    asset_name=asset_name,
+                    expected_mask=expected_mask,
+                    mime_hint=mime_hint,
+                    filename_hint=filename_hint,
+                )
+            else:
+                downloaded = await download_asset(
+                    asset_url=str(asset_reference),
+                    config=config,
+                    corr_id=corr_id or "",
+                    asset_name=asset_name,
+                    expected_mask=expected_mask,
+                    mime_hint=mime_hint,
+                    filename_hint=filename_hint,
+                )
     except GeminiKeyMismatchError as exc:
         log.error(
             "Gemini key mismatch corr_id=%s expected=%s actual=%s",
