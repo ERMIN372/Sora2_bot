@@ -31,7 +31,13 @@ from aiogram.types import (
 )
 
 from archive import ArchivePayload, ArchivePublisher
-from config import Config, SORA_SUPPORTED_MODELS
+from config import (
+    Config,
+    PRODUCT_PRICING_UI,
+    SORA_SUPPORTED_MODELS,
+    TOPUP_UI_PACKS,
+    UI_MODEL_LABELS,
+)
 from db import Database, ErrorLogRecord, GenerationJobRecord
 from generation_gate import GateDecision, GenerationRequestGate, normalize_prompt
 from i18n import SafeText, escape_html, format_credits, format_prompt, i18n
@@ -120,6 +126,11 @@ _SUPPORTED_SORA_PREFIXES: Tuple[str, ...] = (
     "gpt-4.1-sora",
     "gpt-4.2-sora",
 )
+
+_VIDEO_PROVIDER_PRICE_KEYS: Dict[str, str] = {
+    "veo": "veo3",
+    "sora": "sora",
+}
 
 SUPPORTED_SORA_MODELS: Set[str] = set(SORA_SUPPORTED_MODELS)
 
@@ -224,7 +235,25 @@ def _video_model_options(config: Config) -> list[VideoModelOption]:
     seen_models: Set[str] = set()
     options: list[VideoModelOption] = []
 
-    def _register(model_name: str, provider: str, label: str) -> None:
+    def _ui_model_label(model_name: str, provider: str) -> str:
+        base_key = _normalise_video_model_name(model_name)
+        provider_key = (provider or "").strip().lower()
+        base_label = UI_MODEL_LABELS.get(base_key) or UI_MODEL_LABELS.get(provider_key)
+        if not base_label:
+            if provider_key == "veo":
+                base_label = i18n.t("video.models.veo")
+            elif provider_key == "sora":
+                base_label = i18n.t("video.models.sora")
+            else:
+                base_label = base_key or provider
+        price_key = _VIDEO_PROVIDER_PRICE_KEYS.get(provider_key)
+        if price_key:
+            price = PRODUCT_PRICING_UI.get(price_key)
+            if price is not None:
+                base_label = f"{base_label} — {price} ₽"
+        return base_label
+
+    def _register(model_name: str, provider: str) -> None:
         normalised = _normalise_video_model_name(model_name)
         if not normalised or normalised in seen_models:
             return
@@ -235,27 +264,23 @@ def _video_model_options(config: Config) -> list[VideoModelOption]:
                 key=key,
                 model=normalised,
                 provider=provider,
-                label=label,
+                label=_ui_model_label(normalised, provider),
             )
         )
 
     if config.gemini_video_enabled:
-        fallback_label = i18n.t("video.models.veo")
         default_name = _normalise_video_model_name(config.gemini_model_video)
         if default_name:
-            label = default_name if _is_veo_video_model_name(default_name) else fallback_label
-            _register(default_name, "veo", label)
+            _register(default_name, "veo")
         for candidate in list_veo_video_models(config):
             normalised = _normalise_video_model_name(candidate)
             if _is_veo_video_model_name(normalised):
-                _register(normalised, "veo", normalised)
+                _register(normalised, "veo")
 
     if config.sora_video_enabled:
-        fallback_label = i18n.t("video.models.sora")
         default_sora = _normalise_video_model_name(config.sora_model_video)
         if default_sora:
-            label = fallback_label or default_sora
-            _register(default_sora, "sora", label)
+            _register(default_sora, "sora")
 
     return options
 
@@ -1010,43 +1035,33 @@ async def flow_back_callback_handler(
 
 
 def _format_packages_list(config: Config) -> str:
-    lines: list[str] = [i18n.t("payment.packages.title")]
-    for package in config.credit_packages:
-        price_label = config.format_rubles(package.price_rub)
-        total_label = format_credits(package.credits_int)
-        bonus_label = format_credits(package.bonus_credits)
-        bonus_pct = int(package.bonus_percent)
-        lines.append(
-            i18n.t(
-                "payment.packages.line",
-                price=price_label,
-                total=total_label,
-                bonus=bonus_label,
-                bonus_pct=bonus_pct,
-            )
-        )
-    lines.append("")
-    lines.append(i18n.t("payment.store.instructions"))
     terms_url = (config.terms_url or "").strip()
+    terms_suffix: SafeText | str = ""
     if terms_url:
         escaped_url = escape_html(terms_url)
         link = SafeText(f'<a href="{escaped_url}">{escaped_url}</a>')
-        lines.append("")
-        lines.append(i18n.t("payment.terms_notice", terms_url=link))
-    return "\n".join(line for line in lines if line).strip()
+        terms_suffix = SafeText(f": {link}")
+    return i18n.t("payment.packages.title", terms=terms_suffix).strip()
 
 
 def _build_packages_keyboard(config: Config) -> Optional[InlineKeyboardMarkup]:
     if not config.yookassa_ready:
         return None
     rows: list[list[InlineKeyboardButton]] = []
-    for package in config.credit_packages:
-        amount_value = int(package.price_rub)
-        bonus_pct = int(package.bonus_percent)
-        if bonus_pct > 0:
-            text = f"{amount_value}₽ +{bonus_pct}%"
+    packages = {package.package_id: package for package in config.credit_packages}
+    for pack in TOPUP_UI_PACKS:
+        amount_value = int(pack.get("amount", 0) or 0)
+        if amount_value <= 0:
+            continue
+        package = packages.get(str(amount_value))
+        if package is None:
+            continue
+        bonus_ratio = pack.get("bonus_pct", 0) or 0
+        bonus_percent_value = int(round(bonus_ratio * 100))
+        if bonus_percent_value > 0:
+            text = f"{amount_value}₽ +{bonus_percent_value}%"
         else:
-            text = f"{amount_value}₽"
+            text = f"{amount_value}₽ +0%"
         rows.append(
             [
                 InlineKeyboardButton(
