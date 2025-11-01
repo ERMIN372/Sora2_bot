@@ -1856,6 +1856,11 @@ class OpenAIVideoClient(BaseProviderClient):
         assets: Dict[str, str] = {}
         if not isinstance(payload, Mapping):
             return assets
+        log.warning(
+            "openai.video._extract_assets payload_keys=%s payload=%s",
+            list(payload.keys()) if isinstance(payload, dict) else "not_dict",
+            json.dumps(payload, ensure_ascii=False, default=str)[:2000],
+        )
         container = payload.get("assets")
         if isinstance(container, Mapping):
             for key, value in container.items():
