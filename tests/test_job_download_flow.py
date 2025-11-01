@@ -103,7 +103,7 @@ class FakeProvider:
             "duration_ms": 25,
             "request_id": "req-inline",
             "attempt": len(self.download_calls),
-            "url": "https://api.openai.com/v1beta/videos/test/content",
+            "url": "https://api.openai.com/v1/videos/test/content",
         }
         return self.download_path
 

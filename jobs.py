@@ -2314,14 +2314,22 @@ class JobQueue:
             log.exception("Failed to mark job %s as failed_to_download", pending.job_id)
             gsheets_ok = False
         billing_info = job_extra.setdefault("billing", {})
+        refund_amount = self._config.generation_cost_credits
+        job_record = None
+        try:
+            job_record = await self._db.get_job(pending.job_id)
+        except Exception:
+            log.exception("Failed to load job %s for refund handling", pending.job_id)
+        if job_record and job_record.cost_credits:
+            refund_amount = job_record.cost_credits
+        if refund_amount > 0:
+            billing_info.setdefault("credits", refund_amount)
         if "status" not in billing_info:
-            billing_info["status"] = "skipped"
+            billing_info["status"] = "charged" if refund_amount > 0 else "skipped"
         refunded = False
-        if billing_info.get("status") == "charged":
+        if billing_info.get("status") == "charged" and refund_amount > 0:
             try:
-                await self._db.add_credits(
-                    pending.user_id, self._config.generation_cost_credits
-                )
+                await self._db.add_credits(pending.user_id, refund_amount)
                 refunded = True
                 increment_metric("refunds_total")
                 increment_metric("refund_total")

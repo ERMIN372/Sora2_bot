@@ -200,7 +200,7 @@ class Config:
     # Значение "sora" больше не поддерживается и приведёт к ошибке "Model not found" в Sora API.
     sora_model_video: str = SORA_DEFAULT_MODEL
     openai_api_base: str = OPENAI_API_BASE
-    openai_api_version_video: str = "v1beta"
+    openai_api_version_video: str = "v1"
     openai_beta_header: str = DEFAULT_OPENAI_BETA_HEADER
     sora_requests_per_minute: int = 60
     gemini_requests_per_minute: int = 120
