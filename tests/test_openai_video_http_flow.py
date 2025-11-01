@@ -160,16 +160,18 @@ def test_openai_video_models_filtering(monkeypatch: pytest.MonkeyPatch, make_ope
 
     async def fake_request(self, method: str, path: str, **kwargs: Any):
         assert method == "GET"
-        assert path == "/models"
+        assert path == "/models/list"
         return (
             {
-                "data": [
-                    {"id": "sora-2"},
-                    {"id": "gpt-4.1"},
-                    {"id": ""},
-                    {"identifier": "missing"},
-                    "not-a-dict",
-                ]
+                "data": {
+                    "models": [
+                        {"id": "sora-2"},
+                        {"id": "gpt-4.1"},
+                        {"id": ""},
+                        {"identifier": "missing"},
+                    ],
+                    "available": ["gpt-4.1"],
+                }
             },
             200,
             20,
@@ -182,7 +184,7 @@ def test_openai_video_models_filtering(monkeypatch: pytest.MonkeyPatch, make_ope
 
     models = _run(exercise())
 
-    assert models == ["sora-2", "gpt-4.1"]
+    assert models == ["gpt-4.1", "sora-2"]
     supported = client.supported_models
     assert "sora-2" in supported
     assert "gpt-4.1" in supported
