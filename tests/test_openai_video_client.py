@@ -27,9 +27,7 @@ def test_openai_video_client_applies_custom_headers() -> None:
     assert headers["OpenAI-Organization"] == "org-custom"
 
     merged = client._merge_params({"foo": "bar"})
-    assert merged is not None
-    assert merged["api-version"] == "2024-05-01-preview"
-    assert merged["foo"] == "bar"
+    assert merged == {"foo": "bar"}
 
 
 def test_openai_video_client_uses_default_beta_header() -> None:
@@ -44,7 +42,9 @@ def test_openai_video_client_get_diagnostics_includes_error_snapshots() -> None:
     config = _make_config(openai_beta_header="video=2", openai_org_id="org-diag")
     client = OpenAIVideoClient(config=config)
 
-    client._record_last_request(method="GET", path="/videos", dropped_fields=[], correlation_id=None)
+    client._record_last_request(
+        method="GET", path="/v1beta/videos", dropped_fields=[], correlation_id=None
+    )
     client._update_last_diagnostic(
         status_code=429, error={"error_code": "rate_limit", "message": "Too many requests"}
     )

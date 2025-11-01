@@ -14,7 +14,7 @@ from typing import Any, Deque, Dict, FrozenSet, Iterable, List, Mapping, Optiona
 
 import aiohttp
 
-from config import Config
+from config import Config, DEFAULT_OPENAI_BETA_HEADER, OPENAI_API_BASE
 
 from .api_error_handler import ApiErrorHandler
 from .base import (
@@ -33,16 +33,10 @@ _PROVIDERS_LOG = logging.getLogger("providers")
 log = _PROVIDERS_LOG.getChild("openai_video") if _PROVIDERS_LOG else logging.getLogger(__name__)
 
 
-_DEFAULT_VIDEO_MODELS: Tuple[str, ...] = ("sora-2", "sora-2-fast", "sora-2-pro")
+_DEFAULT_VIDEO_MODELS: Tuple[str, ...] = ("sora-2", "sora-2-pro")
 _VIDEO_MIME_PREFIXES = ("video/", "application/octet-stream")
 
-ALLOWED_CREATE_FIELDS: FrozenSet[str] = frozenset({
-    "prompt",
-    "input_reference",
-    "model",
-    "seconds",
-    "size",
-})
+ALLOWED_CREATE_FIELDS: FrozenSet[str] = frozenset({"prompt", "model", "duration", "size"})
 ALLOWED_REMIX_FIELDS: FrozenSet[str] = frozenset({"prompt"})
 ALLOWED_LIST_FIELDS: FrozenSet[str] = frozenset({"after", "limit", "order"})
 ALLOWED_RETRIEVE_FIELDS: FrozenSet[str] = frozenset()
@@ -121,8 +115,8 @@ class OpenAIVideoClient(BaseProviderClient):
         api_key = (config.openai_key or "").strip()
         if not api_key:
             raise RuntimeError("OpenAI API key is required for video generation")
-        base_url = (config.openai_api_base or "https://api.openai.com").rstrip("/")
-        beta_header = (config.openai_beta_header or "video=1").strip()
+        base_url = OPENAI_API_BASE.rstrip("/")
+        beta_header = (config.openai_beta_header or DEFAULT_OPENAI_BETA_HEADER).strip()
         default_headers: Dict[str, str] = {}
         if beta_header:
             default_headers["OpenAI-Beta"] = beta_header
@@ -143,10 +137,8 @@ class OpenAIVideoClient(BaseProviderClient):
         if configured_model:
             self._supported_models.add(configured_model)
         self._default_model = configured_model or _DEFAULT_VIDEO_MODELS[0]
-        self._api_version = (config.openai_api_version_video or "").strip()
+        self._api_version = "v1beta"
         self._default_params: Dict[str, Any] = {}
-        if self._api_version:
-            self._default_params["api-version"] = self._api_version
         self._error_handler = ApiErrorHandler(
             provider="openai-video", logger=log, supported_models=sorted(self._supported_models)
         )
@@ -433,12 +425,13 @@ class OpenAIVideoClient(BaseProviderClient):
         fmt = (format or "mp4").strip().lower()
         if fmt not in allowed_formats:
             fmt = "mp4"
-        url = f"{self._content_api_root}/v1beta/videos/{video_id}/content"
-        path = f"/v1beta/videos/{video_id}/content"
+        path = f"{self._videos_path()}/{video_id}/content"
+        url = f"{self._content_api_root}{path}"
         params = {"format": fmt}
+        accept_header = "video/mp4" if fmt == "mp4" else f"video/{fmt}"
         headers: Dict[str, str] = {
             "Authorization": f"Bearer {self._api_key}",
-            "Accept": "video/mp4",
+            "Accept": accept_header,
         }
         if self._beta_header:
             headers["OpenAI-Beta"] = self._beta_header
@@ -764,7 +757,7 @@ class OpenAIVideoClient(BaseProviderClient):
 
     async def list_models(self) -> List[str]:
         data, status_code, duration_ms = await self._request_json(
-            "GET", "/models/list", diagnostic={"dropped_fields": []}
+            "GET", f"/{self._api_version}/models", diagnostic={"dropped_fields": []}
         )
         log.debug("openai.video.list_models status=%s duration_ms=%s", status_code, duration_ms)
         models = self._extract_model_ids(data)
@@ -856,16 +849,11 @@ class OpenAIVideoClient(BaseProviderClient):
     # ------------------------------------------------------------------
 
     def _videos_path(self) -> str:
-        return "/videos"
+        return f"/{self._api_version}/videos"
 
     def _resolve_content_api_root(self, base_url: str) -> str:
-        root = (base_url or "").rstrip("/")
-        if not root:
-            return "https://api.openai.com"
-        if root.endswith("/v1beta") or root.endswith("/v1"):
-            parent, _ = root.rsplit("/", 1)
-            return parent or root
-        return root
+        _ = base_url  # legacy argument
+        return OPENAI_API_BASE.rstrip("/")
 
     def _build_create_payload(
         self,
@@ -897,15 +885,19 @@ class OpenAIVideoClient(BaseProviderClient):
             original_settings,
             original_payload,
         )
-        request: Dict[str, Any] = {}
-        request.update(
-            self._filter_allowed_fields(prepared_payload, ALLOWED_CREATE_FIELDS, dropped_fields, source="payload")
+        filtered_payload = self._filter_allowed_fields(
+            prepared_payload, ALLOWED_CREATE_FIELDS, dropped_fields, source="payload"
         )
-        allowed_settings = self._filter_allowed_fields(
+        filtered_settings = self._filter_allowed_fields(
             prepared_settings, ALLOWED_CREATE_FIELDS, dropped_fields, source="settings"
         )
-        for key, value in allowed_settings.items():
-            request.setdefault(key, value)
+        request: Dict[str, Any] = {}
+        for key in ("prompt", "model", "duration", "size"):
+            if key in filtered_payload and filtered_payload[key] is not None:
+                request[key] = filtered_payload[key]
+        for key in ("prompt", "model", "duration", "size"):
+            if key not in request and key in filtered_settings and filtered_settings[key] is not None:
+                request[key] = filtered_settings[key]
         prompt_text = str(request.get("prompt") or prompt or "").strip()
         if not prompt_text and not allow_empty_prompt:
             raise ValueError("prompt must not be empty")
@@ -917,20 +909,21 @@ class OpenAIVideoClient(BaseProviderClient):
             model_text = self._default_model
         request["model"] = model_text
         self._supported_models.add(model_text)
-        if "seconds" in request:
-            normalised_seconds = self._normalise_seconds(request["seconds"])
-            if normalised_seconds is not None:
-                request["seconds"] = normalised_seconds
+        duration_value = request.get("duration")
+        if duration_value is not None:
+            normalised_duration = self._normalise_duration(duration_value)
+            if normalised_duration is not None:
+                request["duration"] = normalised_duration
             else:
-                request.pop("seconds", None)
+                request.pop("duration", None)
         if "size" in request:
             size_value = str(request["size"]).strip()
             if size_value:
                 request["size"] = size_value
             else:
                 request.pop("size", None)
-        if "input_reference" in request and request["input_reference"] in {None, ""}:
-            request.pop("input_reference", None)
+        request["n"] = 1
+        request["response_format"] = "url"
         extras = self._extract_local_extras(
             original_settings=original_settings,
             original_payload=original_payload,
@@ -1190,23 +1183,18 @@ class OpenAIVideoClient(BaseProviderClient):
         request: Mapping[str, Any],
     ) -> Dict[str, Any]:
         extras: Dict[str, Any] = {}
-        seconds_value: Any = request.get("seconds")
-        if seconds_value is None:
-            seconds_value = self._search_nested(original_settings, ("seconds", "duration", "duration_seconds", "duration_sec"))
-            if seconds_value is None:
-                seconds_value = self._search_nested(
-                    original_payload, ("seconds", "duration", "duration_seconds", "duration_sec")
+        duration_value: Any = request.get("duration")
+        if duration_value is None:
+            duration_value = self._search_nested(
+                original_settings, ("duration", "duration_seconds", "duration_sec", "seconds")
+            )
+            if duration_value is None:
+                duration_value = self._search_nested(
+                    original_payload, ("duration", "duration_seconds", "duration_sec", "seconds")
                 )
-        normalised_seconds = self._normalise_seconds(seconds_value)
-        if normalised_seconds is not None:
-            try:
-                numeric_seconds = int(float(normalised_seconds))
-            except (TypeError, ValueError):
-                numeric_seconds = None
-            if numeric_seconds and numeric_seconds > 0:
-                extras["duration_seconds"] = numeric_seconds
-            else:
-                extras["duration_seconds"] = normalised_seconds
+        normalised_duration = self._normalise_duration(duration_value)
+        if normalised_duration is not None:
+            extras["duration_seconds"] = normalised_duration
         aspect_ratio = self._search_nested(
             original_settings, ("aspect_ratio", "aspectRatio")
         )
@@ -1276,9 +1264,9 @@ class OpenAIVideoClient(BaseProviderClient):
         dropped_fields: List[str],
     ) -> None:
         alias_map = {
-            "duration": "seconds",
-            "duration_sec": "seconds",
-            "duration_seconds": "seconds",
+            "seconds": "duration",
+            "duration_sec": "duration",
+            "duration_seconds": "duration",
         }
         for alias, target in alias_map.items():
             if alias in data:
@@ -1287,18 +1275,26 @@ class OpenAIVideoClient(BaseProviderClient):
                     data[target] = value
                 dropped_fields.append(f"{label}.{alias}")
 
-    def _normalise_seconds(self, value: Any) -> Optional[str]:
+    def _normalise_duration(self, value: Any) -> Optional[int]:
+        if value is None:
+            return None
+        if isinstance(value, bool):
+            return None
         if isinstance(value, (int, float)):
             if value <= 0:
                 return None
-            return str(int(value))
+            return int(value)
         if isinstance(value, str):
             text = value.strip()
             if not text:
                 return None
-            if text.isdigit():
-                return str(int(text))
-            return text
+            try:
+                numeric = float(text)
+            except ValueError:
+                return None
+            if numeric <= 0:
+                return None
+            return int(numeric)
         return None
 
     def _search_nested(self, data: Any, keys: Iterable[str]) -> Optional[Any]:
@@ -1575,10 +1571,11 @@ class OpenAIVideoClient(BaseProviderClient):
             raw_body,
         )
         message_candidates = [error_message or "", raw_body]
-        unknown_parameter = any(
-            "unknown parameter" in str(candidate).lower() for candidate in message_candidates if candidate
+        combined_text = " ".join(
+            str(candidate) for candidate in message_candidates if candidate
         )
-        if unknown_parameter:
+        lowered_text = combined_text.lower()
+        if error.status_code in {400, 500} and "unknown parameter" in lowered_text:
             for candidate in message_candidates:
                 self._collect_offending_params(candidate, offending_params)
             dropped = tuple(self._last_request.get("dropped_fields", ()))
@@ -1587,6 +1584,11 @@ class OpenAIVideoClient(BaseProviderClient):
             message = (
                 f"Unknown parameter(s) reported by OpenAI: {params_text}. "
                 f"Dropped fields: {dropped_text}."
+            )
+            log.error(
+                "openai.video.invalid_parameter status=%s response=%s",
+                error.status_code,
+                raw_body,
             )
             error_snapshot = {
                 "status_code": error.status_code,
@@ -1605,6 +1607,56 @@ class OpenAIVideoClient(BaseProviderClient):
                 message=message,
                 error_type="invalid_request",
                 error_code="invalid_request",
+                provider_message=raw_body or error.provider_message,
+                retryable=False,
+                duration_ms=error.duration_ms,
+            )
+        if error.status_code in {400, 500} and "invalid request" in lowered_text:
+            log.error(
+                "openai.video.invalid_request status=%s response=%s",
+                error.status_code,
+                raw_body,
+            )
+            friendly = (
+                "OpenAI отклонил запрос: проверьте параметры и формат обращения к модели."
+            )
+            self._update_last_diagnostic(
+                status_code=error.status_code,
+                error={
+                    "status_code": error.status_code,
+                    "error_code": "invalid_request",
+                    "error_type": "invalid_request",
+                    "message": friendly,
+                    "provider_message": raw_body,
+                },
+            )
+            return ProviderAPIError(
+                provider=error.provider,
+                status_code=error.status_code,
+                message=friendly,
+                error_type="invalid_request",
+                error_code="invalid_request",
+                provider_message=raw_body or error.provider_message,
+                retryable=False,
+                duration_ms=error.duration_ms,
+            )
+        if error.status_code in {401, 403}:
+            log.error(
+                "openai.video.auth_block status=%s response=%s",
+                error.status_code,
+                raw_body,
+            )
+            friendly = (
+                "OpenAI отклонил запрос: проверьте API‑ключ и региональный доступ организации."
+                if error.status_code == 403
+                else "OpenAI отклонил запрос: проверьте корректность API‑ключа и регион доступа."
+            )
+            return ProviderAPIError(
+                provider=error.provider,
+                status_code=error.status_code,
+                message=friendly,
+                error_type="region_blocked" if error.status_code == 403 else "auth",
+                error_code="region_blocked" if error.status_code == 403 else "auth",
                 provider_message=raw_body or error.provider_message,
                 retryable=False,
                 duration_ms=error.duration_ms,

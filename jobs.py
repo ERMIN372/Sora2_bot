@@ -1212,15 +1212,17 @@ class JobQueue:
                 key_mask = self._gemini_key_mask
             else:
                 key_mask = ""
+            poll_target = pending.video_id or provider_job_id
             try:
                 log.debug(
                     "Polling provider job job_id=%s provider_job=%s provider=%s corr_id=%s",
                     pending.job_id,
-                    provider_job_id,
+                    poll_target,
                     provider_key,
                     pending.corr_id,
                 )
-                result = await client.get_job_status(provider_job_id)
+                result = await client.get_job_status(poll_target)
+                provider_job_id = poll_target
             except ProviderAPIError as exc:
                 log.warning(
                     "Provider polling failed job_id=%s corr_id=%s provider=%s status=%s error_type=%s error_code=%s message=%s",

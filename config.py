@@ -18,6 +18,8 @@ log = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 SORA_SUPPORTED_MODELS = ["sora-2", "sora-2-pro"]
+OPENAI_API_BASE = "https://api.openai.com"
+DEFAULT_OPENAI_BETA_HEADER = "video=1"
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -196,9 +198,9 @@ class Config:
     openai_org_id: Optional[str] = None
     # Значение "sora" больше не поддерживается и приведёт к ошибке "Model not found" в Sora API.
     sora_model_video: str = SORA_SUPPORTED_MODELS[0]
-    openai_api_base: str = "https://api.openai.com"
+    openai_api_base: str = OPENAI_API_BASE
     openai_api_version_video: str = "v1beta"
-    openai_beta_header: str = ""
+    openai_beta_header: str = DEFAULT_OPENAI_BETA_HEADER
     sora_requests_per_minute: int = 60
     gemini_requests_per_minute: int = 120
     default_video_model: str = "veo-3.0-generate-001"
@@ -532,10 +534,15 @@ def load_config() -> Config:
         openai_beta_header or "default",
         provider_timeout_s,
     )
-    sora_model_video = (
-        os.getenv("SORA_MODEL_VIDEO", Config.sora_model_video).strip()
-        or Config.sora_model_video
-    )
+    raw_sora_model = os.getenv("SORA_MODEL_VIDEO", Config.sora_model_video).strip()
+    sora_model_video = raw_sora_model or Config.sora_model_video
+    if sora_model_video not in SORA_SUPPORTED_MODELS:
+        log.warning(
+            "Unsupported Sora video model %s; falling back to %s",
+            sora_model_video,
+            Config.sora_model_video,
+        )
+        sora_model_video = Config.sora_model_video
     gemini_enabled = bool(gemini_api_key)
     if not gemini_enabled:
         log.warning("Gemini API key is not configured; generation features will be disabled")
