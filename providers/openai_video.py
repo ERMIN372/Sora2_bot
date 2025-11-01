@@ -14,7 +14,12 @@ from typing import Any, Deque, Dict, FrozenSet, Iterable, List, Mapping, Optiona
 
 import aiohttp
 
-from config import Config, DEFAULT_OPENAI_BETA_HEADER, OPENAI_API_BASE
+from config import (
+    Config,
+    DEFAULT_OPENAI_BETA_HEADER,
+    OPENAI_API_BASE,
+    SORA_DEFAULT_MODEL,
+)
 
 from .api_error_handler import ApiErrorHandler
 from .base import (
@@ -34,6 +39,7 @@ log = _PROVIDERS_LOG.getChild("openai_video") if _PROVIDERS_LOG else logging.get
 
 
 _DEFAULT_VIDEO_MODELS: Tuple[str, ...] = ("sora-2", "sora-2-pro")
+_VIDEO_MODEL_PREFIXES: Tuple[str, ...] = ("sora-2",)
 _VIDEO_MIME_PREFIXES = ("video/", "application/octet-stream")
 
 ALLOWED_CREATE_FIELDS: FrozenSet[str] = frozenset({"prompt", "model", "duration", "size"})
@@ -100,6 +106,66 @@ def _guess_mime(entry: Mapping[str, Any]) -> Optional[str]:
     return None
 
 
+def _filter_video_models(models: Iterable[str]) -> List[str]:
+    filtered: List[str] = []
+    for model in models:
+        if not isinstance(model, str):
+            continue
+        candidate = model.strip()
+        if not candidate:
+            continue
+        lowered = candidate.lower()
+        if any(lowered.startswith(prefix) for prefix in _VIDEO_MODEL_PREFIXES):
+            filtered.append(lowered)
+    return sorted(dict.fromkeys(filtered))
+
+
+def _parse_error_message(body: str) -> Tuple[Optional[str], Optional[str]]:
+    try:
+        payload = json.loads(body)
+    except Exception:
+        text = body.strip() if isinstance(body, str) else ""
+        return None, text or None
+    if isinstance(payload, Mapping):
+        error_payload = payload.get("error")
+        if isinstance(error_payload, Mapping):
+            code = error_payload.get("code") or error_payload.get("type")
+            message = (
+                error_payload.get("message")
+                or error_payload.get("detail")
+                or error_payload.get("title")
+            )
+            code_text = str(code) if isinstance(code, str) else None
+            message_text = str(message) if isinstance(message, str) else None
+            return code_text, message_text
+        code_value = payload.get("code")
+        message_value = payload.get("message")
+        if isinstance(code_value, str) or isinstance(message_value, str):
+            return (
+                str(code_value) if isinstance(code_value, str) else None,
+                str(message_value) if isinstance(message_value, str) else None,
+            )
+    return None, None
+
+
+def _normalise_error_code(status: int, error_code: Optional[str]) -> str:
+    mapping = {
+        400: "invalid_request",
+        401: "auth",
+        403: "region_blocked",
+        404: "content_not_ready",
+        409: "content_not_ready",
+        429: "rate_limit",
+    }
+    if status in mapping:
+        return mapping[status]
+    if 500 <= status < 600:
+        return "server_error"
+    if error_code:
+        return str(error_code)
+    return "unknown"
+
+
 @dataclass(frozen=True)
 class PreparedCreateRequest:
     request: Dict[str, Any]
@@ -133,10 +199,10 @@ class OpenAIVideoClient(BaseProviderClient):
         self._beta_header = beta_header
         self._organization_id = org_id
         self._supported_models: set[str] = set(_DEFAULT_VIDEO_MODELS)
-        configured_model = (config.sora_model_video or "").strip()
+        configured_model = config.resolved_sora_video_model
         if configured_model:
             self._supported_models.add(configured_model)
-        self._default_model = configured_model or _DEFAULT_VIDEO_MODELS[0]
+        self._default_model = configured_model or SORA_DEFAULT_MODEL
         self._api_version = "v1beta"
         self._default_params: Dict[str, Any] = {}
         self._error_handler = ApiErrorHandler(
@@ -210,7 +276,7 @@ class OpenAIVideoClient(BaseProviderClient):
             diagnostics["last_content_variant"] = self._last_download_meta.get("variant")
         return diagnostics
 
-    async def create(
+    async def create_video(
         self,
         *,
         prompt: str,
@@ -233,7 +299,7 @@ class OpenAIVideoClient(BaseProviderClient):
                 request["prompt"] = prompt_text
         dropped_fields = list(prepared.dropped_fields)
         correlation_id = prepared.correlation_id
-        path = self._videos_path()
+        path = self._videos_create_path()
         headers = self._build_headers()
         if idempotency_key:
             headers.setdefault("Idempotency-Key", idempotency_key)
@@ -263,9 +329,32 @@ class OpenAIVideoClient(BaseProviderClient):
             diagnostic={"dropped_fields": dropped_fields},
         )
         log.info(
-            "openai.video.create status=%s duration_ms=%s model=%s", status_code, duration_ms, request.get("model")
+            "openai.video.create status=%s duration_ms=%s model=%s endpoint=%s",
+            status_code,
+            duration_ms,
+            request.get("model"),
+            path,
         )
         return (data, status_code, duration_ms) if return_meta else data
+
+    async def create(
+        self,
+        *,
+        prompt: str,
+        settings: Optional[Mapping[str, Any]] = None,
+        payload: Optional[Mapping[str, Any]] = None,
+        idempotency_key: Optional[str] = None,
+        return_meta: bool = False,
+        prepared: Optional[PreparedCreateRequest] = None,
+    ) -> Any:
+        return await self.create_video(
+            prompt=prompt,
+            settings=settings,
+            payload=payload,
+            idempotency_key=idempotency_key,
+            return_meta=return_meta,
+            prepared=prepared,
+        )
 
     def prepare_create_request(
         self,
@@ -438,7 +527,7 @@ class OpenAIVideoClient(BaseProviderClient):
         if self._organization_id:
             headers["OpenAI-Organization"] = self._organization_id
         safe_headers = _sanitize_headers(headers)
-        correlation_id = f"download:{video_id}"
+        correlation_id = f"download:{video_id}:{fmt}"
         self._record_last_request(
             method="GET",
             path=path,
@@ -452,8 +541,13 @@ class OpenAIVideoClient(BaseProviderClient):
             total=self._config.request_read_timeout or None,
             sock_read=self._config.request_read_timeout or None,
         )
-        delays = (1, 3, 7, 15)
-        for attempt, delay in enumerate(delays, start=1):
+        retry_schedule = (0, 1, 3, 7, 15)
+        max_attempts = min(4, len(retry_schedule))
+        last_error: Optional[ProviderAPIError] = None
+        for attempt in range(1, max_attempts + 1):
+            delay = retry_schedule[attempt - 1]
+            if delay:
+                await asyncio.sleep(delay)
             payload = {"params": params, "attempt": attempt}
             self._log_request(
                 method="GET",
@@ -476,15 +570,10 @@ class OpenAIVideoClient(BaseProviderClient):
                     response_headers = dict(response.headers)
                     request_id = _extract_request_id(response_headers) or ""
                     status = int(response.status)
-                    self._last_download_meta = {
+                    diagnostic = {
                         "video_id": video_id,
-                        "status_code": status,
-                        "request_id": request_id,
-                        "duration_ms": duration_ms,
-                        "attempt": attempt,
-                        "url": url,
                         "format": fmt,
-                        "timestamp": time.time(),
+                        "attempt": attempt,
                     }
                     self._record_response_history(
                         method="GET",
@@ -492,9 +581,8 @@ class OpenAIVideoClient(BaseProviderClient):
                         status_code=status,
                         duration_ms=duration_ms,
                         request_id=request_id,
-                        diagnostic=None,
+                        diagnostic=diagnostic,
                     )
-                    note = None
                     if status == 200:
                         target_dir = Path(tempfile.mkdtemp(prefix="openai-video-"))
                         file_path = target_dir / f"{video_id}.{fmt}"
@@ -510,6 +598,14 @@ class OpenAIVideoClient(BaseProviderClient):
                                     if chunk:
                                         output.write(chunk)
                                         size += len(chunk)
+                        self._update_last_download_meta(
+                            status_code=status,
+                            request_id=request_id,
+                            url=url,
+                            duration_ms=duration_ms,
+                            diagnostic=diagnostic,
+                            note=f"bytes={size}",
+                        )
                         self._last_download_meta["bytes"] = size
                         self._last_download_meta["file_path"] = str(file_path)
                         self._log_response(
@@ -523,47 +619,33 @@ class OpenAIVideoClient(BaseProviderClient):
                             note=f"bytes={size}",
                         )
                         log.info(
-                            "openai.video.download success video_id=%s status=%s bytes=%s request_id=%s",
-                            video_id,
+                            "openai.video.download status=%s request_id=%s endpoint=%s bytes=%s",
                             status,
-                            size,
                             request_id,
+                            path,
+                            size,
                         )
                         return file_path
-                    if status in (404, 409):
-                        note = f"retrying delay={delay}s"
-                        self._last_download_meta["note"] = note
-                        self._log_response(
-                            method="GET",
-                            path=path,
-                            status_code=status,
-                            duration_ms=duration_ms,
-                            request_id=request_id,
-                            correlation_id=correlation_id,
-                            attempt=attempt,
-                            note=note,
-                        )
-                        if attempt < len(delays):
-                            await asyncio.sleep(delay)
-                        continue
-                    if status in (429, 500, 502, 503, 504):
-                        note = f"server_retry delay={delay}s"
-                        self._last_download_meta["note"] = note
-                        self._log_response(
-                            method="GET",
-                            path=path,
-                            status_code=status,
-                            duration_ms=duration_ms,
-                            request_id=request_id,
-                            correlation_id=correlation_id,
-                            attempt=attempt,
-                            note=note,
-                        )
-                        if attempt < len(delays):
-                            await asyncio.sleep(delay)
-                        continue
-                    body = await response.text()
-                    self._last_download_meta["note"] = "error"
+                    body_text = await response.text()
+                    error_code, error_message = _parse_error_message(body_text)
+                    normalised_code = _normalise_error_code(status, error_code)
+                    message_text = error_message or (
+                        "Контент ещё обрабатывается"
+                        if status in (404, 409)
+                        else "Временная ошибка сервера"
+                        if 500 <= status < 600
+                        else f"HTTP {status}"
+                    )
+                    note = f"status={status} code={normalised_code}"
+                    retryable = status in (404, 409, 429) or 500 <= status < 600
+                    self._update_last_download_meta(
+                        status_code=status,
+                        request_id=request_id,
+                        url=url,
+                        duration_ms=duration_ms,
+                        diagnostic=diagnostic,
+                        note=note,
+                    )
                     self._log_response(
                         method="GET",
                         path=path,
@@ -572,58 +654,37 @@ class OpenAIVideoClient(BaseProviderClient):
                         request_id=request_id,
                         correlation_id=correlation_id,
                         attempt=attempt,
-                        note="error",
+                        note=note,
                     )
-                    raise ProviderAPIError(
+                    error = ProviderAPIError(
                         provider=self.provider_name,
                         status_code=status,
-                        message=f"HTTP {status}: {body}",
-                        error_type=(
-                            "invalid_request"
-                            if status == 400
-                            else "auth"
-                            if status == 401
-                            else "region_blocked"
-                            if status == 403
-                            else "unknown"
-                        ),
-                        error_code=(
-                            "invalid_request"
-                            if status == 400
-                            else "auth"
-                            if status == 401
-                            else "region_blocked"
-                            if status == 403
-                            else "unknown"
-                        ),
-                        provider_message=body,
-                        retryable=status in (429, 500, 502, 503, 504),
-                        code=(
-                            "invalid_request"
-                            if status == 400
-                            else "auth"
-                            if status == 401
-                            else "region_blocked"
-                            if status == 403
-                            else "unknown"
-                        ),
-                        body=body,
+                        message=message_text,
+                        error_type=normalised_code,
+                        error_code=error_code or normalised_code,
+                        provider_message=body_text,
+                        retryable=retryable,
+                        duration_ms=duration_ms,
+                        code=normalised_code,
+                        body=body_text,
                         request_id=request_id,
                         status=status,
                     )
+                    if retryable and attempt < max_attempts:
+                        last_error = error
+                        continue
+                    raise error
             except asyncio.TimeoutError as exc:
                 duration_ms = int((time.monotonic() - started) * 1000)
-                self._last_download_meta = {
-                    "video_id": video_id,
-                    "status_code": 0,
-                    "request_id": "",
-                    "duration_ms": duration_ms,
-                    "attempt": attempt,
-                    "url": url,
-                    "format": fmt,
-                    "timestamp": time.time(),
-                    "note": "timeout",
-                }
+                note = "timeout"
+                self._update_last_download_meta(
+                    status_code=0,
+                    request_id="",
+                    url=url,
+                    duration_ms=duration_ms,
+                    diagnostic={"video_id": video_id, "format": fmt, "attempt": attempt},
+                    note=note,
+                )
                 self._log_response(
                     method="GET",
                     path=path,
@@ -632,7 +693,7 @@ class OpenAIVideoClient(BaseProviderClient):
                     request_id="",
                     correlation_id=correlation_id,
                     attempt=attempt,
-                    note="timeout",
+                    note=note,
                 )
                 raise ProviderAPIError(
                     provider=self.provider_name,
@@ -647,17 +708,15 @@ class OpenAIVideoClient(BaseProviderClient):
                 ) from exc
             except aiohttp.ClientError as exc:
                 duration_ms = int((time.monotonic() - started) * 1000)
-                self._last_download_meta = {
-                    "video_id": video_id,
-                    "status_code": 0,
-                    "request_id": "",
-                    "duration_ms": duration_ms,
-                    "attempt": attempt,
-                    "url": url,
-                    "format": fmt,
-                    "timestamp": time.time(),
-                    "note": "client_error",
-                }
+                note = "client_error"
+                self._update_last_download_meta(
+                    status_code=0,
+                    request_id="",
+                    url=url,
+                    duration_ms=duration_ms,
+                    diagnostic={"video_id": video_id, "format": fmt, "attempt": attempt},
+                    note=note,
+                )
                 self._log_response(
                     method="GET",
                     path=path,
@@ -666,7 +725,7 @@ class OpenAIVideoClient(BaseProviderClient):
                     request_id="",
                     correlation_id=correlation_id,
                     attempt=attempt,
-                    note="client_error",
+                    note=note,
                 )
                 raise ProviderAPIError(
                     provider=self.provider_name,
@@ -679,21 +738,12 @@ class OpenAIVideoClient(BaseProviderClient):
                     duration_ms=duration_ms,
                     code="network_error",
                 ) from exc
-        self._last_download_meta = {
-            "video_id": video_id,
-            "status_code": 0,
-            "request_id": "",
-            "duration_ms": 0,
-            "attempt": len(delays),
-            "url": url,
-            "format": fmt,
-            "timestamp": time.time(),
-            "note": "content_not_ready",
-        }
+        if last_error is not None:
+            raise last_error
         raise ProviderAPIError(
             provider=self.provider_name,
             status_code=0,
-            message="Не удалось скачать видео после всех попыток; попробуйте позже",
+            message="Контент ещё обрабатывается",
             error_type="content_not_ready",
             error_code="content_not_ready",
             provider_message="",
@@ -756,19 +806,23 @@ class OpenAIVideoClient(BaseProviderClient):
         return body, headers
 
     async def list_models(self) -> List[str]:
+        path = self._models_list_path()
         data, status_code, duration_ms = await self._request_json(
-            "GET", f"/{self._api_version}/models", diagnostic={"dropped_fields": []}
+            "GET", path, diagnostic={"dropped_fields": []}
         )
-        log.debug("openai.video.list_models status=%s duration_ms=%s", status_code, duration_ms)
+        log.debug(
+            "openai.video.list_models status=%s duration_ms=%s endpoint=%s", status_code, duration_ms, path
+        )
         models = self._extract_model_ids(data)
-        if models:
+        filtered_models = _filter_video_models(models)
+        if filtered_models:
             preserved: set[str] = set(_DEFAULT_VIDEO_MODELS)
             if self._default_model:
                 preserved.add(self._default_model)
-            preserved.update(models)
+            preserved.update(filtered_models)
             self._supported_models = preserved
-        self._available_models = tuple(sorted(models))
-        return sorted(models)
+        self._available_models = tuple(filtered_models)
+        return filtered_models
 
     def get_video_object(self, payload: Any) -> Optional[Dict[str, Any]]:
         if isinstance(payload, Mapping):
@@ -850,6 +904,12 @@ class OpenAIVideoClient(BaseProviderClient):
 
     def _videos_path(self) -> str:
         return f"/{self._api_version}/videos"
+
+    def _videos_create_path(self) -> str:
+        return f"/{self._api_version}/videos/create"
+
+    def _models_list_path(self) -> str:
+        return f"/{self._api_version}/models/list"
 
     def _resolve_content_api_root(self, base_url: str) -> str:
         _ = base_url  # legacy argument

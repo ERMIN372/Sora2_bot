@@ -266,7 +266,7 @@ def test_openai_video_full_cycle(monkeypatch: pytest.MonkeyPatch, make_openai_vi
         assert created["id"] == "vid_123"
         create_request = client.last_request
         assert create_request["method"] == "POST"
-        assert create_request["path"] == "/v1beta/videos"
+        assert create_request["path"] == "/v1beta/videos/create"
         assert "payload" in create_request
         assert create_request["payload"].get("duration") == 8
         assert "metadata" not in create_request["payload"]
@@ -357,7 +357,7 @@ def test_openai_video_models_filtering(monkeypatch: pytest.MonkeyPatch, make_ope
 
     async def fake_request(self, method: str, path: str, **kwargs: Any):
         assert method == "GET"
-        assert path == "/v1beta/models"
+        assert path == "/v1beta/models/list"
         return (
             {
                 "data": {
@@ -381,10 +381,9 @@ def test_openai_video_models_filtering(monkeypatch: pytest.MonkeyPatch, make_ope
 
     models = _run(exercise())
 
-    assert models == ["gpt-4.1", "sora-2"]
+    assert models == ["sora-2"]
     supported = client.supported_models
     assert "sora-2" in supported
-    assert "gpt-4.1" in supported
 
 
 def test_openai_video_unknown_parameter_error(make_openai_video_config) -> None:

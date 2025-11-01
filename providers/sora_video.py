@@ -13,7 +13,7 @@ from typing import Any, Dict, Iterable, Optional, Tuple
 
 import aiohttp
 
-from config import Config, SORA_SUPPORTED_MODELS
+from config import Config, SORA_DEFAULT_MODEL, SORA_SUPPORTED_MODELS
 
 from .api_error_handler import ApiErrorHandler
 from .base import (
@@ -194,12 +194,14 @@ class SoraVideoClient(BaseProviderClient):
         )
         self._last_download_meta: Dict[str, Any] = {}
         self._supported_models = set(SORA_SUPPORTED_MODELS)
-        configured_model = (config.sora_model_video or "").strip()
-        fallback_model = SORA_SUPPORTED_MODELS[0]
+        configured_model = config.resolved_sora_video_model
+        fallback_model = SORA_DEFAULT_MODEL
+        if configured_model:
+            self._supported_models.add(configured_model)
         if configured_model in self._supported_models:
             self._default_model = configured_model
         else:
-            if configured_model:
+            if configured_model and configured_model != fallback_model:
                 log.warning(
                     "Unsupported default Sora model configured model=%s; falling back to '%s'",
                     configured_model,
