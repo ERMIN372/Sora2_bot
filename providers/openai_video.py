@@ -121,7 +121,7 @@ class OpenAIVideoClient(BaseProviderClient):
         api_key = (config.openai_key or "").strip()
         if not api_key:
             raise RuntimeError("OpenAI API key is required for video generation")
-        base_url = (config.openai_api_base or "https://api.openai.com/v1").rstrip("/")
+        base_url = (config.openai_api_base or "https://api.openai.com").rstrip("/")
         beta_header = (config.openai_beta_header or "video=1").strip()
         default_headers: Dict[str, str] = {}
         if beta_header:
@@ -201,6 +201,7 @@ class OpenAIVideoClient(BaseProviderClient):
             "error_snapshots": [dict(snapshot) for snapshot in self._error_snapshots],
             "content_endpoint": f"{self._content_api_root}/v1beta/videos/{{video_id}}/content",
             "available_models": list(self._available_models),
+            "base_url": self._content_api_root,
         }
         if self._last_request:
             diagnostics["last_request_url"] = self._last_request.get("url")

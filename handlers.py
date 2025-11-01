@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 import re
 import uuid
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Dict, Iterable, List, Literal, Mapping, Optional, Set, Tuple
 
 from aiogram import Bot, Dispatcher
@@ -30,7 +31,7 @@ from aiogram.types import (
 )
 
 from archive import ArchivePayload, ArchivePublisher
-from config import Config
+from config import Config, SORA_SUPPORTED_MODELS
 from db import Database, ErrorLogRecord, GenerationJobRecord
 from generation_gate import GateDecision, GenerationRequestGate, normalize_prompt
 from i18n import SafeText, escape_html, format_credits, format_prompt, i18n
@@ -52,6 +53,7 @@ from observability import (
 )
 from moderation import policy_message, run_preflight
 from providers import ProviderAPIError
+from providers.base import BaseProviderClient
 from providers.openai_chat import OpenAIChatClient
 from providers.openai_video import OpenAIVideoClient
 from services.gemini_catalog import list_veo_video_models
@@ -119,7 +121,7 @@ _SUPPORTED_SORA_PREFIXES: Tuple[str, ...] = (
     "gpt-4.2-sora",
 )
 
-SUPPORTED_SORA_MODELS: Set[str] = {"sora-2", "sora-2-fast", "sora-2-pro"}
+SUPPORTED_SORA_MODELS: Set[str] = set(SORA_SUPPORTED_MODELS)
 
 
 class GenerationStates(StatesGroup):
@@ -3539,63 +3541,78 @@ async def video_get_command(
     job_queue: JobQueue,
     config: Config,
 ) -> None:
-    args = (message.get_args() or "").strip()
-    if not args:
-        await message.answer(i18n.t("video.get.usage"))
-        return
-    job_id: Optional[str] = None
-    asset_id: Optional[str] = None
-    video_id: Optional[str] = None
-    if args.startswith("{"):
-        try:
-            data = json.loads(args)
-        except json.JSONDecodeError:
-            await message.answer(i18n.t("video.common.invalid_json"))
-            return
-        if isinstance(data, dict):
-            job_id = str(data.get("job_id") or data.get("id") or "").strip() or None
-            asset_id = str(data.get("asset_id") or data.get("asset") or "").strip() or None
-            video_id = str(data.get("video_id") or "").strip() or None
-    else:
-        parts = args.split()
-        job_id = parts[0] if parts else None
-        if len(parts) > 1:
-            asset_id = parts[1]
-        if len(parts) > 2:
-            video_id = parts[2]
-    if not job_id:
-        await message.answer(i18n.t("video.get.missing_job_id"))
-        return
-    job = await db.get_job(job_id)
-    if job is None:
-        await message.answer(i18n.t("video.get.job_not_found"))
-        return
     user = message.from_user
-    if user and job.user_id != user.id and not _is_admin(user.id, config):
-        await message.answer(i18n.t("video.get.access_denied"))
+    if not user or not _is_admin(user.id, config):
+        await message.answer(i18n.t("video.get.admin_only"))
         return
-    resolved_video_id = video_id or job.video_id
-    if not resolved_video_id:
-        await message.answer(i18n.t("video.get.missing_video_id"))
+    args = (message.get_args() or "").strip()
+    parts = [part for part in args.split() if part]
+    if not parts:
+        await message.answer(i18n.t("video.get.usage_admin"))
         return
-    provider_key = job.model or "openai-video-api"
-    await job_queue.enqueue(
-        job_id=job.id,
-        user_id=job.user_id,
-        prompt=job.prompt,
-        corr_id=job.corr_id or job.id,
-        size=job.size or "",
-        model=job.model or provider_key,
-        provider=provider_key,
-        username=job.username,
-        original_prompt=job.prompt,
-        sanitized_prompt=job.prompt,
-        task_type=VIDEO_TASK_DOWNLOAD,
-        provider_job_id=job.id,
-        video_id=resolved_video_id,
-        asset_id=asset_id or None,
+    video_id = parts[0]
+    if not video_id:
+        await message.answer(i18n.t("video.get.usage_admin"))
+        return
+    fmt = parts[1] if len(parts) > 1 else "mp4"
+    provider: Optional[BaseProviderClient] = None
+    for key in ("openai-video-api", "openai-video", config.sora_model_video, "sora"):
+        if not key:
+            continue
+        candidate = job_queue.get_provider(key)
+        if candidate and callable(getattr(candidate, "download_content", None)):
+            provider = candidate
+            break
+    if provider is None:
+        await message.answer(i18n.t("video.get.provider_missing"))
+        return
+    download_handler = getattr(provider, "download_content", None)
+    if not callable(download_handler):
+        await message.answer(i18n.t("video.get.provider_missing"))
+        return
+    try:
+        file_path: Path = await download_handler(video_id, format=fmt)
+    except ProviderAPIError as exc:
+        await message.answer(
+            i18n.t(
+                "video.get.error",
+                status=exc.status_code,
+                code=exc.error_code or exc.code or "unknown",
+                message=str(exc),
+            )
+        )
+        return
+    except Exception as exc:  # pragma: no cover - defensive
+        log.exception("Manual download failed for video %s", video_id)
+        await message.answer(
+            i18n.t("video.get.error", status=0, code="exception", message=str(exc))
+        )
+        return
+    try:
+        payload = file_path.read_bytes()
+    except Exception as exc:  # pragma: no cover - filesystem guard
+        log.exception("Failed to read downloaded file %s", file_path)
+        await message.answer(i18n.t("video.get.read_error", error=str(exc)))
+        return
+    mime, _ = mimetypes.guess_type(file_path.name)
+    input_file = BufferedInputFile(payload, filename=file_path.name, mime_type=mime)
+    caption = i18n.t(
+        "video.get.sent",
+        video_id=video_id,
+        size=len(payload),
+        provider=getattr(provider, "provider_name", "sora"),
     )
-    await message.answer(i18n.t("video.get.queued"))
+    await message.answer_document(input_file, caption=caption)
+    try:
+        file_path.unlink()
+    except FileNotFoundError:  # pragma: no cover - filesystem cleanup
+        pass
+    except Exception:  # pragma: no cover - filesystem cleanup
+        log.debug("Temporary video file %s already removed", file_path)
+    try:
+        file_path.parent.rmdir()
+    except Exception:  # pragma: no cover - filesystem cleanup
+        pass
 
 
 async def diag_openai_video_command(
@@ -3621,6 +3638,7 @@ async def diag_openai_video_command(
     content_endpoint = diagnostics.get("content_endpoint") or "—"
     available_models = diagnostics.get("available_models") or []
     available_models_text = ", ".join(map(str, available_models)) or "—"
+    base_url_value = diagnostics.get("base_url") or config.openai_api_base or "—"
     last_status = diagnostics.get("last_content_status")
     last_request_id = diagnostics.get("last_content_request_id") or "—"
     last_video_id = diagnostics.get("last_content_video_id") or "—"
@@ -3643,6 +3661,7 @@ async def diag_openai_video_command(
         f"api_version: {escape_html(diagnostics.get('api_version') or '—')}",
         f"beta_header: {escape_html(diagnostics.get('beta_header') or '—')}",
         f"organization_id: {escape_html(diagnostics.get('organization_id') or '—')}",
+        f"base_url: {escape_html(str(base_url_value))}",
         f"headers: {headers_text}",
         f"content_endpoint: {escape_html(content_endpoint)}",
         f"last_request_url: {escape_html(str(last_request_url))}",
@@ -3698,7 +3717,7 @@ async def diag_openai_video_command(
         lines.append(f"models.list: error={escape_html(str(exc))}")
     else:
         models_text = ", ".join(models) if models else "—"
-        lines.append(f"models.list: {escape_html(models_text)}")
+        lines.append(f"models.list (/models/list): {escape_html(models_text)}")
         filtered_models = _filter_video_model_ids(models)
         if filtered_models:
             preview = ", ".join(filtered_models[:5])
@@ -3728,6 +3747,17 @@ async def diag_openai_video_command(
             lines.append(f"create.extras: {escape_html(extras_preview)}")
     except Exception as exc:  # pragma: no cover - validation guard
         lines.append(f"create.prepare: error={escape_html(str(exc))}")
+    probe_result = "—"
+    try:
+        await client.content("diag-probe")
+    except ProviderAPIError as exc:
+        code_value = exc.error_code or exc.code or "-"
+        probe_result = f"status={exc.status_code} code={code_value}"
+    except Exception as exc:  # pragma: no cover - network guard
+        probe_result = f"error={str(exc)}"
+    else:
+        probe_result = "ok"
+    lines.append(f"content.test: {escape_html(probe_result)}")
     history = getattr(client, "diagnostic_history", [])
     if history:
         lines.append("")

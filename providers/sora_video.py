@@ -6,9 +6,14 @@ import json
 import logging
 import math
 import re
+import tempfile
+import time
+from pathlib import Path
 from typing import Any, Dict, Iterable, Optional, Tuple
 
-from config import Config
+import aiohttp
+
+from config import Config, SORA_SUPPORTED_MODELS
 
 from .api_error_handler import ApiErrorHandler
 from .base import (
@@ -16,6 +21,7 @@ from .base import (
     ProviderAPIError,
     ProviderJobStatus,
     ProviderJobSubmission,
+    _extract_request_id,
     _mask_secret,
     _serialise_for_log,
 )
@@ -28,9 +34,6 @@ from services.payload_whitelists import SORA_VIDEO_ALLOWED
 from services.rate_limiter import AsyncRateLimiter
 
 log = logging.getLogger(__name__)
-
-
-AVAILABLE_SORA_MODELS = ["sora-2", "sora-2-fast", "sora-2-pro"]
 
 
 _SIZE_PATTERN = re.compile(r"^(\d+)[xX](\d+)$")
@@ -158,8 +161,11 @@ class SoraVideoClient(BaseProviderClient):
         api_key = config.openai_key
         if not api_key:
             raise RuntimeError("Sora API key is not configured; set SORA_API_KEY or OPENAI_API_KEY")
-        base_url = (config.openai_api_base or "https://api.openai.com/v1").rstrip("/")
-        beta_header = (config.openai_beta_header or "assistants=v2").strip()
+        base_url = (config.openai_api_base or "https://api.openai.com").rstrip("/")
+        api_version = (config.openai_api_version_video or "v1beta").strip().strip("/")
+        if not api_version:
+            api_version = "v1beta"
+        beta_header = (config.openai_beta_header or "video=1").strip()
         default_headers: Dict[str, str] = {}
         if beta_header:
             default_headers["OpenAI-Beta"] = beta_header
@@ -179,10 +185,18 @@ class SoraVideoClient(BaseProviderClient):
             _mask_secret(config.openai_org_id),
             _mask_secret(api_key),
         )
-        self._supported_models = set(AVAILABLE_SORA_MODELS)
+        self._beta_header = beta_header
+        self._organization_id = (config.openai_org_id or "").strip()
+        self._api_version = api_version
+        self._api_prefix = f"/{self._api_version}"
+        self._content_endpoint_template = (
+            f"{self._base_url}{self._api_prefix}/videos/{{video_id}}/content"
+        )
+        self._last_download_meta: Dict[str, Any] = {}
+        self._supported_models = set(SORA_SUPPORTED_MODELS)
         configured_model = (config.sora_model_video or "").strip()
-        fallback_model = AVAILABLE_SORA_MODELS[0]
-        if configured_model and configured_model in self._supported_models:
+        fallback_model = SORA_SUPPORTED_MODELS[0]
+        if configured_model in self._supported_models:
             self._default_model = configured_model
         else:
             if configured_model:
@@ -194,7 +208,7 @@ class SoraVideoClient(BaseProviderClient):
             self._default_model = fallback_model
         self._cache: Dict[str, Dict[str, Any]] = {}
         self._error_handler = ApiErrorHandler(
-            provider="sora", logger=log, supported_models=AVAILABLE_SORA_MODELS
+            provider="sora", logger=log, supported_models=SORA_SUPPORTED_MODELS
         )
         limit_per_minute = max(1, config.sora_requests_per_minute)
         self._rate_limiter = AsyncRateLimiter(limit_per_minute, 60.0)
@@ -202,6 +216,16 @@ class SoraVideoClient(BaseProviderClient):
     # ------------------------------------------------------------------
     # High level operations
     # ------------------------------------------------------------------
+
+    @property
+    def supported_models(self) -> Tuple[str, ...]:
+        return tuple(sorted(self._supported_models))
+
+    def _build_api_path(self, suffix: str) -> str:
+        suffix = (suffix or "").lstrip("/")
+        if not suffix:
+            return self._api_prefix
+        return f"{self._api_prefix}/{suffix}"
 
     async def enqueue_job(
         self,
@@ -214,40 +238,23 @@ class SoraVideoClient(BaseProviderClient):
     ) -> ProviderJobSubmission:
         settings = dict(settings or {})
         requested_model = (settings.get("model") or self._default_model or "").strip()
-        model_name = requested_model or self._default_model
-        if model_name not in self._supported_models:
-            available = ", ".join(AVAILABLE_SORA_MODELS)
-            log.warning(
-                "Unsupported Sora model requested model=%s supported=%s",
-                model_name,
-                AVAILABLE_SORA_MODELS,
-            )
-            raise ProviderAPIError(
-                provider="sora",
-                status_code=400,
-                message=(
-                    "Выбранная модель Sora не поддерживается, используйте одну из: "
-                    f"{available}"
-                ),
-                error_type="invalid_model",
-                error_code="invalid_model",
-                provider_message=json.dumps(
-                    {
-                        "error": {
-                            "code": "invalid_model",
-                            "message": "Unsupported Sora model",
-                        }
-                    },
-                    ensure_ascii=False,
-                ),
-            )
+        if requested_model not in self._supported_models:
+            if requested_model:
+                log.warning(
+                    "Unsupported Sora model requested model=%s; using default=%s",
+                    requested_model,
+                    self._default_model,
+                )
+            model_name = self._default_model
+        else:
+            model_name = requested_model
         settings["model"] = model_name
         request_payload = self._build_request_payload(
             prompt=prompt,
             settings=settings,
             payload=payload or {},
         )
-        endpoint = "/responses"
+        endpoint = self._build_api_path("responses")
         url = f"{self._base_url}{endpoint}"
         serialised_payload = _serialise_for_log(request_payload, limit=2048)
         log.debug("Sora request: url=%s, payload=%s", url, serialised_payload)
@@ -313,7 +320,7 @@ class SoraVideoClient(BaseProviderClient):
             status_code = 200
             duration_ms = 0
         else:
-            endpoint = f"/responses/{job_id}"
+            endpoint = self._build_api_path(f"responses/{job_id}")
             url = f"{self._base_url}{endpoint}"
             log.debug("Sora request: url=%s, payload=%s", url, "")
             log.info(
@@ -595,6 +602,185 @@ class SoraVideoClient(BaseProviderClient):
                 serialised_response,
             )
             return data, status_code, duration_ms
+
+    async def download_content(self, video_id: str, format: str = "mp4") -> Path:
+        if not video_id:
+            raise ValueError("video_id must not be empty")
+        allowed_formats = {"mp4", "webm"}
+        fmt = (format or "mp4").strip().lower()
+        if fmt not in allowed_formats:
+            fmt = "mp4"
+        endpoint = self._build_api_path(f"videos/{video_id}/content")
+        url = f"{self._base_url}{endpoint}"
+        params = {"format": fmt}
+        headers = self._build_headers()
+        headers.pop("Content-Type", None)
+        headers["Accept"] = "video/mp4" if fmt == "mp4" else "video/webm"
+        session = await self._ensure_session()
+        timeout = aiohttp.ClientTimeout(
+            total=self._config.request_read_timeout or None,
+            sock_read=self._config.request_read_timeout or None,
+        )
+        delays = (0, 1, 3, 7, 15)
+        for attempt, delay in enumerate(delays, start=1):
+            if delay:
+                await asyncio.sleep(delay)
+            await self._rate_limiter.acquire()
+            started = time.monotonic()
+            try:
+                async with session.get(
+                    url,
+                    params=params,
+                    headers=headers,
+                    allow_redirects=True,
+                    timeout=timeout,
+                ) as response:
+                    duration_ms = int((time.monotonic() - started) * 1000)
+                    status = int(response.status)
+                    response_headers = dict(response.headers)
+                    request_id = _extract_request_id(response_headers) or ""
+                    meta: Dict[str, Any] = {
+                        "video_id": video_id,
+                        "status_code": status,
+                        "request_id": request_id,
+                        "duration_ms": duration_ms,
+                        "attempt": attempt,
+                        "url": url,
+                        "format": fmt,
+                        "timestamp": time.time(),
+                    }
+                    if status == 200:
+                        target_dir = Path(tempfile.mkdtemp(prefix="sora-video-"))
+                        file_path = target_dir / f"{video_id}.{fmt}"
+                        size = 0
+                        with open(file_path, "wb") as output:
+                            if hasattr(response, "aiter_bytes"):
+                                async for chunk in response.aiter_bytes():
+                                    if chunk:
+                                        output.write(chunk)
+                                        size += len(chunk)
+                            else:
+                                async for chunk in response.content.iter_chunked(65536):
+                                    if chunk:
+                                        output.write(chunk)
+                                        size += len(chunk)
+                        meta["bytes"] = size
+                        meta["file_path"] = str(file_path)
+                        meta["note"] = "success"
+                        self._last_download_meta = meta
+                        log.info(
+                            "sora.download.success video_id=%s status=%s bytes=%s request_id=%s",
+                            video_id,
+                            status,
+                            size,
+                            request_id,
+                        )
+                        return file_path
+                    if status in (404, 409):
+                        note = "content_not_ready"
+                        meta["note"] = note
+                        self._last_download_meta = meta
+                        log.debug(
+                            "sora.download.retry video_id=%s status=%s attempt=%s delay=%s",
+                            video_id,
+                            status,
+                            attempt,
+                            delay,
+                        )
+                        if attempt < len(delays):
+                            continue
+                        break
+                    if status in (429, 500, 502, 503, 504):
+                        meta["note"] = "server_retry"
+                        self._last_download_meta = meta
+                        log.warning(
+                            "sora.download.server_retry video_id=%s status=%s attempt=%s",
+                            video_id,
+                            status,
+                            attempt,
+                        )
+                        if attempt < len(delays):
+                            continue
+                    body = await response.text()
+                    meta["note"] = "error"
+                    self._last_download_meta = meta
+                    raise ProviderAPIError(
+                        provider=self.provider_name,
+                        status_code=status,
+                        message=f"Sora content download failed with status {status}",
+                        error_type="http",
+                        error_code=str(status),
+                        provider_message=body,
+                        retryable=status in (429, 500, 502, 503, 504),
+                        duration_ms=duration_ms,
+                    )
+            except asyncio.TimeoutError as exc:
+                duration_ms = int((time.monotonic() - started) * 1000)
+                self._last_download_meta = {
+                    "video_id": video_id,
+                    "status_code": 0,
+                    "request_id": "",
+                    "duration_ms": duration_ms,
+                    "attempt": attempt,
+                    "url": url,
+                    "format": fmt,
+                    "timestamp": time.time(),
+                    "note": "timeout",
+                }
+                raise ProviderAPIError(
+                    provider=self.provider_name,
+                    status_code=0,
+                    message="Sora content download timed out",
+                    error_type="timeout",
+                    error_code="timeout",
+                    provider_message=str(exc),
+                    retryable=True,
+                    duration_ms=duration_ms,
+                ) from exc
+            except aiohttp.ClientError as exc:
+                duration_ms = int((time.monotonic() - started) * 1000)
+                self._last_download_meta = {
+                    "video_id": video_id,
+                    "status_code": 0,
+                    "request_id": "",
+                    "duration_ms": duration_ms,
+                    "attempt": attempt,
+                    "url": url,
+                    "format": fmt,
+                    "timestamp": time.time(),
+                    "note": "client_error",
+                }
+                raise ProviderAPIError(
+                    provider=self.provider_name,
+                    status_code=0,
+                    message="Sora content download failed",
+                    error_type="network",
+                    error_code="network_error",
+                    provider_message=str(exc),
+                    retryable=True,
+                    duration_ms=duration_ms,
+                ) from exc
+        self._last_download_meta = {
+            "video_id": video_id,
+            "status_code": 0,
+            "request_id": "",
+            "duration_ms": 0,
+            "attempt": len(delays),
+            "url": url,
+            "format": fmt,
+            "timestamp": time.time(),
+            "note": "content_not_ready",
+        }
+        raise ProviderAPIError(
+            provider=self.provider_name,
+            status_code=0,
+            message="Контент ещё не готов, попробуйте позже",
+            error_type="content_not_ready",
+            error_code="content_not_ready",
+            provider_message="",
+            retryable=True,
+            code="content_not_ready",
+        )
 
     def _resolve_job_id(self, payload: Dict[str, Any]) -> Optional[str]:
         if not isinstance(payload, dict):

@@ -36,7 +36,7 @@ def test_enqueue_job_builds_payload(sora_config: Config) -> None:
             mock_request.assert_awaited_once()
             call_args = mock_request.await_args
             assert call_args.args[0] == "POST"
-            assert call_args.args[1] == "/responses"
+            assert call_args.args[1] == "/v1beta/responses"
             payload = call_args.kwargs["json"]
             assert payload["model"] == "sora-2"
             assert payload["input"][0]["content"][0]["text"] == "Make a cool video"
@@ -46,6 +46,27 @@ def test_enqueue_job_builds_payload(sora_config: Config) -> None:
             assert "response_format" not in payload
             assert payload["metadata"]["aspect_ratio"] == "16:9"
             assert payload["metadata"]["duration_sec"] == "6"
+
+    asyncio.run(scenario())
+
+
+def test_enqueue_job_falls_back_to_supported_model(sora_config: Config) -> None:
+    client = SoraVideoClient(config=sora_config)
+
+    async def scenario() -> None:
+        with patch.object(
+            client,
+            "_request",
+            new=AsyncMock(return_value=({"id": "resp-42", "status": "in_progress"}, 200, 20)),
+        ) as mock_request:
+            submission = await client.enqueue_job(
+                prompt="Make a cool video",
+                settings={"model": "sora-experimental"},
+            )
+
+            assert submission.job_id == "resp-42"
+            payload = mock_request.await_args.kwargs["json"]
+            assert payload["model"] == "sora-2"
 
     asyncio.run(scenario())
 
@@ -98,6 +119,6 @@ def test_get_job_status_fetches_remote(sora_config: Config) -> None:
             assert status.status == "failed"
             assert status.error == "bad"
             assert status.status_code == 500
-            mock_request.assert_awaited_once_with("GET", "/responses/resp-3")
+            mock_request.assert_awaited_once_with("GET", "/v1beta/responses/resp-3")
 
     asyncio.run(scenario())

@@ -25,7 +25,7 @@ class OpenAIImageClient(BaseProviderClient):
         api_key = (config.openai_key or "").strip()
         if not api_key:
             raise RuntimeError("OpenAI API key is required for image generation")
-        base_url = (config.openai_api_base or "https://api.openai.com/v1").rstrip("/")
+        base_url = (config.openai_api_base or "https://api.openai.com").rstrip("/")
         beta_header = (config.openai_beta_header or "assistants=v2").strip()
         default_headers: Dict[str, str] = {}
         if beta_header:

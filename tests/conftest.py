@@ -386,7 +386,7 @@ def make_openai_video_config() -> Callable[..., "Config"]:
             "gemini_api_key": "",
             "openai_api_key": "sk-test",
             "sora_api_key": "sk-test",
-            "openai_api_base": "https://api.openai.com/v1",
+            "openai_api_base": "https://api.openai.com",
         }
         base.update(overrides)
         return Config(**base)  # type: ignore[arg-type]
