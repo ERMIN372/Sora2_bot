@@ -632,23 +632,6 @@ def _main_keyboard(config: Config) -> ReplyKeyboardMarkup:
         [KeyboardButton(text=i18n.t("buttons.top_up"))],
         [KeyboardButton(text=i18n.t("buttons.help"))],
     ]
-    if config.sora_video_enabled:
-        keyboard.extend(
-            [
-                [
-                    KeyboardButton(text=i18n.t("buttons.video_models")),
-                    KeyboardButton(text=i18n.t("buttons.video_list")),
-                ],
-                [
-                    KeyboardButton(text=i18n.t("buttons.video_info")),
-                    KeyboardButton(text=i18n.t("buttons.video_get")),
-                ],
-                [
-                    KeyboardButton(text=i18n.t("buttons.video_create")),
-                    KeyboardButton(text=i18n.t("buttons.video_remix")),
-                ],
-            ]
-        )
     keyboard.append([KeyboardButton(text=i18n.t("buttons.chatgpt"))])
     return ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True)
 
