@@ -24,7 +24,7 @@ class OpenAIChatClient:
         api_key = (config.openai_key or "").strip()
         if not api_key:
             raise RuntimeError("OpenAI API key is required for ChatGPT integration")
-        base_url = (config.openai_api_base or "https://api.openai.com/v1").rstrip("/")
+        base_url = (config.openai_api_base or "https://api.openai.com").rstrip("/")
         org_id = (config.openai_org_id or "").strip()
         client_kwargs = {"api_key": api_key, "base_url": base_url}
         if org_id:

@@ -8,7 +8,7 @@ def _make_config(**overrides: object) -> Config:
         "gemini_api_key": "",
         "openai_api_key": "sk-test",
         "sora_api_key": "sk-test",
-        "openai_api_base": "https://api.openai.com/v1",
+        "openai_api_base": "https://api.openai.com",
     }
     base.update(overrides)
     return Config(**base)  # type: ignore[arg-type]
@@ -52,7 +52,7 @@ def test_openai_video_client_get_diagnostics_includes_error_snapshots() -> None:
 
     assert diagnostics["beta_header"] == "video=2"
     assert diagnostics["organization_id"] == "org-diag"
-    assert diagnostics["api_version"] == ""
+    assert diagnostics["api_version"] == "v1beta"
 
     headers = diagnostics["headers"]
     assert headers["OpenAI-Beta"] == "video=2"

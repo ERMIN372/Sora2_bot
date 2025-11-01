@@ -14,6 +14,12 @@ load_dotenv()
 log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+
+SORA_SUPPORTED_MODELS = ["sora-2", "sora-2-pro"]
+
+# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
@@ -189,9 +195,9 @@ class Config:
     sora_api_key: str = ""
     openai_org_id: Optional[str] = None
     # Значение "sora" больше не поддерживается и приведёт к ошибке "Model not found" в Sora API.
-    sora_model_video: str = "sora-2"
-    openai_api_base: str = "https://api.openai.com/v1"
-    openai_api_version_video: str = ""
+    sora_model_video: str = SORA_SUPPORTED_MODELS[0]
+    openai_api_base: str = "https://api.openai.com"
+    openai_api_version_video: str = "v1beta"
     openai_beta_header: str = ""
     sora_requests_per_minute: int = 60
     gemini_requests_per_minute: int = 120
