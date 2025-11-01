@@ -3107,16 +3107,36 @@ async def video_models_command(
     if not config.sora_video_enabled:
         await message.answer(i18n.t("video.models.disabled"))
         return
+    user = message.from_user
+    user_id = user.id if user else 0
     client = _resolve_openai_video_client(job_queue, config, openai_video_client)
     if client is None:
         await message.answer(i18n.t("video.common.init_failed"))
         return
     try:
-        models = await client.list_models()
+        available_models = await client.list_models()
+    except ProviderAPIError as exc:
+        log.warning(
+            "OpenAI video list_models failed status=%s code=%s message=%s",
+            exc.status_code,
+            exc.error_code or exc.code,
+            exc,
+        )
+        if _is_admin(user_id, config):
+            await message.answer(
+                f"API error: {escape_html(exc.error_code or exc.code or 'unknown')} · {escape_html(str(exc))}"
+            )
+        else:
+            await message.answer(i18n.t("video.models.fetch_failed"))
+        return
     except Exception as exc:  # pragma: no cover - network/config guard
-        log.warning("Failed to list OpenAI video models error=%s", exc, exc_info=True)
+        log.warning("Failed to fetch OpenAI models error=%s", exc, exc_info=True)
         await message.answer(i18n.t("video.models.fetch_failed"))
         return
+    if not available_models:
+        await message.answer(i18n.t("errors.video_models_unavailable"))
+        return
+    models = list(available_models)
     visible_models = _filter_video_model_ids(models)
     if not models:
         visible_models = _filter_video_model_ids(client.supported_models)
@@ -3158,13 +3178,51 @@ async def video_create_command(
     if client is None:
         await message.answer(i18n.t("video.common.init_failed"))
         return
-    model_name = (
+    try:
+        available_models = await client.list_models()
+    except ProviderAPIError as exc:
+        log.warning(
+            "OpenAI video list_models failed status=%s code=%s message=%s",
+            exc.status_code,
+            exc.error_code or exc.code,
+            exc,
+        )
+        if _is_admin(user.id, config):
+            await message.answer(
+                f"API error: {escape_html(exc.error_code or exc.code or 'unknown')} · {escape_html(str(exc))}"
+            )
+        else:
+            await message.answer(i18n.t("video.models.fetch_failed"))
+        return
+    except Exception as exc:  # pragma: no cover - network/config guard
+        log.warning("Failed to fetch OpenAI models error=%s", exc, exc_info=True)
+        await message.answer(i18n.t("video.models.fetch_failed"))
+        return
+    if not available_models:
+        await message.answer(i18n.t("errors.video_models_unavailable"))
+        return
+    available_lookup = {model.lower(): model for model in available_models}
+    model_name_raw = (
         (model or str(settings.get("model") or "").strip())
-        or (config.sora_model_video or "").strip()
+        or config.resolved_sora_video_model
     )
-    if not model_name:
-        supported = client.supported_models
-        model_name = supported[0] if supported else "sora-2"
+    model_name_lower = model_name_raw.lower() if model_name_raw else ""
+    if available_lookup:
+        if model_name_lower not in available_lookup:
+            fallback_model = available_models[0]
+            if _is_admin(user.id, config):
+                await message.answer(
+                    i18n.t(
+                        "video.create.model_unavailable",
+                        requested=model_name_raw or "-",
+                        fallback=fallback_model,
+                    )
+                )
+            model_name = fallback_model
+        else:
+            model_name = available_lookup[model_name_lower]
+    else:
+        model_name = model_name_raw or config.resolved_sora_video_model
     settings = dict(settings)
     settings.setdefault("model", model_name)
     size_value = size or str(settings.get("size") or "").strip()
@@ -3179,10 +3237,9 @@ async def video_create_command(
     )
     local_extras = dict(prepared_request.extras)
     credits_cost = config.generation_cost_credits
-    deducted = False
     if credits_cost > 0:
-        deducted = await db.deduct_credit(user.id, credits_cost)
-        if not deducted:
+        balance = await db.get_user_credits(user.id)
+        if balance < credits_cost:
             await message.answer(i18n.t("flow.not_enough"))
             return
     corr_id = str(uuid.uuid4())
@@ -3197,20 +3254,10 @@ async def video_create_command(
         )
     except Exception as exc:  # pragma: no cover - network/config guard
         log.exception("OpenAI video create failed")
-        if deducted:
-            try:
-                await db.add_credits(user.id, credits_cost)
-            except Exception:  # pragma: no cover - external dependency
-                log.exception("Failed to refund credits after create error")
         await message.answer(i18n.t("video.common.send_failed", error=str(exc)))
         return
     job_id, video_id, operation_name = _extract_video_identifiers(data)
     if not job_id:
-        if deducted:
-            try:
-                await db.add_credits(user.id, credits_cost)
-            except Exception:  # pragma: no cover - external dependency
-                log.exception("Failed to refund credits after missing job id")
         snippet = ""
         try:
             snippet = json.dumps(data, ensure_ascii=False)[:400] if data else ""
@@ -3247,11 +3294,6 @@ async def video_create_command(
         )
     except Exception as exc:  # pragma: no cover - defensive
         log.exception("Failed to register OpenAI video job")
-        if deducted:
-            try:
-                await db.add_credits(user.id, credits_cost)
-            except Exception:
-                log.exception("Failed to refund credits after registration error")
         await message.answer(i18n.t("video.create.registration_failed", error=str(exc)))
         return
     lines = [
@@ -3264,8 +3306,6 @@ async def video_create_command(
         i18n.t("video.common.corr_id", corr_id=corr_id),
         i18n.t("video.common.model", model=model_name),
     ]
-    if deducted and credits_cost > 0:
-        lines.append(i18n.t("video.common.credits_deducted", credits=credits_cost))
     await message.answer("\n".join(lines))
     if dropped_fields_snapshot and _is_admin(user.id, config):
         filtered_fields = sorted({str(field) for field in dropped_fields_snapshot if field})

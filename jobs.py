@@ -2187,6 +2187,33 @@ class JobQueue:
             "url": meta.get("url", ""),
         }
         job_extra.setdefault("download", {}).update(download_meta)
+        billing_extra: Dict[str, Any] = {}
+        credits_cost = self._config.generation_cost_credits
+        charged = False
+        if credits_cost > 0:
+            try:
+                charged = await self._db.deduct_credit(pending.user_id, credits_cost)
+            except Exception:  # pragma: no cover - external dependency
+                log.exception(
+                    "Failed to deduct credits after download job_id=%s user=%s",
+                    pending.job_id,
+                    pending.user_id,
+                )
+                billing_extra.update({"status": "error", "credits": credits_cost})
+            else:
+                if charged:
+                    billing_extra.update({"status": "charged", "credits": credits_cost})
+                else:
+                    billing_extra.update({"status": "insufficient", "credits": credits_cost})
+                    log.warning(
+                        "Credits charge declined user=%s job_id=%s",  # pragma: no cover - accounting guard
+                        pending.user_id,
+                        pending.job_id,
+                    )
+        else:
+            billing_extra.update({"status": "free", "credits": 0})
+        if billing_extra:
+            job_extra.setdefault("billing", {}).update(billing_extra)
         log_event(
             level="INFO",
             event="content",
@@ -2205,6 +2232,7 @@ class JobQueue:
                 "request_id": request_id,
                 "attempt": attempt,
                 "file_path": str(file_path),
+                "billing": billing_extra or None,
             },
         )
         gsheets_ok = True
@@ -2227,6 +2255,8 @@ class JobQueue:
             "attempt": attempt,
         }
         done_extra["download"] = download_meta_shallow
+        if billing_extra:
+            done_extra["billing"] = dict(billing_extra)
         log_event(
             level="INFO",
             event="done",
@@ -2283,18 +2313,22 @@ class JobQueue:
         except Exception:
             log.exception("Failed to mark job %s as failed_to_download", pending.job_id)
             gsheets_ok = False
+        billing_info = job_extra.setdefault("billing", {})
+        if "status" not in billing_info:
+            billing_info["status"] = "skipped"
         refunded = False
-        try:
-            await self._db.add_credits(
-                pending.user_id, self._config.generation_cost_credits
-            )
-            refunded = True
-            increment_metric("refunds_total")
-            increment_metric("refund_total")
-        except Exception:
-            log.exception(
-                "Refunding credits failed for download failure job %s", pending.job_id
-            )
+        if billing_info.get("status") == "charged":
+            try:
+                await self._db.add_credits(
+                    pending.user_id, self._config.generation_cost_credits
+                )
+                refunded = True
+                increment_metric("refunds_total")
+                increment_metric("refund_total")
+            except Exception:
+                log.exception(
+                    "Refunding credits failed for download failure job %s", pending.job_id
+                )
         log_event(
             level="ERROR",
             event="download_failed",

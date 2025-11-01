@@ -154,6 +154,7 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "video.common.response_snippet": "Ответ: {snippet}",
         "video.create.registration_failed": "Не удалось зарегистрировать задачу: {error}",
         "video.create.enqueued": "Задача отправлена в очередь.",
+        "video.create.model_unavailable": "Модель {requested} недоступна. Используем {fallback}.",
         "video.common.job_id": "job_id: {job_id}",
         "video.common.video_id": "video_id: {video_id}",
         "video.common.corr_id": "corr_id: {corr_id}",

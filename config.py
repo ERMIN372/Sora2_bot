@@ -17,7 +17,8 @@ log = logging.getLogger(__name__)
 # Constants
 # ---------------------------------------------------------------------------
 
-SORA_SUPPORTED_MODELS = ["sora-2", "sora-2-pro"]
+SORA_SUPPORTED_MODELS = ("sora-2", "sora-2-pro")
+SORA_DEFAULT_MODEL = SORA_SUPPORTED_MODELS[0]
 OPENAI_API_BASE = "https://api.openai.com"
 DEFAULT_OPENAI_BETA_HEADER = "video=1"
 
@@ -197,7 +198,7 @@ class Config:
     sora_api_key: str = ""
     openai_org_id: Optional[str] = None
     # Значение "sora" больше не поддерживается и приведёт к ошибке "Model not found" в Sora API.
-    sora_model_video: str = SORA_SUPPORTED_MODELS[0]
+    sora_model_video: str = SORA_DEFAULT_MODEL
     openai_api_base: str = OPENAI_API_BASE
     openai_api_version_video: str = "v1beta"
     openai_beta_header: str = DEFAULT_OPENAI_BETA_HEADER
@@ -295,6 +296,18 @@ class Config:
         """Return ``True`` if OpenAI image generation can be used as fallback."""
 
         return self.sora_enabled and bool((self.openai_api_base or "").strip())
+
+    @property
+    def resolved_sora_video_model(self) -> str:
+        """Return the default Sora model ensuring it is supported."""
+
+        candidate_raw = (self.sora_model_video or "").strip()
+        if not candidate_raw:
+            return SORA_DEFAULT_MODEL
+        lowered = candidate_raw.lower()
+        if lowered in SORA_SUPPORTED_MODELS or lowered.startswith("sora-2"):
+            return lowered
+        return SORA_DEFAULT_MODEL
 
     @property
     def allowed_package_ids(self) -> Tuple[str, ...]:
