@@ -1,0 +1,249 @@
+from __future__ import annotations
+
+import asyncio
+import sys
+import types
+from datetime import datetime
+from types import SimpleNamespace
+from typing import Any, Dict, List, Optional
+
+import pytest
+
+from tests.aiogram_stub import ensure_aiogram_stub
+
+ensure_aiogram_stub()
+
+if "yookassa" not in sys.modules:
+    yookassa_module = types.ModuleType("yookassa")
+    yookassa_module.Configuration = type("Configuration", (), {})
+    yookassa_module.Payment = type("Payment", (), {})
+    sys.modules["yookassa"] = yookassa_module
+
+if "yookassa_client" not in sys.modules:
+    yookassa_client_module = types.ModuleType("yookassa_client")
+    yookassa_client_module.create_payment = lambda *args, **kwargs: None
+    sys.modules["yookassa_client"] = yookassa_client_module
+
+from db import GenerationJobRecord
+from handlers import _send_job_update
+from services.gemini_downloader import DownloadedAsset, GeminiDownloadError
+
+
+def _run(coro):
+    return asyncio.run(coro)
+
+
+class _StubStatusMessages:
+    def __init__(self) -> None:
+        self.started: List[str] = []
+        self.sending: List[str] = []
+        self.completed: List[str] = []
+        self.failed: List[Dict[str, Any]] = []
+
+    async def ensure_started(self, *, bot, db, job) -> None:
+        self.started.append(job.id)
+
+    async def mark_sending(self, *, bot, db, job, text: str) -> None:
+        self.sending.append(text)
+
+    async def mark_completed(
+        self, *, bot, db, job, text: str, schedule_deletion: bool = True
+    ) -> None:
+        self.completed.append(text)
+
+    async def mark_failed(
+        self,
+        *,
+        bot,
+        db,
+        job,
+        text: str,
+        terminal_state: str = "failed",
+        schedule_deletion: bool = False,
+    ) -> None:
+        self.failed.append({"text": text, "terminal_state": terminal_state})
+
+    async def tick(self, *, bot, db, job) -> None:  # pragma: no cover - not used
+        return None
+
+
+class _FakeBot:
+    def __init__(self, *, file_size: int) -> None:
+        self.file_size = file_size
+        self.sent: List[Dict[str, Any]] = []
+
+    async def send_video(
+        self,
+        user_id: int,
+        file: Any,
+        *,
+        supports_streaming: bool = True,
+        duration: Optional[int] = None,
+    ) -> Any:
+        self.sent.append(
+            {
+                "method": "video",
+                "user_id": user_id,
+                "supports_streaming": supports_streaming,
+                "duration": duration,
+            }
+        )
+        video = SimpleNamespace(
+            file_id="file-video",
+            file_size=self.file_size,
+            duration=duration or 0,
+        )
+        return SimpleNamespace(video=video, document=None)
+
+    async def send_document(self, *args: Any, **kwargs: Any) -> Any:  # pragma: no cover
+        document = SimpleNamespace(file_id="file-doc", file_size=self.file_size)
+        return SimpleNamespace(video=None, document=document)
+
+
+class _FakeDispatcher:
+    def __init__(self, bot: _FakeBot) -> None:
+        self.bot = bot
+
+
+class _FakeDB:
+    def __init__(self) -> None:
+        self.update_calls: List[Dict[str, Any]] = []
+        self.refunds: List[tuple[int, int]] = []
+        self.errors: List[Any] = []
+
+    async def update_job(self, job_id: str, status: str, **fields: Any) -> None:
+        payload = {"job_id": job_id, "status": status, **fields}
+        self.update_calls.append(payload)
+
+    async def add_credits(self, user_id: int, amount: int) -> None:
+        self.refunds.append((user_id, amount))
+
+    async def log_error_record(self, record: Any) -> bool:
+        self.errors.append(record)
+        return True
+
+
+class _FakeErrorReporter:
+    def __init__(self) -> None:
+        self.calls: List[Dict[str, Any]] = []
+
+    async def report(self, record: Any, *, context: str, extra: Dict[str, Any]) -> None:
+        self.calls.append({"record": record, "context": context, "extra": extra})
+
+
+def _make_job(*, status: str = "completed", cost: int = 7) -> GenerationJobRecord:
+    now = datetime.utcnow()
+    job = GenerationJobRecord(
+        id="job-1",
+        user_id=42,
+        prompt="render scene",
+        status=status,
+        video_url=None,
+        video_id=None,
+        error=None,
+        created_at=now,
+        updated_at=now,
+        size="720p",
+        model="veo-3.0-pro",
+        cost_credits=cost,
+        username="tester",
+        corr_id="corr-1",
+    )
+    job.extra = {
+        "assets_meta": [
+            {
+                "key": "primary",
+                "url": "https://cdn.example/video.mp4",
+                "mime": "video/mp4",
+            }
+        ]
+    }
+    return job
+
+
+def test_send_job_update_remote_success(
+    monkeypatch: pytest.MonkeyPatch, make_openai_video_config
+) -> None:
+    config = make_openai_video_config()
+    job = _make_job(cost=9)
+    status_stub = _StubStatusMessages()
+    db = _FakeDB()
+    reporter = _FakeErrorReporter()
+    downloaded = DownloadedAsset(
+        content=b"video-bytes",
+        mime="video/mp4",
+        filename="result.mp4",
+        size=4096,
+        key_mask="MASK",
+    )
+
+    async def fake_download_asset(*_args: Any, **_kwargs: Any) -> DownloadedAsset:
+        return downloaded
+
+    bot = _FakeBot(file_size=downloaded.size)
+    dp = _FakeDispatcher(bot)
+
+    monkeypatch.setattr("handlers.STATUS_MESSAGES", status_stub)
+    monkeypatch.setattr("handlers.download_asset", fake_download_asset)
+    monkeypatch.setattr("handlers.increment_metric", lambda *a, **k: None)
+    monkeypatch.setattr("handlers.log_event", lambda *a, **k: None)
+    monkeypatch.setattr("handlers.record_timing_metric", lambda *a, **k: None)
+
+    _run(
+        _send_job_update(
+            dp=dp,
+            job=job,
+            archive=None,
+            config=config,
+            db=db,
+            error_reporter=reporter,
+        )
+    )
+
+    assert bot.sent and bot.sent[0]["method"] == "video"
+    assert status_stub.completed
+    assert not status_stub.failed
+    assert db.refunds == []
+    assert all(call["status"] != "failed" for call in db.update_calls)
+    assert job.status == "completed"
+
+
+def test_send_job_update_remote_failure(
+    monkeypatch: pytest.MonkeyPatch, make_openai_video_config
+) -> None:
+    config = make_openai_video_config()
+    job = _make_job(cost=11)
+    status_stub = _StubStatusMessages()
+    db = _FakeDB()
+    reporter = _FakeErrorReporter()
+
+    async def failing_download_asset(*_args: Any, **_kwargs: Any) -> DownloadedAsset:
+        raise GeminiDownloadError("download failed", status_code=502)
+
+    bot = _FakeBot(file_size=2048)
+    dp = _FakeDispatcher(bot)
+
+    monkeypatch.setattr("handlers.STATUS_MESSAGES", status_stub)
+    monkeypatch.setattr("handlers.download_asset", failing_download_asset)
+    monkeypatch.setattr("handlers.increment_metric", lambda *a, **k: None)
+    monkeypatch.setattr("handlers.log_event", lambda *a, **k: None)
+    monkeypatch.setattr("handlers.record_timing_metric", lambda *a, **k: None)
+
+    _run(
+        _send_job_update(
+            dp=dp,
+            job=job,
+            archive=None,
+            config=config,
+            db=db,
+            error_reporter=reporter,
+        )
+    )
+
+    assert not status_stub.completed
+    assert status_stub.failed and status_stub.failed[0]["terminal_state"] == "refunded"
+    expected_refund = (job.user_id, job.cost_credits or config.generation_cost_credits)
+    assert db.refunds and all(entry == expected_refund for entry in db.refunds)
+    assert any(call["status"] == "failed" for call in db.update_calls)
+    assert job.status == "failed"
+

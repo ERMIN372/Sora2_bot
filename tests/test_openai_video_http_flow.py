@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from typing import Any, Dict
+from typing import Any, Dict, List, Optional
 
 import pytest
 
@@ -13,6 +13,202 @@ from providers.openai_video import OpenAIVideoClient
 
 def _run(coro):
     return asyncio.run(coro)
+
+
+class _BinaryFakeResponse:
+    def __init__(
+        self,
+        status: int,
+        *,
+        body: bytes = b"",
+        headers: Optional[Dict[str, str]] = None,
+    ) -> None:
+        self.status = status
+        self._body = body
+        self.headers = dict(headers or {})
+        self.history: List[Any] = []
+
+    async def __aenter__(self) -> "_BinaryFakeResponse":
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb) -> bool:
+        return False
+
+    async def read(self) -> bytes:
+        return self._body
+
+
+class _BinaryFakeRequest:
+    def __init__(self, response: _BinaryFakeResponse) -> None:
+        self._response = response
+
+    def __await__(self):
+        async def _inner() -> _BinaryFakeResponse:
+            return self._response
+
+        return _inner().__await__()
+
+    async def __aenter__(self) -> _BinaryFakeResponse:
+        return await self._response.__aenter__()
+
+    async def __aexit__(self, exc_type, exc, tb) -> bool:
+        return await self._response.__aexit__(exc_type, exc, tb)
+
+
+class _BinaryFakeSession:
+    def __init__(self, responses: List[_BinaryFakeResponse]) -> None:
+        self._responses = list(responses)
+        self.calls: List[tuple[str, str, Dict[str, Any]]] = []
+
+    def request(self, method: str, url: str, **kwargs: Any) -> _BinaryFakeRequest:
+        if not self._responses:
+            raise AssertionError("No more fake responses queued")
+        self.calls.append((method, url, kwargs))
+        return _BinaryFakeRequest(self._responses.pop(0))
+
+
+def test_openai_video_binary_request_follows_redirect(
+    monkeypatch: pytest.MonkeyPatch, make_openai_video_config
+) -> None:
+    config = make_openai_video_config()
+    client = OpenAIVideoClient(config=config)
+
+    final_response = _BinaryFakeResponse(
+        200,
+        body=b"binary-data",
+        headers={"x-request-id": "req-bin", "content-type": "video/mp4"},
+    )
+    final_response.history = [
+        _BinaryFakeResponse(302, headers={"Location": "https://cdn.example/video.mp4"})
+    ]
+    fake_session = _BinaryFakeSession([final_response])
+
+    async def fake_ensure(self) -> _BinaryFakeSession:
+        return fake_session
+
+    monkeypatch.setattr(OpenAIVideoClient, "_ensure_session", fake_ensure)
+
+    body, headers = _run(
+        client.content("vid-bin", asset_id="primary", params={"variant": "full"})
+    )
+
+    assert body == b"binary-data"
+    assert headers["content-type"].startswith("video/")
+    assert fake_session.calls
+    method, url, kwargs = fake_session.calls[0]
+    assert method == "GET"
+    assert url.endswith("/videos/vid-bin/content/primary")
+    assert kwargs.get("params") == {"variant": "full"}
+    meta = client._last_download_meta
+    assert meta.get("status_code") == 200
+    assert meta.get("request_id") == "req-bin"
+
+
+def test_openai_video_request_retries_conflict(
+    monkeypatch: pytest.MonkeyPatch, make_openai_video_config
+) -> None:
+    config = make_openai_video_config(request_retries=5, retry_backoff=0.1)
+    client = OpenAIVideoClient(config=config)
+
+    attempts: List[tuple[str, str]] = []
+
+    async def fake_perform(
+        self, method: str, url: str, **kwargs: Any
+    ) -> tuple[Dict[str, Any], int, int]:
+        attempts.append((method, url))
+        if len(attempts) < 3:
+            raise ProviderAPIError(
+                provider=self.provider_name,
+                status_code=409,
+                message="conflict",
+                error_type="conflict",
+                error_code="conflict",
+                retryable=True,
+            )
+        return {"ok": True}, 200, 42
+
+    sleeps: List[float] = []
+
+    async def fast_sleep(delay: float) -> None:
+        sleeps.append(delay)
+        return None
+
+    monkeypatch.setattr(BaseProviderClient, "_perform_request", fake_perform)
+    monkeypatch.setattr(asyncio, "sleep", fast_sleep)
+
+    data, status_code, duration_ms = _run(
+        client._request_json("GET", "/videos/test", diagnostic={})
+    )
+
+    assert data == {"ok": True}
+    assert status_code == 200
+    assert len(attempts) == 3
+    assert len(sleeps) == 2
+    assert all(delay >= 0 for delay in sleeps)
+
+
+@pytest.mark.parametrize(
+    "status,payload,expected_type,expected_code,expected_snippet",
+    [
+        (
+            404,
+            {"error": {"code": "not_found", "message": "Video not found", "type": "invalid_request_error"}},
+            "invalid_request_error",
+            "not_found",
+            "Video not found",
+        ),
+        (
+            401,
+            {"error": {"code": "unauthorized", "message": "missing auth"}},
+            "auth",
+            "unauthorized",
+            "Проверьте API",
+        ),
+        (
+            403,
+            {"error": {"code": "forbidden", "message": "region blocked"}},
+            "forbidden",
+            "forbidden",
+            "страна",
+        ),
+    ],
+)
+def test_openai_video_error_mapping_from_http(
+    monkeypatch: pytest.MonkeyPatch,
+    make_openai_video_config,
+    status: int,
+    payload: Dict[str, Any],
+    expected_type: str,
+    expected_code: str,
+    expected_snippet: str,
+) -> None:
+    config = make_openai_video_config()
+    client = OpenAIVideoClient(config=config)
+    body = json.dumps(payload)
+
+    async def fake_perform(
+        self, method: str, url: str, **kwargs: Any
+    ) -> tuple[Dict[str, Any], int, int]:
+        raise ProviderAPIError(
+            provider=self.provider_name,
+            status_code=status,
+            message="boom",
+            error_type="http",
+            error_code=None,
+            provider_message=body,
+            retryable=False,
+        )
+
+    monkeypatch.setattr(BaseProviderClient, "_perform_request", fake_perform)
+
+    with pytest.raises(ProviderAPIError) as excinfo:
+        _run(client._request_json("GET", "/videos/problem", diagnostic={}))
+
+    error = excinfo.value
+    assert error.status_code == status
+    assert error.error_type == expected_type
+    assert error.error_code == expected_code
+    assert expected_snippet in str(error)
 
 
 def test_openai_video_full_cycle(monkeypatch: pytest.MonkeyPatch, make_openai_video_config) -> None:
