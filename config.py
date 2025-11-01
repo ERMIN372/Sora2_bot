@@ -80,7 +80,35 @@ PRODUCT_PRICE_ALIASES: Dict[str, str] = {
     "image_generation": "image",
 }
 
+# ---------------------------------------------------------------------------
+# UI-only pricing labels
+# ---------------------------------------------------------------------------
+
+PRODUCT_PRICING_UI = {
+    "sora": 80,
+    "veo3": 89,
+    "image": 5,
+}
+
+TOPUP_UI_PACKS = [
+    {"amount": 100, "bonus_pct": 0.00},
+    {"amount": 300, "bonus_pct": 0.05},
+    {"amount": 700, "bonus_pct": 0.08},
+    {"amount": 1500, "bonus_pct": 0.12},
+    {"amount": 3000, "bonus_pct": 0.15},
+]
+
+UI_MODEL_LABELS = {
+    # UI labels only, the actual API model identifiers remain unchanged
+    "veo": "veo3",
+    "veo-3.0-generate-001": "veo3",
+    "sora": "OpenAI Sora 2",
+    "sora-2": "OpenAI Sora 2",
+    "sora-2-pro": "OpenAI Sora 2",
+}
+
 TOP_UP_PACKAGES: Dict[str, Dict[str, Decimal]] = {
+    "100": {"amount": Decimal("100"), "bonus": Decimal("0.00")},
     "300": {"amount": Decimal("300"), "bonus": Decimal("0.05")},
     "700": {"amount": Decimal("700"), "bonus": Decimal("0.08")},
     "1500": {"amount": Decimal("1500"), "bonus": Decimal("0.12")},

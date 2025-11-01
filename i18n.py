@@ -110,9 +110,9 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
             "Нажмите «ChatGPT», чтобы задать вопрос модели GPT-4.1 и получить ответ.\n\n"
             "💳 Оплата и кредиты  \n"
             "• OpenAI Sora 2 — 80 ₽ за видео  \n"
-            "• Gemini Veo 3 — 89 ₽ за видео  \n"
-            "• Фото — 5 ₽ за изображение  \n"
-            "• Пополнение: 300₽ (+5%), 700₽ (+8%), 1500₽ (+12%), 3000₽ (+15%) — YooKassa, бонус начисляется автоматически.\n\n"
+            "• veo3 — 89 ₽ за видео  \n"
+            "• Gemini Nano Banana — 5 ₽ за 1 изображение  \n"
+            "• Пополнение: 100₽ (0%), 300₽ (+5%), 700₽ (+8%), 1500₽ (+12%), 3000₽ (+15%) — YooKassa, бонус начисляется автоматически.\n\n"
             "🔁 Статусы  \n"
             "После запуска увидите: «заказ принят», затем «генерирую…», по готовности пришлём ролик.  \n"
             "Если генерация не удалась, стоимость возвращается.\n\n"
@@ -141,7 +141,7 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "chips.vertical": "Вертикаль",
         "chips.horizontal": "Горизонталь",
         "video.models.prompt": "Выберите модель видеогенерации:",
-        "video.models.veo": "Gemini Veo 3.x",
+        "video.models.veo": "veo3",
         "video.models.sora": "OpenAI Sora 2",
         "video.models.unavailable": "недоступно",
         "video.models.disabled": "OpenAI Sora 2 недоступна в конфигурации.",
@@ -195,7 +195,7 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "image.mode.prompt": "Как будем генерировать изображение?",
         "image.mode.text": "По тексту",
         "image.mode.photo": "По фото",
-        "image.model.gemini": "Gemini Image",
+        "image.model.gemini": "Gemini Nano Banana — 5 ₽ за 1 изображение",
         "image.model.unavailable": "недоступно",
         "video.prompt.text": (
             "Опишите, что нужно создать. Текущий кадр: {size}. Модель: {model}.\n"
@@ -264,7 +264,16 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "errors.chatgpt_empty": "Отправьте текстовый запрос для GPT-4.1.",
         "balance.info": "Ваш баланс: {credits} кредит(ов).",
         "payment.unavailable": "Оплата картой временно недоступна.",
-        "payment.packages.title": "Пополните баланс (1 кредит = 1 ₽):",
+        "payment.packages.title": (
+            "Пополните баланс (1 кредит = 1 ₽)\n\n"
+            "• 100 ₽ → 100 кредитов (без бонуса)\n"
+            "• 300 ₽ → 315 кредитов (+5%)\n"
+            "• 700 ₽ → 756 кредитов (+8%)\n"
+            "• 1 500 ₽ → 1 680 кредитов (+12%)\n"
+            "• 3 000 ₽ → 3 450 кредитов (+15%)\n\n"
+            "После оплаты кредиты начисляются автоматически.\n"
+            "Оплачивая, вы принимаете условия Оферты{terms}."
+        ),
         "payment.packages.line": "{price} → {total} (бонус {bonus} · +{bonus_pct}%)",
         "payment.store.instructions": "Перейдите по ссылке для оплаты. После оплаты кредиты начислятся автоматически.",
         "payment.terms_notice": "«Оплачивая, вы принимаете условия Оферты: {terms_url}»",
