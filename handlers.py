@@ -2099,81 +2099,81 @@ async def _deliver_remote_video(
                     mime_hint=mime_hint,
                     filename_hint=filename_hint,
                 )
-    except GeminiKeyMismatchError as exc:
-        log.error(
-            "Gemini key mismatch corr_id=%s expected=%s actual=%s",
-            corr_id,
-            exc.expected,
-            exc.actual,
-        )
-        await _handle_delivery_failure(
-            dp,
-            job,
-            config,
-            db,
-            error_reporter=error_reporter,
-            message=i18n.t("status.delivery_key_mismatch"),
-            reason="key_mismatch",
-            extra_log={"expected_mask": exc.expected, "actual_mask": exc.actual},
-            key_mask=exc.actual,
-        )
-        return None
-    except GeminiConfigurationError as exc:
-        log.error(
-            "Gemini configuration error corr_id=%s status=%s",
-            corr_id,
-            exc.error_status,
-        )
-        await _handle_delivery_failure(
-            dp,
-            job,
-            config,
-            db,
-            error_reporter=error_reporter,
-            message=i18n.t("status.delivery_config_error"),
-            reason="config_error",
-            extra_log={"error_status": exc.error_status},
-            key_mask=expected_mask,
-        )
-        return None
-    except SoraDownloadError as exc:
-        log.warning(
-            "Sora download failed corr_id=%s status=%s", corr_id, getattr(exc, "status_code", 0)
-        )
-        await _handle_delivery_failure(
-            dp,
-            job,
-            config,
-            db,
-            error_reporter=error_reporter,
-            message=i18n.t("status.delivery_generic"),
-            reason="download_error",
-            extra_log={"status_code": getattr(exc, "status_code", 0)},
-            key_mask=None,
-        )
-        return None
-    except GeminiDownloadError as exc:
-        log.warning(
-            "Gemini download failed corr_id=%s status=%s error=%s",
-            corr_id,
-            exc.status_code,
-            exc.error_status,
-        )
-        await _handle_delivery_failure(
-            dp,
-            job,
-            config,
-            db,
-            error_reporter=error_reporter,
-            message=i18n.t("status.delivery_generic"),
-            reason="download_error",
-            extra_log={
-                "status_code": exc.status_code,
-                "error_status": exc.error_status,
-            },
-            key_mask=expected_mask,
-        )
-        return None
+        except GeminiKeyMismatchError as exc:
+            log.error(
+                "Gemini key mismatch corr_id=%s expected=%s actual=%s",
+                corr_id,
+                exc.expected,
+                exc.actual,
+            )
+            await _handle_delivery_failure(
+                dp,
+                job,
+                config,
+                db,
+                error_reporter=error_reporter,
+                message=i18n.t("status.delivery_key_mismatch"),
+                reason="key_mismatch",
+                extra_log={"expected_mask": exc.expected, "actual_mask": exc.actual},
+                key_mask=exc.actual,
+            )
+            return None
+        except GeminiConfigurationError as exc:
+            log.error(
+                "Gemini configuration error corr_id=%s status=%s",
+                corr_id,
+                exc.error_status,
+            )
+            await _handle_delivery_failure(
+                dp,
+                job,
+                config,
+                db,
+                error_reporter=error_reporter,
+                message=i18n.t("status.delivery_config_error"),
+                reason="config_error",
+                extra_log={"error_status": exc.error_status},
+                key_mask=expected_mask,
+            )
+            return None
+        except SoraDownloadError as exc:
+            log.warning(
+                "Sora download failed corr_id=%s status=%s", corr_id, getattr(exc, "status_code", 0)
+            )
+            await _handle_delivery_failure(
+                dp,
+                job,
+                config,
+                db,
+                error_reporter=error_reporter,
+                message=i18n.t("status.delivery_generic"),
+                reason="download_error",
+                extra_log={"status_code": getattr(exc, "status_code", 0)},
+                key_mask=None,
+            )
+            return None
+        except GeminiDownloadError as exc:
+            log.warning(
+                "Gemini download failed corr_id=%s status=%s error=%s",
+                corr_id,
+                exc.status_code,
+                exc.error_status,
+            )
+            await _handle_delivery_failure(
+                dp,
+                job,
+                config,
+                db,
+                error_reporter=error_reporter,
+                message=i18n.t("status.delivery_generic"),
+                reason="download_error",
+                extra_log={
+                    "status_code": exc.status_code,
+                    "error_status": exc.error_status,
+                },
+                key_mask=expected_mask,
+            )
+            return None
 
     method: Literal["video", "document"] = "video"
     message: Optional[Message] = None
