@@ -22,7 +22,7 @@ def _run(coro):
             401,
             {"error": {"message": "Incorrect API key", "code": "invalid_api_key"}},
             "auth",
-            "Проверьте API‑ключ и организацию",
+            "OpenAI отклонил запрос: проверьте корректность API‑ключа и регион доступа.",
             False,
         ),
         (
@@ -61,7 +61,7 @@ def test_openai_video_error_mapping(
     monkeypatch.setattr(BaseProviderClient, "_request", fake_request)
 
     async def exercise() -> None:
-        await client._request_json("GET", "/videos")
+        await client._request_json("GET", "/v1beta/videos")
 
     with pytest.raises(ProviderAPIError) as exc_info:
         _run(exercise())

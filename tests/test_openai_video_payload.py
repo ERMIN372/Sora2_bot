@@ -23,11 +23,13 @@ def test_create_filters_extraneous_fields(monkeypatch: pytest.MonkeyPatch, make_
     async def fake_request(self, method: str, path: str, **kwargs):
         calls.append((method, path, kwargs))
         assert method == "POST"
-        assert path == "/videos"
+        assert path == "/v1beta/videos"
         payload = kwargs.get("json") or {}
         assert payload["prompt"] == "Clean this"
         assert payload["model"] == "sora-2"
-        assert payload["seconds"] == "5"
+        assert payload["duration"] == 5
+        assert payload["n"] == 1
+        assert payload["response_format"] == "url"
         assert "metadata" not in payload
         assert "foo" not in payload
         assert "bar" not in payload
@@ -48,19 +50,31 @@ def test_create_filters_extraneous_fields(monkeypatch: pytest.MonkeyPatch, make_
     assert len(calls) == 1
     request = client.last_request
     assert request["method"] == "POST"
-    assert request["path"] == "/videos"
-    assert request["payload"]["seconds"] == "5"
+    assert request["path"] == "/v1beta/videos"
+    assert request["payload"]["duration"] == 5
     assert request["payload"]["model"] == "sora-2"
+    assert request["payload"]["n"] == 1
+    assert request["payload"]["response_format"] == "url"
     assert "metadata" not in request["payload"]
     assert "foo" not in request["payload"]
     assert "bar" not in request["payload"]
-    assert set(request["dropped_fields"]) == {"payload.bar", "payload.metadata", "settings.foo"}
+    assert set(request["dropped_fields"]) == {
+        "payload.bar",
+        "payload.metadata",
+        "payload.seconds",
+        "settings.foo",
+    }
 
     history = client.diagnostic_history
     assert history
     diagnostic = history[-1]
     assert diagnostic["status"] == 201
-    assert set(diagnostic["dropped_fields"]) == {"payload.bar", "payload.metadata", "settings.foo"}
+    assert set(diagnostic["dropped_fields"]) == {
+        "payload.bar",
+        "payload.metadata",
+        "payload.seconds",
+        "settings.foo",
+    }
 
 
 def test_create_unknown_parameter_error(monkeypatch: pytest.MonkeyPatch, make_openai_video_config) -> None:
@@ -69,7 +83,7 @@ def test_create_unknown_parameter_error(monkeypatch: pytest.MonkeyPatch, make_op
 
     async def fake_request(self, method: str, path: str, **kwargs):
         assert method == "POST"
-        assert path == "/videos"
+        assert path == "/v1beta/videos"
         raise ProviderAPIError(
             provider="openai-video",
             status_code=400,

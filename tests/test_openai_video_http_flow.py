@@ -97,7 +97,7 @@ def test_openai_video_binary_request_follows_redirect(
     assert fake_session.calls
     method, url, kwargs = fake_session.calls[0]
     assert method == "GET"
-    assert url.endswith("/videos/vid-bin/content/primary")
+    assert url.endswith("/v1beta/videos/vid-bin/content/primary")
     assert kwargs.get("params") == {"variant": "full"}
     meta = client._last_download_meta
     assert meta.get("status_code") == 200
@@ -137,7 +137,7 @@ def test_openai_video_request_retries_conflict(
     monkeypatch.setattr(asyncio, "sleep", fast_sleep)
 
     data, status_code, duration_ms = _run(
-        client._request_json("GET", "/videos/test", diagnostic={})
+        client._request_json("GET", "/v1beta/videos/test", diagnostic={})
     )
 
     assert data == {"ok": True}
@@ -161,15 +161,15 @@ def test_openai_video_request_retries_conflict(
             401,
             {"error": {"code": "unauthorized", "message": "missing auth"}},
             "auth",
-            "unauthorized",
-            "Проверьте API",
+            "auth",
+            "корректность",
         ),
         (
             403,
             {"error": {"code": "forbidden", "message": "region blocked"}},
-            "forbidden",
-            "forbidden",
-            "страна",
+            "region_blocked",
+            "region_blocked",
+            "регион",
         ),
     ],
 )
@@ -202,7 +202,7 @@ def test_openai_video_error_mapping_from_http(
     monkeypatch.setattr(BaseProviderClient, "_perform_request", fake_perform)
 
     with pytest.raises(ProviderAPIError) as excinfo:
-        _run(client._request_json("GET", "/videos/problem", diagnostic={}))
+        _run(client._request_json("GET", "/v1beta/videos/problem", diagnostic={}))
 
     error = excinfo.value
     assert error.status_code == status
@@ -219,14 +219,16 @@ def test_openai_video_full_cycle(monkeypatch: pytest.MonkeyPatch, make_openai_vi
 
     async def fake_request(self, method: str, path: str, **kwargs: Any):
         calls.append((method, path, kwargs))
-        if method == "POST" and path == "/videos":
+        if method == "POST" and path == "/v1beta/videos":
             payload = kwargs.get("json") or {}
             assert payload["prompt"] == "Render a serene landscape"
             assert payload["model"] == "sora-2"
-            assert payload.get("seconds") == "8"
+            assert payload.get("duration") == 8
+            assert payload.get("n") == 1
+            assert payload.get("response_format") == "url"
             assert "metadata" not in payload
             return {"id": "vid_123", "status": "queued"}, 201, 120
-        if method == "GET" and path == "/videos/vid_123":
+        if method == "GET" and path == "/v1beta/videos/vid_123":
             return (
                 {
                     "id": "vid_123",
@@ -240,7 +242,7 @@ def test_openai_video_full_cycle(monkeypatch: pytest.MonkeyPatch, make_openai_vi
 
     async def fake_binary(self, method: str, path: str, params=None, **_: Any):
         assert method == "GET"
-        assert path == "/videos/vid_123/content/primary"
+        assert path == "/v1beta/videos/vid_123/content/primary"
         assert params is None
         self._record_response_history(
             method=method,
@@ -264,12 +266,11 @@ def test_openai_video_full_cycle(monkeypatch: pytest.MonkeyPatch, make_openai_vi
         assert created["id"] == "vid_123"
         create_request = client.last_request
         assert create_request["method"] == "POST"
-        assert create_request["path"] == "/videos"
+        assert create_request["path"] == "/v1beta/videos"
         assert "payload" in create_request
-        assert create_request["payload"].get("seconds") == "8"
+        assert create_request["payload"].get("duration") == 8
         assert "metadata" not in create_request["payload"]
         assert "payload.metadata" in create_request["dropped_fields"]
-        assert "settings.duration" in create_request["dropped_fields"]
 
         retrieved = await client.retrieve("vid_123")
         assert retrieved["status"] == "ready"
@@ -281,35 +282,35 @@ def test_openai_video_full_cycle(monkeypatch: pytest.MonkeyPatch, make_openai_vi
         assert headers["content-type"] == "video/mp4"
         content_request = client.last_request
         assert content_request["method"] == "GET"
-        assert content_request["path"] == "/videos/vid_123/content/primary"
+        assert content_request["path"] == "/v1beta/videos/vid_123/content/primary"
         assert "params.quality" in content_request["dropped_fields"]
 
     _run(exercise())
 
     assert len(calls) == 2
     method, path, kwargs = calls[0]
-    assert method == "POST" and path == "/videos"
+    assert method == "POST" and path == "/v1beta/videos"
     assert "json" in kwargs and kwargs["json"]["prompt"] == "Render a serene landscape"
     assert "metadata" not in kwargs["json"]
 
     method, path, kwargs = calls[1]
-    assert method == "GET" and path == "/videos/vid_123"
+    assert method == "GET" and path == "/v1beta/videos/vid_123"
     assert kwargs.get("params") is None
 
     history = client.diagnostic_history
     assert len(history) >= 3
     first_entry = history[0]
     assert first_entry["method"] == "POST"
-    assert first_entry["path"] == "/videos"
-    assert first_entry["endpoint"] == "/videos"
+    assert first_entry["path"] == "/v1beta/videos"
+    assert first_entry["endpoint"] == "/v1beta/videos"
     assert "payload.metadata" in first_entry["dropped_fields"]
     assert "status" in first_entry and first_entry["status"] >= 0
     assert "duration_ms" in first_entry
     assert "request_id" in first_entry
     last_entry = history[-1]
     assert last_entry["method"] == "GET"
-    assert last_entry["path"] == "/videos/vid_123/content/primary"
-    assert last_entry["endpoint"] == "/videos/vid_123/content/primary"
+    assert last_entry["path"] == "/v1beta/videos/vid_123/content/primary"
+    assert last_entry["endpoint"] == "/v1beta/videos/vid_123/content/primary"
     assert "params.quality" in last_entry["dropped_fields"]
     assert "status" in last_entry and last_entry["status"] >= 0
     assert "duration_ms" in last_entry
@@ -336,16 +337,16 @@ def test_openai_video_list_pagination(monkeypatch: pytest.MonkeyPatch, make_open
     _run(exercise())
 
     assert captured["method"] == "GET"
-    assert captured["path"] == "/videos"
+    assert captured["path"] == "/v1beta/videos"
     params = captured["params"]
     assert params["limit"] == 5
     assert params["order"] == "desc"
     assert params["after"] == "cursor-a"
     assert "before" not in params
-    assert params["api-version"] == "2024-05-01-preview"
+    assert "api-version" not in params
     last_request = client.last_request
     assert last_request["method"] == "GET"
-    assert last_request["path"] == "/videos"
+    assert last_request["path"] == "/v1beta/videos"
     assert "params" in last_request
     assert "params.before" in last_request["dropped_fields"]
 
@@ -356,7 +357,7 @@ def test_openai_video_models_filtering(monkeypatch: pytest.MonkeyPatch, make_ope
 
     async def fake_request(self, method: str, path: str, **kwargs: Any):
         assert method == "GET"
-        assert path == "/models/list"
+        assert path == "/v1beta/models"
         return (
             {
                 "data": {
@@ -391,7 +392,7 @@ def test_openai_video_unknown_parameter_error(make_openai_video_config) -> None:
     client = OpenAIVideoClient(config=config)
     client._record_last_request(
         method="POST",
-        path="/videos",
+        path="/v1beta/videos",
         payload={"prompt": "test", "extra": "value"},
         dropped_fields=["payload.extra"],
         correlation_id="diag-1",
@@ -442,7 +443,7 @@ def test_prepare_create_request_returns_extras(make_openai_video_config) -> None
     )
 
     assert prepared.request["prompt"] == "Create a video"
-    assert prepared.request["seconds"] == "12"
+    assert prepared.request["duration"] == 12
     assert prepared.request["size"] == "1440x1080"
     assert "metadata" not in prepared.request
     assert prepared.extras["duration_seconds"] == 12

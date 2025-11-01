@@ -6,7 +6,7 @@ import logging
 from typing import Any, Dict, List, Optional
 from uuid import uuid4
 
-from config import Config
+from config import Config, DEFAULT_OPENAI_BETA_HEADER
 from providers.base import (
     BaseProviderClient,
     ProviderAPIError,
@@ -27,6 +27,8 @@ class OpenAIImageClient(BaseProviderClient):
             raise RuntimeError("OpenAI API key is required for image generation")
         base_url = (config.openai_api_base or "https://api.openai.com").rstrip("/")
         beta_header = (config.openai_beta_header or "assistants=v2").strip()
+        if beta_header == DEFAULT_OPENAI_BETA_HEADER:
+            beta_header = "assistants=v2"
         default_headers: Dict[str, str] = {}
         if beta_header:
             default_headers["OpenAI-Beta"] = beta_header
