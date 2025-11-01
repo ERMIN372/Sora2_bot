@@ -35,8 +35,129 @@ except ModuleNotFoundError:  # pragma: no cover - test environment shim
         async def send_message(self, *_: Any, **__: Any) -> None:
             return None
 
+    class Dispatcher:  # pragma: no cover - minimal stub for tests
+        def __init__(self, *_: Any, **__: Any) -> None:
+            return None
+
     aiogram_stub.Bot = Bot
+    aiogram_stub.Dispatcher = Dispatcher
     sys.modules["aiogram"] = aiogram_stub
+
+    dispatcher_stub = types.ModuleType("aiogram.dispatcher")
+
+    class FSMContext:  # pragma: no cover - minimal stub
+        def __init__(self, *_: Any, **__: Any) -> None:
+            return None
+
+    dispatcher_stub.FSMContext = FSMContext
+    sys.modules["aiogram.dispatcher"] = dispatcher_stub
+
+    filters_stub = types.ModuleType("aiogram.dispatcher.filters")
+
+    class Command:  # pragma: no cover - minimal stub
+        def __init__(self, *_: Any, **__: Any) -> None:
+            return None
+
+    class CommandStart(Command):  # pragma: no cover - minimal stub
+        pass
+
+    filters_stub.Command = Command
+    filters_stub.CommandStart = CommandStart
+    sys.modules["aiogram.dispatcher.filters"] = filters_stub
+
+    state_stub = types.ModuleType("aiogram.dispatcher.filters.state")
+
+    class State:  # pragma: no cover - minimal stub
+        def __init__(self, *_: Any, **__: Any) -> None:
+            return None
+
+    class StatesGroup:  # pragma: no cover - minimal stub
+        pass
+
+    state_stub.State = State
+    state_stub.StatesGroup = StatesGroup
+    sys.modules["aiogram.dispatcher.filters.state"] = state_stub
+
+    types_stub = types.ModuleType("aiogram.types")
+
+    class _BaseType:  # pragma: no cover - minimal stub
+        def __init__(self, *_: Any, **__: Any) -> None:
+            return None
+
+    class Message(_BaseType):
+        pass
+
+    class CallbackQuery(_BaseType):
+        pass
+
+    class InlineKeyboardButton(_BaseType):
+        pass
+
+    class InlineKeyboardMarkup(_BaseType):
+        pass
+
+    class KeyboardButton(_BaseType):
+        pass
+
+    class ReplyKeyboardMarkup(_BaseType):
+        pass
+
+    class ReplyKeyboardRemove(_BaseType):
+        pass
+
+    class InputFile(_BaseType):
+        pass
+
+    types_stub.Message = Message
+    types_stub.CallbackQuery = CallbackQuery
+    types_stub.InlineKeyboardButton = InlineKeyboardButton
+    types_stub.InlineKeyboardMarkup = InlineKeyboardMarkup
+    types_stub.KeyboardButton = KeyboardButton
+    types_stub.ReplyKeyboardMarkup = ReplyKeyboardMarkup
+    types_stub.ReplyKeyboardRemove = ReplyKeyboardRemove
+    types_stub.InputFile = InputFile
+    sys.modules["aiogram.types"] = types_stub
+
+    utils_stub = types.ModuleType("aiogram.utils")
+    exceptions_stub = types.ModuleType("aiogram.utils.exceptions")
+
+    class AiogramError(Exception):  # pragma: no cover - minimal stub
+        pass
+
+    class TelegramAPIError(AiogramError):
+        pass
+
+    class BadRequest(TelegramAPIError):
+        pass
+
+    class ChatNotFound(TelegramAPIError):
+        pass
+
+    class NetworkError(TelegramAPIError):
+        pass
+
+    class RetryAfter(TelegramAPIError):
+        def __init__(self, timeout: float = 0, *args: Any, **kwargs: Any) -> None:
+            super().__init__(*args)
+            self.timeout = timeout
+
+    class Unauthorized(TelegramAPIError):
+        pass
+
+    class CantTalkWithBot(TelegramAPIError):
+        pass
+
+    exceptions_stub.AiogramError = AiogramError
+    exceptions_stub.TelegramAPIError = TelegramAPIError
+    exceptions_stub.BadRequest = BadRequest
+    exceptions_stub.ChatNotFound = ChatNotFound
+    exceptions_stub.NetworkError = NetworkError
+    exceptions_stub.RetryAfter = RetryAfter
+    exceptions_stub.Unauthorized = Unauthorized
+    exceptions_stub.CantTalkWithBot = CantTalkWithBot
+    utils_stub.exceptions = exceptions_stub
+    sys.modules["aiogram.utils"] = utils_stub
+    sys.modules["aiogram.utils.exceptions"] = exceptions_stub
 
 try:  # pragma: no cover - prefer real dependency
     import aiohttp  # type: ignore
@@ -57,8 +178,12 @@ except ModuleNotFoundError:  # pragma: no cover - test environment shim
         async def close(self) -> None:
             self.closed = True
 
+    class ClientError(Exception):
+        pass
+
     aiohttp_stub.ClientTimeout = ClientTimeout
     aiohttp_stub.ClientSession = ClientSession
+    aiohttp_stub.ClientError = ClientError
     sys.modules["aiohttp"] = aiohttp_stub
 
 try:  # pragma: no cover - prefer real dependency

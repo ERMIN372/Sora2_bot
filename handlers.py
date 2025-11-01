@@ -3618,6 +3618,18 @@ async def diag_openai_video_command(
     headers_text = ", ".join(
         f"{escape_html(str(key))}={escape_html(str(value))}" for key, value in sorted(headers.items())
     ) or "—"
+    content_endpoint = diagnostics.get("content_endpoint") or "—"
+    available_models = diagnostics.get("available_models") or []
+    available_models_text = ", ".join(map(str, available_models)) or "—"
+    last_status = diagnostics.get("last_content_status")
+    last_request_id = diagnostics.get("last_content_request_id") or "—"
+    last_video_id = diagnostics.get("last_content_video_id") or "—"
+    last_timestamp = diagnostics.get("last_content_timestamp")
+    if last_status is None:
+        last_status_text = "—"
+    else:
+        last_status_text = str(last_status)
+    last_timestamp_text = str(last_timestamp) if last_timestamp is not None else "—"
     lines = [
         "Диагностика OpenAI Videos API:",
         f"configured_model: {escape_html(config.sora_model_video or '-')}",
@@ -3626,6 +3638,9 @@ async def diag_openai_video_command(
         f"beta_header: {escape_html(diagnostics.get('beta_header') or '—')}",
         f"organization_id: {escape_html(diagnostics.get('organization_id') or '—')}",
         f"headers: {headers_text}",
+        f"content_endpoint: {escape_html(content_endpoint)}",
+        f"download_status: status={escape_html(last_status_text)} request_id={escape_html(str(last_request_id))} video_id={escape_html(str(last_video_id))} ts={escape_html(last_timestamp_text)}",
+        f"available_models: {escape_html(available_models_text)}",
     ]
     queue_obj = getattr(job_queue, "_queue", None)
     if queue_obj is not None:
@@ -3648,10 +3663,24 @@ async def diag_openai_video_command(
         lines.append(
             f"list: status={status_code} has_more={escape_html(has_more_text)} time={duration_ms} мс"
         )
+    except ProviderAPIError as exc:
+        lines.append(
+            f"list: error status={exc.status_code} code={escape_html(exc.error_code or '-')}"
+        )
     except Exception as exc:  # pragma: no cover - network guard
         lines.append(f"list: error={escape_html(str(exc))}")
+    models: List[str] = []
     try:
         models = await client.list_models()
+    except ProviderAPIError as exc:
+        lines.append(
+            f"models.list: error status={exc.status_code} code={escape_html(exc.error_code or '-')}"
+        )
+    except Exception as exc:  # pragma: no cover - network guard
+        lines.append(f"models.list: error={escape_html(str(exc))}")
+    else:
+        models_text = ", ".join(models) if models else "—"
+        lines.append(f"models: {escape_html(models_text)}")
         filtered_models = _filter_video_model_ids(models)
         if filtered_models:
             preview = ", ".join(filtered_models[:5])
@@ -3660,8 +3689,6 @@ async def diag_openai_video_command(
                 lines.append(f"… ещё {len(filtered_models) - 5}")
         else:
             lines.append("list_models: пусто")
-    except Exception as exc:  # pragma: no cover - network guard
-        lines.append(f"list_models: error={escape_html(str(exc))}")
     sample_model = (config.sora_model_video or "").strip() or (client.supported_models[0] if client.supported_models else "")
     try:
         prepared = client.prepare_create_request(
