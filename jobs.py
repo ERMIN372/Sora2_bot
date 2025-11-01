@@ -1520,56 +1520,16 @@ class JobQueue:
             )
             if result.status == "completed":
                 self._reset_operation_tracker(pending.job_id)
-                if not inline_assets and not asset_value:
-                    if no_media_confirmed:
-                        await self._handle_no_media_assets(
-                            pending,
-                            provider_key=provider_key,
-                            key_mask=key_mask,
-                            provider_data=provider_data,
-                            result=result,
-                        )
-                        return
-                    log.warning(
-                        "Job completed without assets job_id=%s corr_id=%s provider=%s retrying",
-                        pending.job_id,
-                        pending.corr_id,
-                        provider_key,
-                    )
-                    await self._db.update_job(
-                        pending.job_id,
-                        result.status,
-                        video_id=pending.video_id,
-                    )
-                    await asyncio.sleep(self._poll_interval_seconds())
-                    await self.enqueue(
-                        job_id=pending.job_id,
-                        user_id=pending.user_id,
-                        prompt=pending.prompt,
-                        corr_id=pending.corr_id,
-                        size=pending.size,
-                        model=pending.model,
-                        provider=provider_key,
-                        username=pending.username,
-                        original_prompt=pending.original_prompt,
-                        sanitized_prompt=pending.sanitized_prompt,
-                        auto_sanitized=pending.auto_sanitized,
-                        preflight_reason=pending.preflight_reason,
-                        preflight_scope=pending.preflight_scope,
-                        task_type=VIDEO_TASK_RETRIEVE,
-                        provider_job_id=provider_job_id,
-                        video_id=pending.video_id,
-                    )
-                    return
-
+                
                 video_url_value = asset_value or asset_label_display or ""
                 display_label = asset_label_display or video_url_value or ""
                 log.debug(
-                    "Job completed job_id=%s corr_id=%s provider=%s assets=%s",
+                    "Job completed job_id=%s corr_id=%s provider=%s assets=%s has_url=%s",
                     pending.job_id,
                     pending.corr_id,
                     provider_key,
                     list(result.assets.keys()),
+                    bool(inline_assets or asset_value),
                 )
                 if primary_asset:
                     job_extra.setdefault("primary_asset", primary_asset)
@@ -1585,6 +1545,7 @@ class JobQueue:
                 if pending.video_id:
                     done_extra["video_id"] = pending.video_id
                 done_extra["video_label"] = display_label
+                
                 download_handler = getattr(client, "download_content", None)
                 if callable(download_handler) and pending.video_id:
                     handled = await self._handle_inline_download(
