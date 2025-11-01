@@ -23,7 +23,7 @@ def test_create_filters_extraneous_fields(monkeypatch: pytest.MonkeyPatch, make_
     async def fake_request(self, method: str, path: str, **kwargs):
         calls.append((method, path, kwargs))
         assert method == "POST"
-        assert path == "/v1beta/videos"
+        assert path == "/v1/videos"
         payload = kwargs.get("json") or {}
         assert payload["prompt"] == "Clean this"
         assert payload["model"] == "sora-2"
@@ -50,7 +50,7 @@ def test_create_filters_extraneous_fields(monkeypatch: pytest.MonkeyPatch, make_
     assert len(calls) == 1
     request = client.last_request
     assert request["method"] == "POST"
-    assert request["path"] == "/v1beta/videos"
+    assert request["path"] == "/v1/videos"
     assert request["payload"]["duration"] == 5
     assert request["payload"]["model"] == "sora-2"
     assert request["payload"]["n"] == 1
@@ -83,7 +83,7 @@ def test_create_unknown_parameter_error(monkeypatch: pytest.MonkeyPatch, make_op
 
     async def fake_request(self, method: str, path: str, **kwargs):
         assert method == "POST"
-        assert path == "/v1beta/videos"
+        assert path == "/v1/videos"
         raise ProviderAPIError(
             provider="openai-video",
             status_code=400,

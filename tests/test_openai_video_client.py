@@ -43,7 +43,7 @@ def test_openai_video_client_get_diagnostics_includes_error_snapshots() -> None:
     client = OpenAIVideoClient(config=config)
 
     client._record_last_request(
-        method="GET", path="/v1beta/videos", dropped_fields=[], correlation_id=None
+        method="GET", path="/v1/videos", dropped_fields=[], correlation_id=None
     )
     client._update_last_diagnostic(
         status_code=429, error={"error_code": "rate_limit", "message": "Too many requests"}
@@ -52,7 +52,7 @@ def test_openai_video_client_get_diagnostics_includes_error_snapshots() -> None:
 
     assert diagnostics["beta_header"] == "video=2"
     assert diagnostics["organization_id"] == "org-diag"
-    assert diagnostics["api_version"] == "v1beta"
+    assert diagnostics["api_version"] == "v1"
 
     headers = diagnostics["headers"]
     assert headers["OpenAI-Beta"] == "video=2"

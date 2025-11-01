@@ -203,7 +203,10 @@ class OpenAIVideoClient(BaseProviderClient):
         if configured_model:
             self._supported_models.add(configured_model)
         self._default_model = configured_model or SORA_DEFAULT_MODEL
-        self._api_version = "v1beta"
+        api_version = (config.openai_api_version_video or "v1").strip().strip("/")
+        if not api_version:
+            api_version = "v1"
+        self._api_version = api_version
         self._default_params: Dict[str, Any] = {}
         self._error_handler = ApiErrorHandler(
             provider="openai-video", logger=log, supported_models=sorted(self._supported_models)
@@ -257,7 +260,7 @@ class OpenAIVideoClient(BaseProviderClient):
             "organization_id": self._organization_id,
             "headers": safe_headers,
             "error_snapshots": [dict(snapshot) for snapshot in self._error_snapshots],
-            "content_endpoint": f"{self._content_api_root}/v1beta/videos/{{video_id}}/content",
+            "content_endpoint": f"{self._content_api_root}/{self._api_version}/videos/{{video_id}}/content",
             "available_models": list(self._available_models),
             "base_url": self._content_api_root,
         }
@@ -906,10 +909,10 @@ class OpenAIVideoClient(BaseProviderClient):
         return f"/{self._api_version}/videos"
 
     def _videos_create_path(self) -> str:
-        return f"/{self._api_version}/videos/create"
+        return self._videos_path()
 
     def _models_list_path(self) -> str:
-        return f"/{self._api_version}/models/list"
+        return f"/{self._api_version}/models"
 
     def _resolve_content_api_root(self, base_url: str) -> str:
         _ = base_url  # legacy argument

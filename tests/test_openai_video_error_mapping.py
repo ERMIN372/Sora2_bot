@@ -61,7 +61,7 @@ def test_openai_video_error_mapping(
     monkeypatch.setattr(BaseProviderClient, "_request", fake_request)
 
     async def exercise() -> None:
-        await client._request_json("GET", "/v1beta/videos")
+        await client._request_json("GET", "/v1/videos")
 
     with pytest.raises(ProviderAPIError) as exc_info:
         _run(exercise())
