@@ -297,8 +297,15 @@ def _run_polling(state: ApplicationState, loop: asyncio.AbstractEventLoop) -> No
     log.info("Launching polling mode")
 
     # [UVICORN_RUN]
+    host = os.getenv("HOST", CFG.HOST or "0.0.0.0") or "0.0.0.0"
+    port = int(os.getenv("PORT", str(CFG.PORT)))
     uvicorn_config = uvicorn.Config(
-        state.app, host=CFG.HOST, port=CFG.PORT, log_level="info"
+        state.app,
+        host=host,
+        port=port,
+        log_level="info",
+        lifespan="on",
+        loop="uvloop",
     )
     server = uvicorn.Server(uvicorn_config)
     state.uvicorn_server = server
@@ -324,8 +331,15 @@ async def _run_webhook(state: ApplicationState) -> None:
     log.info("Launching webhook mode")
 
     # [UVICORN_RUN]
+    host = os.getenv("HOST", "0.0.0.0") or "0.0.0.0"
+    port = int(os.getenv("PORT", "8080"))
     uvicorn_config = uvicorn.Config(
-        state.app, host=CFG.HOST, port=CFG.PORT, log_level="info"
+        state.app,
+        host=host,
+        port=port,
+        log_level="info",
+        lifespan="on",
+        loop="uvloop",
     )
     server = uvicorn.Server(uvicorn_config)
     state.uvicorn_server = server
@@ -352,11 +366,16 @@ def main() -> None:
     mode = (args.mode or CFG.BOT_MODE).lower()
     log.info("Selected run mode=%s", mode)
 
-    loop = asyncio.get_event_loop()
     if mode == "polling":
-        _run_polling(state, loop)
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            _run_polling(state, loop)
+        finally:
+            loop.run_until_complete(loop.shutdown_asyncgens())
+            loop.close()
     else:
-        loop.run_until_complete(_run_webhook(state))
+        asyncio.run(_run_webhook(state))
 
 
 if __name__ == "__main__":

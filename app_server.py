@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from ipaddress import ip_address, ip_network
@@ -32,6 +33,12 @@ YOOKASSA_IP_RANGES = [
 ]
 
 MAX_REQUEST_SIZE = 2 * 1024 * 1024  # 2 MiB
+
+
+async def _load_available_models_async() -> None:
+    """Placeholder for asynchronous model loading during startup."""
+
+    await asyncio.sleep(0)
 
 
 class BodySizeLimitMiddleware(BaseHTTPMiddleware):
@@ -467,6 +474,25 @@ def _telegram_router(dp: Dispatcher) -> APIRouter:
     return router
 
 
+def _create_base_app() -> FastAPI:
+    app = FastAPI(title="Sora2 Bot API")
+
+    @app.get("/healthz")
+    async def healthz() -> Dict[str, bool]:
+        return {"ok": True}
+
+    app.add_middleware(BodySizeLimitMiddleware, max_body_size=MAX_REQUEST_SIZE)
+
+    @app.on_event("startup")
+    async def _startup_bg() -> None:
+        if os.getenv("SKIP_GEMINI_MODEL_LOADING", "1") == "1":
+            return
+        loader_task = asyncio.create_task(_load_available_models_async())
+        app.state.model_loader_task = loader_task
+
+    return app
+
+
 # [FASTAPI_APP_FACTORY]
 def create_app(
     *, config: Config, dp: Dispatcher, bot: Bot, db: Database
@@ -477,19 +503,21 @@ def create_app(
     else:
         log.info("YooKassa integration disabled or misconfigured")
 
-    app = FastAPI()
-    app.add_middleware(BodySizeLimitMiddleware, max_body_size=MAX_REQUEST_SIZE)
+    app = _create_base_app()
 
-    app.include_router(_health_router())
     app.include_router(_telegram_router(dp))
     app.include_router(_yookassa_router(config=config, processor=processor))
 
     return app, processor
 
 
+app = _create_base_app()
+
+
 __all__ = [
     "BodySizeLimitMiddleware",
     "YooKassaProcessor",
+    "app",
     "create_app",
     "poll_pending_payments",
 ]
