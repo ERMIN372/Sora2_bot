@@ -7,6 +7,7 @@ import logging
 import os
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
+from urllib.parse import urlparse
 
 from aiogram import Bot, Dispatcher, executor
 from aiogram.contrib.fsm_storage.memory import MemoryStorage
@@ -210,15 +211,6 @@ async def _startup(state: ApplicationState, *, mode: str) -> None:
         # [DELETE_WEBHOOK_ON_START]
         await state.bot.delete_webhook(drop_pending_updates=True)
         log.info("Webhook removed before polling starts")
-    elif mode == "webhook":
-        # [SET_WEBHOOK_ON_START]
-        await state.bot.set_webhook(
-            CFG.WEBHOOK_URL,
-            secret_token=CFG.TELEGRAM_SECRET_TOKEN,
-            drop_pending_updates=True,
-            allowed_updates=ALLOWED_UPDATES,
-        )
-        log.info("Webhook configured at %s", CFG.WEBHOOK_URL)
 
     await state.db.init()
     await run_startup_healthcheck(config=state.config, mode=mode)
@@ -261,6 +253,35 @@ async def _startup(state: ApplicationState, *, mode: str) -> None:
             )
 
     log.info("Startup sequence completed mode=%s", mode)
+
+
+def _is_valid_webhook_host(host: str) -> bool:
+    if not host:
+        return False
+    parsed = urlparse(host if "://" in host else f"https://{host}")
+    hostname = parsed.hostname or ""
+    return bool(hostname and "." in hostname)
+
+
+async def _configure_webhook(state: ApplicationState) -> bool:
+    webhook_task = asyncio.create_task(
+        state.bot.set_webhook(
+            CFG.WEBHOOK_URL,
+            secret_token=CFG.TELEGRAM_SECRET_TOKEN or None,
+            drop_pending_updates=True,
+            allowed_updates=ALLOWED_UPDATES,
+        )
+    )
+    try:
+        await webhook_task
+    except Exception:
+        log.exception(
+            "Failed to configure Telegram webhook at %s", CFG.WEBHOOK_URL
+        )
+        return False
+
+    log.info("Webhook configured at %s", CFG.WEBHOOK_URL)
+    return True
 
 
 async def _shutdown(state: ApplicationState, *, mode: str) -> None:
@@ -327,12 +348,12 @@ def _run_polling(state: ApplicationState, loop: asyncio.AbstractEventLoop) -> No
 
 
 # [RUN_WEBHOOK]
-async def _run_webhook(state: ApplicationState) -> None:
+async def _run_webhook(state: ApplicationState) -> bool:
     log.info("Launching webhook mode")
 
     # [UVICORN_RUN]
-    host = os.getenv("HOST", "0.0.0.0") or "0.0.0.0"
-    port = int(os.getenv("PORT", "8080"))
+    host = os.getenv("HOST", CFG.HOST or "0.0.0.0") or "0.0.0.0"
+    port = int(os.getenv("PORT", str(CFG.PORT)))
     uvicorn_config = uvicorn.Config(
         state.app,
         host=host,
@@ -345,8 +366,31 @@ async def _run_webhook(state: ApplicationState) -> None:
     state.uvicorn_server = server
 
     try:
+        if not _is_valid_webhook_host(CFG.WEBHOOK_HOST):
+            log.error("WEBHOOK_HOST не задан или задан неверно; переключаюсь на polling")
+            return False
+
+        loop = asyncio.get_running_loop()
+        state.uvicorn_task = loop.create_task(server.serve())
+
         await _startup(state, mode="webhook")
-        await server.serve()
+
+        started_event = getattr(server, "started", None)
+        if isinstance(started_event, asyncio.Event):
+            try:
+                await asyncio.wait_for(started_event.wait(), timeout=30)
+            except asyncio.TimeoutError:
+                log.error("Application failed to open port %s in time", port)
+                return False
+        else:
+            # Fallback for older uvicorn versions without started event
+            await asyncio.sleep(1.0)
+
+        if not await _configure_webhook(state):
+            return False
+
+        await state.uvicorn_task
+        return True
     finally:
         await _shutdown(state, mode="webhook")
 
@@ -375,7 +419,17 @@ def main() -> None:
             loop.run_until_complete(loop.shutdown_asyncgens())
             loop.close()
     else:
-        asyncio.run(_run_webhook(state))
+        success = asyncio.run(_run_webhook(state))
+        if not success:
+            log.warning("Falling back to polling mode after webhook failure")
+            state = _init_application(config)
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                _run_polling(state, loop)
+            finally:
+                loop.run_until_complete(loop.shutdown_asyncgens())
+                loop.close()
 
 
 if __name__ == "__main__":
