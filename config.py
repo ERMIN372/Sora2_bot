@@ -752,10 +752,18 @@ def _load_runtime_config() -> RuntimeConfig:
     port = _get_env_int("PORT", 8080)
 
     if mode == "webhook":
-        if not webhook_host.startswith("https://"):
-            raise RuntimeError("WEBHOOK_HOST must start with https:// when BOT_MODE=webhook")
+        if webhook_host and not webhook_host.startswith("https://"):
+            log.warning(
+                "WEBHOOK_HOST does not start with https://; Telegram may reject it",
+            )
+        if not webhook_host:
+            log.warning(
+                "WEBHOOK_HOST is empty while BOT_MODE=webhook; falling back to polling is expected",
+            )
         if not secret_token:
-            raise RuntimeError("TELEGRAM_SECRET_TOKEN must be set when BOT_MODE=webhook")
+            log.warning(
+                "TELEGRAM_SECRET_TOKEN is empty while BOT_MODE=webhook; webhook setup may fail",
+            )
 
     return RuntimeConfig(
         BOT_MODE=mode,
