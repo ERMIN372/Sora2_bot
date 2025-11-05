@@ -41,6 +41,19 @@ from .base import BaseProviderClient, ProviderAPIError, ProviderJobStatus, Provi
 log = logging.getLogger(__name__)
 
 
+def _has_generate_content_flag(model_meta: dict) -> bool:
+    """Return True if the model metadata advertises generateContent support."""
+
+    methods = (
+        model_meta.get("supported_generation_methods")
+        or model_meta.get("generation_methods")
+        or model_meta.get("capabilities")
+        or []
+    )
+    normalised = {str(item).lower().replace("_", "").replace("-", "") for item in methods}
+    return "generatecontent" in normalised
+
+
 _SAFETY_CATEGORIES: Tuple[types.HarmCategory, ...] = (
     types.HarmCategory.HARM_CATEGORY_HARASSMENT,
     types.HarmCategory.HARM_CATEGORY_HATE_SPEECH,
@@ -1622,4 +1635,5 @@ __all__ = [
     "GeminiGenerativeClient",
     "GeminiImageClient",
     "GeminiTextClient",
+    "_has_generate_content_flag",
 ]

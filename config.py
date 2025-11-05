@@ -252,6 +252,7 @@ class Config:
     environment: str = "dev"
     gemini_api_key: str = ""
     gemini_model_text: str = "gemini-2.0-flash"
+    gemini_model_text_fallback: str = "gemini-1.5-flash"
     gemini_model_image: str = "gemini-2.5-flash-image"
     gemini_model_video: str = "veo-3.0-generate-001"
     gemini_api_mode: str = "developer"
@@ -531,9 +532,17 @@ def load_config() -> Config:
             "GOOGLE_API_KEY detected; preferring it over GEMINI_API_KEY for Gemini API access"
         )
     gemini_api_key = raw_gemini_api_key.strip()
-    gemini_model_text = (
-        os.getenv("GEMINI_MODEL_TEXT", Config.gemini_model_text).strip()
-        or Config.gemini_model_text
+    gemini_text_override = os.getenv("GEMINI_TEXT_MODEL")
+    if gemini_text_override is not None and gemini_text_override.strip():
+        gemini_model_text = gemini_text_override.strip()
+    else:
+        gemini_model_text = (
+            os.getenv("GEMINI_MODEL_TEXT", Config.gemini_model_text).strip()
+            or Config.gemini_model_text
+        )
+    gemini_model_text_fallback = (
+        os.getenv("GEMINI_TEXT_MODEL_FALLBACK", Config.gemini_model_text_fallback).strip()
+        or Config.gemini_model_text_fallback
     )
     gemini_model_image = (
         os.getenv("GEMINI_MODEL_IMAGE", Config.gemini_model_image).strip()
@@ -654,6 +663,7 @@ def load_config() -> Config:
         gemini_api_key=gemini_api_key,
         environment=environment,
         gemini_model_text=gemini_model_text,
+        gemini_model_text_fallback=gemini_model_text_fallback,
         gemini_model_image=gemini_model_image,
         gemini_model_video=gemini_model_video,
         gemini_api_mode=gemini_api_mode,

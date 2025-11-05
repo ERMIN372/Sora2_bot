@@ -477,9 +477,13 @@ def _telegram_router(dp: Dispatcher) -> APIRouter:
 def _create_base_app() -> FastAPI:
     app = FastAPI(title="Sora2 Bot API")
 
-    @app.get("/healthz")
+    @app.get("/healthz", include_in_schema=False)
     async def healthz() -> Dict[str, bool]:
         return {"ok": True}
+
+    @app.get("/", include_in_schema=False)
+    async def root() -> Dict[str, str | bool]:
+        return {"ok": True, "service": "sora2-bot", "mode": "webhook"}
 
     app.add_middleware(BodySizeLimitMiddleware, max_body_size=MAX_REQUEST_SIZE)
 
