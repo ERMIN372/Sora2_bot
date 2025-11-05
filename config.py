@@ -499,10 +499,7 @@ def _get_optional_int(value: Optional[str]) -> Optional[int]:
         raise RuntimeError("Expected integer value") from exc
 
 
-def _get_env_int_list(key: str) -> Tuple[int, ...]:
-    raw = os.getenv(key, "")
-    if not raw:
-        return ()
+def _parse_int_list(raw: str, *, key: str) -> Tuple[int, ...]:
     parts = [item.strip() for item in raw.split(",") if item.strip()]
     result: list[int] = []
     for item in parts:
@@ -511,6 +508,23 @@ def _get_env_int_list(key: str) -> Tuple[int, ...]:
         except ValueError as exc:  # pragma: no cover - configuration guard
             raise RuntimeError(f"Environment variable {key!r} must contain integers") from exc
     return tuple(result)
+
+
+def _get_env_int_list(key: str) -> Tuple[int, ...]:
+    raw = os.getenv(key, "")
+    if not raw:
+        return ()
+    return _parse_int_list(raw, key=key)
+
+
+def _get_admin_ids_from_env() -> Tuple[int, ...]:
+    admin_ids = _get_env_int_list("ADMIN_IDS")
+    if admin_ids:
+        return admin_ids
+    admins_raw = os.getenv("ADMINS", "")
+    if not admins_raw:
+        return ()
+    return _parse_int_list(admins_raw, key="ADMINS")
 
 
 def load_config() -> Config:
@@ -719,7 +733,7 @@ def load_config() -> Config:
         yookassa_poll_interval=_get_env_int("YOOKASSA_POLL_INTERVAL", Config.yookassa_poll_interval),
         payments_read_only=_get_env_bool("PAYMENTS_READ_ONLY", Config.payments_read_only),
         terms_url=os.getenv("TERMS_URL", Config.terms_url),
-        admin_ids=_get_env_int_list("ADMIN_IDS"),
+        admin_ids=_get_admin_ids_from_env(),
         bot_version=os.getenv("BOT_VERSION", Config.bot_version),
         support_notify_interval=_get_env_int(
             "SUPPORT_NOTIFY_INTERVAL", Config.support_notify_interval

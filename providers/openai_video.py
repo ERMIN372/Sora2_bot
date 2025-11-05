@@ -42,7 +42,9 @@ _DEFAULT_VIDEO_MODELS: Tuple[str, ...] = ("sora-2", "sora-2-pro")
 _VIDEO_MODEL_PREFIXES: Tuple[str, ...] = ("sora-2",)
 _VIDEO_MIME_PREFIXES = ("video/", "application/octet-stream")
 
-ALLOWED_CREATE_FIELDS: FrozenSet[str] = frozenset({"prompt", "model", "duration", "size"})
+ALLOWED_CREATE_FIELDS: FrozenSet[str] = frozenset(
+    {"prompt", "model", "duration", "size", "n", "response_format"}
+)
 ALLOWED_REMIX_FIELDS: FrozenSet[str] = frozenset({"prompt"})
 ALLOWED_LIST_FIELDS: FrozenSet[str] = frozenset({"after", "limit", "order"})
 ALLOWED_RETRIEVE_FIELDS: FrozenSet[str] = frozenset()
@@ -639,6 +641,8 @@ class OpenAIVideoClient(BaseProviderClient):
                         if 500 <= status < 600
                         else f"HTTP {status}"
                     )
+                    if status and message_text and f"HTTP {status}" not in message_text:
+                        message_text = f"{message_text} (HTTP {status})"
                     note = f"status={status} code={normalised_code}"
                     retryable = status in (404, 409, 429) or 500 <= status < 600
                     self._update_last_download_meta(
@@ -985,6 +989,22 @@ class OpenAIVideoClient(BaseProviderClient):
                 request["size"] = size_value
             else:
                 request.pop("size", None)
+        n_value = request.get("n")
+        try:
+            n_int = int(n_value) if n_value is not None else 1
+        except (TypeError, ValueError):
+            n_int = 1
+        if n_int <= 0:
+            n_int = 1
+        request["n"] = n_int
+        response_format_value = request.get("response_format")
+        response_format_text = (
+            str(response_format_value).strip() if response_format_value else ""
+        )
+        if not response_format_text:
+            response_format_text = "url"
+        request["response_format"] = response_format_text
+
         extras = self._extract_local_extras(
             original_settings=original_settings,
             original_payload=original_payload,

@@ -29,6 +29,14 @@ from aiogram.types import (
     ReplyKeyboardMarkup,
     ReplyKeyboardRemove,
 )
+from aiogram.utils.exceptions import (
+    BadRequest,
+    CantTalkWithBot,
+    ChatNotFound,
+    RetryAfter,
+    TelegramAPIError,
+    Unauthorized,
+)
 
 from archive import ArchivePayload, ArchivePublisher
 from config import (
@@ -150,6 +158,209 @@ class ChatGPTState(StatesGroup):
 
     awaiting_input = State()
 
+
+class AdminStates(StatesGroup):
+    """FSM states for the administrator panel."""
+
+    menu = State()
+    broadcast_message = State()
+    broadcast_confirm = State()
+    direct_target = State()
+    direct_message = State()
+    direct_confirm = State()
+
+
+_ADMIN_BROADCAST_THROTTLE_SECONDS = 0.05
+
+
+def _admin_menu_keyboard() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text=i18n.t("admin.menu.broadcast_all"))],
+            [KeyboardButton(text=i18n.t("admin.menu.direct_message"))],
+            [KeyboardButton(text=i18n.t("admin.menu.close"))],
+        ],
+        resize_keyboard=True,
+    )
+
+
+def _admin_cancel_keyboard() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        keyboard=[[KeyboardButton(text=i18n.t("admin.buttons.cancel"))]],
+        resize_keyboard=True,
+    )
+
+
+def _admin_confirm_keyboard(action: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=i18n.t("admin.buttons.send"),
+                    callback_data=f"admin:{action}:confirm",
+                ),
+                InlineKeyboardButton(
+                    text=i18n.t("admin.buttons.abort"),
+                    callback_data=f"admin:{action}:cancel",
+                ),
+            ]
+        ]
+    )
+
+
+def _escape_format_value(value: str) -> str:
+    return value.replace("{", "{{").replace("}", "}}")
+
+
+def _is_cancel_action(text: Optional[str]) -> bool:
+    if text is None:
+        return False
+    normalized = text.strip().lower()
+    if not normalized:
+        return False
+    cancel_tokens = {
+        "/cancel",
+        "cancel",
+        "отмена",
+        i18n.t("admin.buttons.cancel").strip().lower(),
+    }
+    return normalized in cancel_tokens
+
+
+async def _collect_broadcast_recipients(db: Database) -> List[int]:
+    try:
+        raw_users = await db.list_users()
+    except Exception:  # pragma: no cover - defensive guard around external IO
+        log.warning("Failed to list users for broadcast", exc_info=True)
+        return []
+    recipients: List[int] = []
+    seen: Set[int] = set()
+    for entry in raw_users or []:
+        if not isinstance(entry, Mapping):
+            continue
+        value = entry.get("user_id")
+        try:
+            user_id = int(value)
+        except (TypeError, ValueError):
+            continue
+        if user_id <= 0 or user_id in seen:
+            continue
+        seen.add(user_id)
+        recipients.append(user_id)
+    return recipients
+
+
+def _normalise_username(value: Optional[str]) -> str:
+    if value is None:
+        return ""
+    text = str(value).strip()
+    if text.startswith("@"):
+        text = text[1:]
+    return text.lower()
+
+
+def _find_user_record(
+    users: Iterable[Mapping[str, Any]], identifier: str
+) -> Optional[Mapping[str, Any]]:
+    candidate = (identifier or "").strip()
+    if not candidate:
+        return None
+    if candidate.startswith("@"):
+        username = candidate[1:].strip().lower()
+        for entry in users:
+            if not isinstance(entry, Mapping):
+                continue
+            if _normalise_username(entry.get("username")) == username:
+                return entry
+        return None
+    if candidate.startswith("+"):
+        candidate = candidate[1:]
+    try:
+        user_id = int(candidate)
+    except ValueError:
+        return None
+    for entry in users:
+        if not isinstance(entry, Mapping):
+            continue
+        value = entry.get("user_id")
+        try:
+            entry_id = int(value)
+        except (TypeError, ValueError):
+            continue
+        if entry_id == user_id:
+            return entry
+    return None
+
+
+def _format_user_label(record: Mapping[str, Any]) -> str:
+    username = str(record.get("username") or "").strip()
+    user_id_raw = record.get("user_id")
+    try:
+        user_id = int(user_id_raw)
+    except (TypeError, ValueError):
+        user_id = None
+    if username:
+        handle = username if username.startswith("@") else f"@{username}"
+        if user_id:
+            return f"{handle} ({user_id})"
+        return handle
+    if user_id:
+        return str(user_id)
+    return "—"
+
+
+async def _send_text_safely(bot: Bot, user_id: int, text: str) -> bool:
+    try:
+        await bot.send_message(user_id, text)
+        return True
+    except RetryAfter as exc:  # pragma: no cover - timing dependent
+        timeout = getattr(exc, "timeout", None)
+        try:
+            delay = float(timeout) if timeout is not None else 1.0
+        except (TypeError, ValueError):
+            delay = 1.0
+        if delay < 0:
+            delay = 1.0
+        await asyncio.sleep(delay)
+        try:
+            await bot.send_message(user_id, text)
+            return True
+        except (RetryAfter, TelegramAPIError) as err:  # pragma: no cover - defensive
+            log.warning(
+                "Retry failed for broadcast delivery user=%s error=%s", user_id, err, exc_info=True
+            )
+            return False
+    except (ChatNotFound, Unauthorized, CantTalkWithBot, BadRequest) as exc:
+        log.info("Skipping delivery to user=%s error=%s", user_id, exc)
+        return False
+    except TelegramAPIError as exc:  # pragma: no cover - network guard
+        log.warning(
+            "Failed to deliver broadcast to user=%s error=%s", user_id, exc, exc_info=True
+        )
+        return False
+
+
+async def _broadcast_to_users(bot: Bot, recipients: Iterable[int], text: str) -> Tuple[int, int]:
+    sent = 0
+    failed = 0
+    for user_id in recipients:
+        if await _send_text_safely(bot, user_id, text):
+            sent += 1
+        else:
+            failed += 1
+        if _ADMIN_BROADCAST_THROTTLE_SECONDS > 0:
+            await asyncio.sleep(_ADMIN_BROADCAST_THROTTLE_SECONDS)
+    return sent, failed
+
+
+async def _enter_admin_menu(state: FSMContext, message: Message) -> None:
+    await AdminStates.menu.set()
+    await message.answer(i18n.t("admin.menu.title"), reply_markup=_admin_menu_keyboard())
+
+
+async def _return_to_admin_menu(state: FSMContext, message: Message) -> None:
+    await state.reset_data()
+    await _enter_admin_menu(state, message)
 
 @dataclass
 class OrderContext:
@@ -3079,6 +3290,220 @@ def _is_admin(user_id: int, config: Config) -> bool:
     return user_id in config.admin_ids
 
 
+async def admin_command(message: Message, state: FSMContext, config: Config) -> None:
+    user_id = message.from_user.id if message.from_user else 0
+    if not _is_admin(user_id, config):
+        return
+    await state.finish()
+    await _enter_admin_menu(state, message)
+
+
+async def admin_menu_handler(
+    message: Message, state: FSMContext, db: Database, config: Config
+) -> None:
+    user_id = message.from_user.id if message.from_user else 0
+    if not _is_admin(user_id, config):
+        return
+    choice = (message.text or "").strip()
+    broadcast_label = i18n.t("admin.menu.broadcast_all")
+    direct_label = i18n.t("admin.menu.direct_message")
+    close_label = i18n.t("admin.menu.close")
+    if choice == broadcast_label:
+        await AdminStates.broadcast_message.set()
+        await message.answer(i18n.t("admin.broadcast.prompt"), reply_markup=_admin_cancel_keyboard())
+        return
+    if choice == direct_label:
+        await AdminStates.direct_target.set()
+        await message.answer(i18n.t("admin.direct.prompt_id"), reply_markup=_admin_cancel_keyboard())
+        return
+    if choice == close_label:
+        await state.finish()
+        await message.answer(i18n.t("admin.menu.closed"), reply_markup=_main_keyboard(config))
+        return
+    await message.answer(i18n.t("admin.menu.invalid"))
+
+
+async def admin_broadcast_message_handler(
+    message: Message, state: FSMContext, db: Database, config: Config
+) -> None:
+    user_id = message.from_user.id if message.from_user else 0
+    if not _is_admin(user_id, config):
+        return
+    if _is_cancel_action(message.text):
+        await message.answer(i18n.t("admin.status.cancelled"))
+        await _return_to_admin_menu(state, message)
+        return
+    text = (message.text or "").strip()
+    if not text:
+        await message.answer(i18n.t("admin.broadcast.empty_message"), reply_markup=_admin_cancel_keyboard())
+        return
+    recipients = await _collect_broadcast_recipients(db)
+    if not recipients:
+        await message.answer(i18n.t("admin.broadcast.empty_audience"))
+        await _return_to_admin_menu(state, message)
+        return
+    await state.update_data(broadcast_message=text)
+    await AdminStates.broadcast_confirm.set()
+    preview = i18n.t(
+        "admin.broadcast.preview",
+        count=len(recipients),
+        message=_escape_format_value(text),
+    )
+    await message.answer(preview, reply_markup=_admin_confirm_keyboard("broadcast"))
+
+
+async def admin_direct_target_handler(
+    message: Message, state: FSMContext, db: Database, config: Config
+) -> None:
+    user_id = message.from_user.id if message.from_user else 0
+    if not _is_admin(user_id, config):
+        return
+    if _is_cancel_action(message.text):
+        await message.answer(i18n.t("admin.status.cancelled"))
+        await _return_to_admin_menu(state, message)
+        return
+    identifier = (message.text or "").strip()
+    if not identifier:
+        await message.answer(i18n.t("admin.direct.prompt_id"), reply_markup=_admin_cancel_keyboard())
+        return
+    try:
+        users = await db.list_users()
+    except Exception:  # pragma: no cover - external dependency guard
+        log.warning("Failed to load users for direct message", exc_info=True)
+        await message.answer(i18n.t("admin.direct.lookup_error"))
+        await _return_to_admin_menu(state, message)
+        return
+    record = _find_user_record(users, identifier)
+    if not record:
+        await message.answer(i18n.t("admin.direct.not_found"), reply_markup=_admin_cancel_keyboard())
+        return
+    try:
+        target_id = int(record.get("user_id", 0))
+    except (TypeError, ValueError):
+        target_id = 0
+    if target_id <= 0:
+        await message.answer(i18n.t("admin.direct.not_found"), reply_markup=_admin_cancel_keyboard())
+        return
+    label = _format_user_label(record)
+    await state.update_data(
+        direct_target_id=target_id,
+        direct_target_label=label,
+    )
+    await AdminStates.direct_message.set()
+    await message.answer(
+        i18n.t("admin.direct.prompt_message", user=_escape_format_value(label)),
+        reply_markup=_admin_cancel_keyboard(),
+    )
+
+
+async def admin_direct_message_handler(
+    message: Message, state: FSMContext, db: Database, config: Config
+) -> None:
+    user_id = message.from_user.id if message.from_user else 0
+    if not _is_admin(user_id, config):
+        return
+    if _is_cancel_action(message.text):
+        await message.answer(i18n.t("admin.status.cancelled"))
+        await _return_to_admin_menu(state, message)
+        return
+    text = (message.text or "").strip()
+    if not text:
+        await message.answer(i18n.t("admin.direct.empty_message"), reply_markup=_admin_cancel_keyboard())
+        return
+    data = await state.get_data()
+    label = data.get("direct_target_label")
+    if not label:
+        await _return_to_admin_menu(state, message)
+        return
+    await state.update_data(direct_message=text)
+    await AdminStates.direct_confirm.set()
+    preview = i18n.t(
+        "admin.direct.preview",
+        user=_escape_format_value(str(label)),
+        message=_escape_format_value(text),
+    )
+    await message.answer(preview, reply_markup=_admin_confirm_keyboard("direct"))
+
+
+async def admin_panel_callback_handler(
+    callback: CallbackQuery, state: FSMContext, db: Database, config: Config
+) -> None:
+    await callback.answer()
+    user_id = callback.from_user.id if callback.from_user else 0
+    if not _is_admin(user_id, config):
+        return
+    payload = callback.data or ""
+    parts = payload.split(":", maxsplit=2)
+    if len(parts) != 3:
+        return
+    _, action, decision = parts
+    message = callback.message
+    if message is None:
+        return
+    if decision == "cancel":
+        try:
+            await message.edit_reply_markup()
+        except Exception:  # pragma: no cover - Telegram edit failures are non-fatal
+            pass
+        await message.answer(i18n.t("admin.status.cancelled"))
+        await _return_to_admin_menu(state, message)
+        return
+    bot = getattr(message, "bot", None) or getattr(callback, "bot", None)
+    if bot is None:
+        log.warning("Admin callback without bot instance action=%s", action)
+        await message.answer(i18n.t("admin.status.internal_error"))
+        await _return_to_admin_menu(state, message)
+        return
+    if action == "broadcast" and decision == "confirm":
+        data = await state.get_data()
+        broadcast_text = data.get("broadcast_message")
+        if not broadcast_text:
+            await _return_to_admin_menu(state, message)
+            return
+        recipients = await _collect_broadcast_recipients(db)
+        if not recipients:
+            await message.answer(i18n.t("admin.broadcast.empty_audience"))
+            await _return_to_admin_menu(state, message)
+            return
+        try:
+            await message.edit_reply_markup()
+        except Exception:  # pragma: no cover - Telegram edit failures are non-fatal
+            pass
+        progress = await message.answer(i18n.t("admin.broadcast.started", count=len(recipients)))
+        sent, failed = await _broadcast_to_users(bot, recipients, broadcast_text)
+        summary = i18n.t("admin.broadcast.completed", sent=sent, failed=failed)
+        try:
+            await progress.edit_text(summary)
+        except Exception:  # pragma: no cover - message edits may fail
+            await message.answer(summary)
+        log.info(
+            "Admin broadcast completed by %s: audience=%s sent=%s failed=%s",
+            user_id,
+            len(recipients),
+            sent,
+            failed,
+        )
+        await _return_to_admin_menu(state, message)
+        return
+    if action == "direct" and decision == "confirm":
+        data = await state.get_data()
+        direct_text = data.get("direct_message")
+        target_id = data.get("direct_target_id")
+        label = data.get("direct_target_label")
+        if not direct_text or not target_id:
+            await _return_to_admin_menu(state, message)
+            return
+        try:
+            await message.edit_reply_markup()
+        except Exception:  # pragma: no cover - Telegram edit failures are non-fatal
+            pass
+        success = await _send_text_safely(bot, int(target_id), direct_text)
+        result_key = "admin.direct.sent" if success else "admin.direct.failed"
+        await message.answer(
+            i18n.t(result_key, user=_escape_format_value(str(label or target_id)))
+        )
+        await _return_to_admin_menu(state, message)
+
 def _format_health_text(result) -> str:
     mode = escape_html(result.details.get("mode", "-")) if isinstance(result.details, dict) else "-"
     lines = [
@@ -4100,6 +4525,11 @@ def register_handlers(
         state="*",
     )
     dp.register_message_handler(
+        lambda message, state: admin_command(message, state, config),
+        Command("admin"),
+        state="*",
+    )
+    dp.register_message_handler(
         lambda message: status_admin_command(message, config),
         Command("status"),
         state="*",
@@ -4239,6 +4669,26 @@ def register_handlers(
         state="*",
     )
     dp.register_message_handler(
+        lambda message, state: admin_menu_handler(message, state, db, config),
+        state=AdminStates.menu,
+        content_types=["text"],
+    )
+    dp.register_message_handler(
+        lambda message, state: admin_broadcast_message_handler(message, state, db, config),
+        state=AdminStates.broadcast_message,
+        content_types=["text"],
+    )
+    dp.register_message_handler(
+        lambda message, state: admin_direct_target_handler(message, state, db, config),
+        state=AdminStates.direct_target,
+        content_types=["text"],
+    )
+    dp.register_message_handler(
+        lambda message, state: admin_direct_message_handler(message, state, db, config),
+        state=AdminStates.direct_message,
+        content_types=["text"],
+    )
+    dp.register_message_handler(
         lambda message, state: handle_text_input(message, state, db, config),
         state=GenerationStates.text_prompt,
     )
@@ -4295,6 +4745,11 @@ def register_handlers(
             call, state, db, job_queue, config, gate, error_reporter
         ),
         lambda call: call.data and call.data.startswith("order:"),
+        state="*",
+    )
+    dp.register_callback_query_handler(
+        lambda call, state: admin_panel_callback_handler(call, state, db, config),
+        lambda call: call.data and call.data.startswith("admin:"),
         state="*",
     )
     dp.register_callback_query_handler(
