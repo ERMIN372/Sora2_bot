@@ -475,8 +475,15 @@ def _telegram_router(dp: Dispatcher, bot: Bot) -> APIRouter:
         try:
             if hasattr(types.Update, "to_object"):
                 update = types.Update.to_object(data)
+            elif hasattr(types.Update, "model_validate"):
+                update = types.Update.model_validate(
+                    data,
+                    context={"bot": bot, "dispatcher": dp},
+                )
             else:
                 update = types.Update(**data)
+            if hasattr(update, "as_"):
+                update = update.as_(bot)
         except Exception:
             log.exception(
                 "Webhook: cannot convert to aiogram Update", extra={"update_json": data}
