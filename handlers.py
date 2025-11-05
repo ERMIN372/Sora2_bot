@@ -36,6 +36,11 @@ ChatNotFound = aiogram_exceptions.ChatNotFound
 RetryAfter = aiogram_exceptions.RetryAfter
 TelegramAPIError = aiogram_exceptions.TelegramAPIError
 Unauthorized = aiogram_exceptions.Unauthorized
+InvalidQueryID = getattr(
+    aiogram_exceptions,
+    "InvalidQueryID",
+    TelegramAPIError,
+)
 CantTalkWithBot = getattr(
     aiogram_exceptions,
     "CantTalkWithBot",
@@ -108,6 +113,22 @@ SIZE_OPTIONS: Dict[str, str] = {
     "vertical": "720x1280",
     "horizontal": "1280x720",
 }
+
+
+async def safe_callback_answer(callback: CallbackQuery, *args: Any, **kwargs: Any) -> None:
+    """Answer a callback query without raising for stale queries.
+
+    Telegram occasionally retries webhook updates, which means the callback query
+    might already be answered by the time we handle it. In that case Telegram
+    returns ``InvalidQueryID``. We swallow that specific error to avoid crashing
+    the webhook handler while keeping the default behaviour for other
+    exceptions.
+    """
+
+    try:
+        await callback.answer(*args, **kwargs)
+    except InvalidQueryID:
+        log.debug("Callback query %s already expired", callback.id)
 
 _INLINE_ASSET_MAX_BYTES = 9 * 1024 * 1024
 _TELEGRAM_VIDEO_MAX_BYTES = 48 * 1024 * 1024
@@ -1151,7 +1172,7 @@ async def _send_order_confirmation(
 async def flow_back_callback_handler(
     callback: CallbackQuery, state: FSMContext, config: Config
 ) -> None:
-    await callback.answer()
+    await safe_callback_answer(callback)
     parts = (callback.data or "").split(":", maxsplit=2)
     if len(parts) != 3:
         return
@@ -2996,14 +3017,14 @@ async def handle_photo_input(
 async def video_model_callback_handler(
     callback: CallbackQuery, state: FSMContext, config: Config
 ) -> None:
-    await callback.answer()
+    await safe_callback_answer(callback)
     parts = (callback.data or "").split(":")
     if len(parts) != 3:
         return
     _, _, key = parts
     option = _find_video_model_option(config, key)
     if option is None:
-        await callback.answer("Модель недоступна", show_alert=True)
+        await safe_callback_answer(callback, "Модель недоступна", show_alert=True)
         return
     await state.update_data(
         flow_type="video",
@@ -3028,7 +3049,7 @@ async def video_model_callback_handler(
 async def video_mode_callback_handler(
     callback: CallbackQuery, state: FSMContext, config: Config
 ) -> None:
-    await callback.answer()
+    await safe_callback_answer(callback)
     parts = (callback.data or "").split(":")
     if len(parts) != 3:
         return
@@ -3073,7 +3094,7 @@ async def video_mode_callback_handler(
 async def image_mode_callback_handler(
     callback: CallbackQuery, state: FSMContext, config: Config
 ) -> None:
-    await callback.answer()
+    await safe_callback_answer(callback)
     parts = (callback.data or "").split(":")
     if len(parts) != 3:
         return
@@ -3119,12 +3140,12 @@ async def option_callback_handler(
 ) -> None:
     data = (callback.data or "").split(":")
     if len(data) != 4:
-        await callback.answer()
+        await safe_callback_answer(callback)
         return
     _, option_type, context, token = data
     user = callback.from_user
     if user is None:  # pragma: no cover - defensive
-        await callback.answer()
+        await safe_callback_answer(callback)
         return
     session = SESSION_MANAGER.get(user.id)
     if option_type == "size":
@@ -3134,7 +3155,7 @@ async def option_callback_handler(
             aspect = ASPECT_RATIO_OPTIONS.get(token)
             if aspect:
                 session.last_aspect_ratio = aspect
-    await callback.answer()
+    await safe_callback_answer(callback)
     state_data = await state.get_data()
     if state_data.get("flow_type", "video") != "video":
         return
@@ -3164,7 +3185,7 @@ async def order_callback_handler(
     gate: GenerationRequestGate,
     error_reporter: ErrorReporter,
 ) -> None:
-    await callback.answer()
+    await safe_callback_answer(callback)
     action = (callback.data or "").split(":", maxsplit=1)[-1]
     user = callback.from_user
     if user is None:  # pragma: no cover - defensive
@@ -3230,7 +3251,7 @@ async def payment_callback_handler(
     db: Database,
     config: Config,
 ) -> None:
-    await callback.answer()
+    await safe_callback_answer(callback)
     if not config.yookassa_ready:
         await callback.message.answer(i18n.t("payment.unavailable"))
         return
@@ -3320,7 +3341,7 @@ async def menu_callback_handler(
     config: Config,
     state: FSMContext,
 ) -> None:
-    await callback.answer()
+    await safe_callback_answer(callback)
     data = callback.data or ""
     if data.endswith("topup"):
         await _send_payment_showcase(callback.message.bot, callback.message.chat.id, config)
@@ -3497,7 +3518,7 @@ async def admin_direct_message_handler(
 async def admin_panel_callback_handler(
     callback: CallbackQuery, state: FSMContext, db: Database, config: Config
 ) -> None:
-    await callback.answer()
+    await safe_callback_answer(callback)
     user_id = callback.from_user.id if callback.from_user else 0
     if not _is_admin(user_id, config):
         return
