@@ -31,12 +31,16 @@ from aiogram.types import (
 )
 from aiogram.utils.exceptions import (
     BadRequest,
-    CantTalkWithBot,
     ChatNotFound,
     RetryAfter,
     TelegramAPIError,
     Unauthorized,
 )
+
+try:
+    from aiogram.utils.exceptions import CantTalkWithBot
+except (ImportError, AttributeError):  # aiogram<2.19 lacks CantTalkWithBot
+    CantTalkWithBot = TelegramAPIError
 
 from archive import ArchivePayload, ArchivePublisher
 from config import (
