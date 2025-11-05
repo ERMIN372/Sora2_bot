@@ -53,6 +53,14 @@ _UPDATE_KEYS: Tuple[str, ...] = (
 )
 
 
+_RETRYABLE_IDEMPOTENCY_STATUSES: Tuple[str, ...] = (
+    "failed",
+    "timeout",
+    "no_media",
+    "refunded",
+)
+
+
 VIDEO_TASK_CREATE = "video_create"
 VIDEO_TASK_REMIX = "video_remix"
 VIDEO_TASK_RETRIEVE = "video_retrieve"
@@ -165,6 +173,17 @@ def _extract_progress_markers(data: Dict[str, Any]) -> Tuple[Optional[float], Op
                 if isinstance(item, (dict, list, tuple)):
                     stack.append(item)
     return progress, update_token
+
+
+def _should_retry_idempotency(status: Optional[str]) -> bool:
+    if not status:
+        return False
+    status_lower = status.lower()
+    if status_lower in _RETRYABLE_IDEMPOTENCY_STATUSES:
+        return True
+    if "failed" in status_lower:
+        return True
+    return False
 
 
 def _extract_video_id(data: Any, *, client: Optional[BaseProviderClient] = None) -> Optional[str]:
@@ -813,14 +832,23 @@ class JobQueue:
         )
         existing_job = await self._db.find_job_by_idempotency_key(stable_idempotency_key)
         if existing_job is not None:
-            log.info(
-                "Duplicate submission suppressed corr_id=%s user_id=%s existing_job_id=%s status=%s",
-                corr_id,
-                user_id,
-                existing_job.id,
-                existing_job.status,
-            )
-            return existing_job
+            if _should_retry_idempotency(existing_job.status):
+                log.info(
+                    "Retrying submission after previous failure corr_id=%s user_id=%s existing_job_id=%s status=%s",
+                    corr_id,
+                    user_id,
+                    existing_job.id,
+                    existing_job.status,
+                )
+            else:
+                log.info(
+                    "Duplicate submission suppressed corr_id=%s user_id=%s existing_job_id=%s status=%s",
+                    corr_id,
+                    user_id,
+                    existing_job.id,
+                    existing_job.status,
+                )
+                return existing_job
         prompt_hash = hashlib.sha256(effective_prompt.encode("utf-8")).hexdigest()
         log.debug(
             "Submitting provider job corr_id=%s user_id=%s provider=%s model=%s settings=%s prompt_hash=%s",
