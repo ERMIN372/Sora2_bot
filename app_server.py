@@ -12,7 +12,7 @@ from typing import Any, Dict, Optional
 
 from aiogram import Bot, Dispatcher, types
 from fastapi import APIRouter, FastAPI, Header, Request, Response
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.types import ASGIApp
 
@@ -23,6 +23,7 @@ from i18n import format_credits, i18n
 import yookassa_client
 
 log = logging.getLogger(__name__)
+WEBHOOK_SECRET = os.getenv("TELEGRAM_WEBHOOK_SECRET", "")
 
 YOOKASSA_IP_RANGES = [
     ip_network("185.71.76.0/27"),
@@ -452,23 +453,42 @@ def _telegram_router(dp: Dispatcher) -> APIRouter:
     router = APIRouter()
 
     # [TG_WEBHOOK_ROUTE]
-    @router.post(CFG.WEBHOOK_PATH)
+    @router.post("/tg/webhook", include_in_schema=False)
     async def tg_webhook(
         request: Request,
         x_telegram_bot_api_secret_token: str | None = Header(default=None),
     ) -> Response:
-        # Проверка секрета
-        if x_telegram_bot_api_secret_token != CFG.TELEGRAM_SECRET_TOKEN:
-            return Response(status_code=403)
+        if WEBHOOK_SECRET:
+            if x_telegram_bot_api_secret_token != WEBHOOK_SECRET:
+                log.warning("Webhook: bad secret token")
+                return Response(status_code=200)
+
+        raw = await request.body()
+        try:
+            data = json.loads(raw.decode("utf-8"))
+        except Exception:
+            log.exception("Webhook: invalid JSON body", extra={"raw": raw[:1000]})
+            return Response(status_code=200)
+
+        log.debug("Webhook: update received", extra={"update_json": data})
 
         try:
-            data = await request.json()
+            if hasattr(types.Update, "to_object"):
+                update = types.Update.to_object(data)
+            else:
+                update = types.Update(**data)
         except Exception:
-            return Response(status_code=400)
+            log.exception(
+                "Webhook: cannot convert to aiogram Update", extra={"update_json": data}
+            )
+            return Response(status_code=200)
 
-        update = types.Update(**data)
-        # ВАЖНО: process_update, а не polling
-        await dp.process_update(update)
+        try:
+            await dp.process_update(update)
+        except Exception:
+            log.exception("Webhook: handler crashed", extra={"update_json": data})
+            return Response(status_code=200)
+
         return Response(status_code=200)
 
     return router
@@ -517,6 +537,11 @@ def create_app(
 
 app = _create_base_app()
 
+
+@app.exception_handler(Exception)
+async def _unhandled_exc(request: Request, exc: Exception):
+    log.exception("Unhandled exception", extra={"path": str(request.url)})
+    return JSONResponse({"error": "internal"}, status_code=500)
 
 __all__ = [
     "BodySizeLimitMiddleware",
