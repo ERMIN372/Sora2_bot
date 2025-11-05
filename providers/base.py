@@ -127,6 +127,7 @@ class ProviderAPIError(RuntimeError):
         status: Optional[int] = None,
     ) -> None:
         super().__init__(message)
+        self.message = message
         self.provider = provider
         self.status_code = status_code
         self.error_type = error_type
