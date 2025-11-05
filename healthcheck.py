@@ -7,7 +7,7 @@ import json
 import logging
 import random
 import time
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import gsheets_db
 from google.genai import errors as _genai_errors, types as _genai_types
@@ -15,14 +15,15 @@ from google.genai import errors as _genai_errors, types as _genai_types
 from config import Config
 from observability import HealthCheckResult, record_healthcheck
 from services.gemini_client import get_media_client, get_text_client
+from providers.gemini import _has_generate_content_flag
 
 log = logging.getLogger(__name__)
 
 def _supports_method(catalog: Dict[str, List[str]], model: str, method: str) -> bool:
     methods = catalog.get(model, [])
-    target = method.replace("-", "_").lower()
+    target = method.replace("-", "").replace("_", "").lower()
     for value in methods:
-        cleaned = str(value).replace("-", "_").lower()
+        cleaned = str(value).replace("-", "").replace("_", "").lower()
         if cleaned == target:
             return True
     return False
@@ -46,6 +47,8 @@ async def _probe_gemini_models(config: Config) -> Tuple[bool, str]:
 
     supported: Dict[str, List[str]] = {}
     model_scope: Dict[str, str] = {}
+    metadata: Dict[str, Dict[str, Any]] = {}
+    warnings: List[str] = []
 
     async def _load_catalog(scope: str, client: Any) -> None:
         try:
@@ -56,16 +59,67 @@ async def _probe_gemini_models(config: Config) -> Tuple[bool, str]:
         for item in catalog:
             name = getattr(item, "name", None) or getattr(item, "model", None) or ""
             short = name.split("/")[-1] if name else ""
-            methods = getattr(item, "supported_generation_methods", None) or []
-            method_list = [str(method) for method in methods]
-            if short:
-                supported[short] = method_list
-                model_scope.setdefault(short, scope)
+            raw_methods = (
+                getattr(item, "supported_generation_methods", None)
+                or getattr(item, "generation_methods", None)
+                or getattr(item, "capabilities", None)
+                or []
+            )
+            if isinstance(raw_methods, (list, tuple, set, frozenset)):
+                iterable_methods = list(raw_methods)
+            elif raw_methods:
+                iterable_methods = [raw_methods]
+            else:
+                iterable_methods = []
+            method_list = [str(method) for method in iterable_methods]
+            meta: Dict[str, Any] = {}
+            dump = getattr(item, "model_dump", None)
+            if callable(dump):
+                try:
+                    dumped = dump(mode="json")  # type: ignore[misc]
+                except TypeError:
+                    dumped = dump()  # type: ignore[call-arg]
+                except Exception:  # pragma: no cover - defensive serialisation
+                    dumped = None
+                if isinstance(dumped, dict):
+                    meta.update(dumped)
+            if isinstance(item, dict):
+                meta.update(item)
+            for attr_name in (
+                "supported_generation_methods",
+                "generation_methods",
+                "capabilities",
+            ):
+                if attr_name not in meta:
+                    value = getattr(item, attr_name, None)
+                    if value is not None:
+                        meta[attr_name] = value
+            if method_list and "supported_generation_methods" not in meta:
+                meta["supported_generation_methods"] = method_list
             if name:
-                supported[name] = method_list
-                model_scope.setdefault(name, scope)
+                meta.setdefault("name", name)
+            meta.setdefault("scope", scope)
+            variants = []
+            if short:
+                variants.append(short)
+            if name:
+                variants.append(name)
+            for variant in variants:
+                supported[variant] = list(method_list)
+                model_scope.setdefault(variant, scope)
+                metadata[variant] = dict(meta)
 
     await asyncio.gather(*[_load_catalog(scope, client) for scope, client in clients.items()])
+
+    def _get_metadata(model_name: str) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+        if not model_name:
+            return None, None
+        if model_name in metadata:
+            return metadata[model_name], model_name
+        short_name = model_name.split("/")[-1]
+        if short_name in metadata:
+            return metadata[short_name], short_name
+        return None, None
 
     if not supported:
         return False, "models.list:empty"
@@ -79,11 +133,34 @@ async def _probe_gemini_models(config: Config) -> Tuple[bool, str]:
         return model_scope.get(short, default_scope)
 
     text_model = (config.gemini_model_text or "").strip()
+    fallback_text_model = getattr(config, "gemini_model_text_fallback", "")
+    fallback_text_model = (fallback_text_model or "").strip()
     if text_model:
-        if text_model not in supported:
+        text_meta, resolved_key = _get_metadata(text_model)
+        fallback_used = False
+        if text_meta is None and fallback_text_model and fallback_text_model != text_model:
+            fallback_meta, _ = _get_metadata(fallback_text_model)
+            if fallback_meta is not None:
+                text_meta = fallback_meta
+                fallback_used = True
+        model_known = resolved_key is not None or text_model in supported
+        if not model_known:
             return False, f"text model {text_model} missing"
-        if not _supports_method(supported, text_model, "generate_content"):
-            return False, f"text model {text_model} lacks generate_content"
+        text_detail = detail.setdefault("text", {"model": text_model})
+        if fallback_used:
+            text_detail["checked_with"] = fallback_text_model
+        else:
+            text_detail["checked_with"] = text_model
+        if text_meta is not None and not _has_generate_content_flag(text_meta):
+            warning_msg = (
+                f"text model {text_model} does not advertise generateContent; continuing (warning)"
+            )
+            warnings.append(warning_msg)
+            text_detail["warning"] = "missing generateContent"
+            log.warning(
+                "Gemini text model %s does not advertise generateContent; healthcheck continues",
+                text_model,
+            )
 
     image_model = (config.gemini_model_image or "").strip()
     if image_model:
@@ -241,8 +318,13 @@ async def _probe_gemini_models(config: Config) -> Tuple[bool, str]:
             }
         )
 
+    if warnings:
+        detail["warnings"] = warnings
+
     detail_json = json.dumps(detail, ensure_ascii=False)
     log.info("Gemini models: ok %s", detail_json)
+    if warnings:
+        return True, "; ".join(warnings)
     return True, detail_json
 
 
