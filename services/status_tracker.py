@@ -261,22 +261,25 @@ class StatusMessageManager:
         text: str,
         *,
         force: bool = False,
-    ) -> None:
+    ) -> bool:
+        edited = False
         if state.closed and not force:
             increment_metric("status_edits_after_terminal")
-            return
+            return False
         if not force and text == state.last_text:
-            return
+            return False
         try:
             await bot.edit_message_text(text, state.chat_id, state.message_id)
         except tg_exceptions.MessageNotModified:
             state.last_text = text
+            edited = True
         except (tg_exceptions.MessageToEditNotFound, tg_exceptions.MessageCantBeEdited):
             state.active = False
         except tg_exceptions.TelegramAPIError:  # pragma: no cover - network call
             pass
         else:
             state.last_text = text
+            edited = True
             self._record_edit(job, state)
             await db.update_job_fields(
                 job.id,
@@ -299,6 +302,7 @@ class StatusMessageManager:
                 state.next_action_at = float("inf")
             else:
                 state.next_edit_at = now + self._jitter(self._edit_interval)
+        return edited
 
     async def _finalise_state(
         self,
@@ -315,7 +319,46 @@ class StatusMessageManager:
         state.closed = True
         state.terminal_state = terminal_state
         self._active_by_user[state.user_id].discard(job.id)
-        await self._edit_text(bot, db, job, state, text, force=True)
+        original_message_id = state.message_id
+        edited = await self._edit_text(bot, db, job, state, text, force=True)
+        if not edited:
+            if original_message_id:
+                try:
+                    await bot.delete_message(state.chat_id, original_message_id)
+                except tg_exceptions.TelegramAPIError:  # pragma: no cover - network call
+                    pass
+            try:
+                message = await bot.send_message(state.chat_id, text)
+            except tg_exceptions.TelegramAPIError:  # pragma: no cover - network call
+                pass
+            else:
+                state.message_id = message.message_id
+                state.last_text = text
+                state.delete_task = None
+                timestamp = datetime.now(timezone.utc)
+                await db.update_job_fields(
+                    job.id,
+                    status=job.status,
+                    status_message_id=message.message_id,
+                    status_message_index=state.phrase_index,
+                    status_message_updated_at=timestamp,
+                )
+                job.status_message_id = message.message_id
+                job.status_message_index = state.phrase_index
+                job.status_message_updated_at = timestamp
+                increment_metric("status_fallback_messages_total")
+                log_event(
+                    level="WARNING",
+                    event="status_fallback_message",
+                    corr_id=job.corr_id,
+                    job_id=job.id,
+                    user_id=job.user_id,
+                    username=job.username,
+                    model=job.model,
+                    provider="status",
+                    size=job.size,
+                    extra={"reason": "edit_failed"},
+                )
         state.next_edit_at = float("inf")
         state.next_action_at = float("inf")
         if schedule_deletion:
