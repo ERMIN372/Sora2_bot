@@ -162,9 +162,16 @@ class SoraVideoClient(BaseProviderClient):
         if not api_key:
             raise RuntimeError("Sora API key is not configured; set SORA_API_KEY or OPENAI_API_KEY")
         base_url = (config.openai_api_base or "https://api.openai.com").rstrip("/")
-        api_version = (config.openai_api_version_video or "v1beta").strip().strip("/")
-        if not api_version:
+        raw_version = (config.openai_api_version_video or "v1beta").strip().strip("/")
+        if not raw_version:
+            raw_version = "v1beta"
+        if raw_version.lower().startswith("v1beta"):
+            api_version = raw_version
+        else:
             api_version = "v1beta"
+            log.debug(
+                "SoraVideoClient forcing API version to v1beta (requested=%s)", raw_version
+            )
         beta_header = (config.openai_beta_header or "video=1").strip()
         default_headers: Dict[str, str] = {}
         if beta_header:
