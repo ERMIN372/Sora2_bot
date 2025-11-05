@@ -44,12 +44,30 @@ log = logging.getLogger(__name__)
 def _has_generate_content_flag(model_meta: dict) -> bool:
     """Return True if the model metadata advertises generateContent support."""
 
-    methods = (
-        model_meta.get("supported_generation_methods")
-        or model_meta.get("generation_methods")
-        or model_meta.get("capabilities")
-        or []
+    # The public Google Generative Language API changed the casing of the
+    # metadata keys a couple of times (``supportedGenerationMethods`` in v1,
+    # ``supported_generation_methods`` in beta) and occasionally nests the
+    # information under ``capabilities``.  Normalise everything into a single
+    # iterable before checking for the ``generateContent`` flag so the
+    # healthcheck does not start failing when the schema shifts again.
+    candidate_keys = (
+        "supported_generation_methods",
+        "supportedGenerationMethods",
+        "generation_methods",
+        "generationMethods",
+        "capabilities",
     )
+
+    methods = []
+    for key in candidate_keys:
+        value = model_meta.get(key)
+        if not value:
+            continue
+        if isinstance(value, dict):
+            methods.extend(value.keys())
+        else:
+            methods.extend(value if isinstance(value, (list, tuple, set, frozenset)) else [value])
+
     normalised = {str(item).lower().replace("_", "").replace("-", "") for item in methods}
     return "generatecontent" in normalised
 
