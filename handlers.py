@@ -29,18 +29,22 @@ from aiogram.types import (
     ReplyKeyboardMarkup,
     ReplyKeyboardRemove,
 )
-from aiogram.utils.exceptions import (
-    BadRequest,
-    ChatNotFound,
-    RetryAfter,
-    TelegramAPIError,
-    Unauthorized,
-)
+from aiogram.utils import exceptions as aiogram_exceptions
 
-try:
-    from aiogram.utils.exceptions import CantTalkWithBot
-except (ImportError, AttributeError):  # aiogram<2.19 lacks CantTalkWithBot
-    CantTalkWithBot = TelegramAPIError
+BadRequest = aiogram_exceptions.BadRequest
+ChatNotFound = aiogram_exceptions.ChatNotFound
+RetryAfter = aiogram_exceptions.RetryAfter
+TelegramAPIError = aiogram_exceptions.TelegramAPIError
+Unauthorized = aiogram_exceptions.Unauthorized
+CantTalkWithBot = getattr(
+    aiogram_exceptions,
+    "CantTalkWithBot",
+    getattr(
+        aiogram_exceptions,
+        "CantInitiateConversation",
+        TelegramAPIError,
+    ),
+)
 
 from archive import ArchivePayload, ArchivePublisher
 from config import (
