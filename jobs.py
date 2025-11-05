@@ -335,7 +335,8 @@ def _build_failure_reason(
     if provider_timeout and not provider_error_message:
         provider_error_message = "operation timed out"
     reason_code = _map_error_reason(status_code, tuple(codes), provider_timeout=provider_timeout)
-    user_message = _REASON_MESSAGES.get(reason_code) or fallback_message or _REASON_MESSAGES[
+    fallback_text = (fallback_message or "").strip()
+    user_message = fallback_text or _REASON_MESSAGES.get(reason_code) or _REASON_MESSAGES[
         "provider_error"
     ]
     return _FailureReason(
