@@ -111,6 +111,7 @@ SIZE_OPTIONS: Dict[str, str] = {
 
 _INLINE_ASSET_MAX_BYTES = 9 * 1024 * 1024
 _TELEGRAM_VIDEO_MAX_BYTES = 48 * 1024 * 1024
+_TELEGRAM_PHOTO_MAX_BYTES = 10 * 1024 * 1024
 _TELEGRAM_DOCUMENT_MAX_BYTES = 2 * 1024 * 1024 * 1024
 
 
@@ -1924,9 +1925,9 @@ async def _send_job_update(
                     dp, job, inline_image, config, db, error_reporter
                 )
         if sent_info is None:
-            remote_asset = _select_remote_video_asset(job)
+            remote_asset = _select_remote_media_asset(job)
             if remote_asset and remote_asset.get("url"):
-                sent_info = await _deliver_remote_video(
+                sent_info = await _deliver_remote_media(
                     dp=dp,
                     job=job,
                     asset=remote_asset,
@@ -2031,8 +2032,9 @@ def _expected_key_mask(job: GenerationJobRecord) -> Optional[str]:
     return None
 
 
-def _select_remote_video_asset(job: GenerationJobRecord) -> Optional[Dict[str, Any]]:
+def _select_remote_media_asset(job: GenerationJobRecord) -> Optional[Dict[str, Any]]:
     candidates: List[Dict[str, Any]] = []
+    target_media = (job.content_type or "video").lower()
     for asset in _collect_assets_meta(job):
         if asset.get("inline"):
             continue
@@ -2042,26 +2044,37 @@ def _select_remote_video_asset(job: GenerationJobRecord) -> Optional[Dict[str, A
         mime = str(asset.get("mime") or "")
         asset_type = str(asset.get("type") or "")
         asset_kind = str(asset.get("kind") or "")
-        if (
-            mime.startswith("video/")
-            or asset_type.lower() == "video"
-            or asset_kind.lower() == "video"
-        ):
-            score = 1
-            if asset.get("preferred"):
-                score += 10
-            candidates.append((score, asset))
+        if target_media == "image":
+            if not (
+                mime.startswith("image/")
+                or asset_type.lower() == "image"
+                or asset_kind.lower() == "image"
+            ):
+                continue
+        else:
+            if not (
+                mime.startswith("video/")
+                or asset_type.lower() == "video"
+                or asset_kind.lower() == "video"
+            ):
+                continue
+        score = 1
+        if asset.get("preferred"):
+            score += 10
+        candidates.append((score, asset))
     if not candidates:
-        fallback_source = job.file_url if isinstance(job.file_url, str) and job.file_url else job.video_url
-        fallback = fallback_source if isinstance(fallback_source, str) else None
+        primary_fallback = (
+            job.file_url if isinstance(job.file_url, str) and job.file_url else job.video_url
+        )
+        fallback = primary_fallback if isinstance(primary_fallback, str) else None
         if fallback:
             candidate = fallback.strip()
             if candidate and not candidate.startswith("["):
                 if candidate.startswith(("http://", "https://", "files/", "file-", "/tmp/")):
                     return {
-                        "key": "video_url",
+                        "key": "media_url",
                         "url": candidate,
-                        "kind": "video",
+                        "kind": target_media or "video",
                         "fallback": True,
                     }
         return None
@@ -2263,7 +2276,7 @@ async def _send_inline_assets(
     return None
 
 
-async def _deliver_remote_video(
+async def _deliver_remote_media(
     *,
     dp: Dispatcher,
     job: GenerationJobRecord,
@@ -2293,7 +2306,8 @@ async def _deliver_remote_video(
         return None
     expected_mask = _expected_key_mask(job)
     provider_key = _provider_for_model(job.model, config)
-    
+    target_media = (job.content_type or "video").lower()
+
     if asset_reference.startswith("/tmp/"):
         from pathlib import Path
         try:
@@ -2433,47 +2447,90 @@ async def _deliver_remote_video(
             )
             return None
 
-    method: Literal["video", "document"] = "video"
+    method: Literal["video", "document", "photo"] = "video"
     message: Optional[Message] = None
     duration_seconds = _extract_video_duration(job)
-    video_filename = downloaded.filename or "video.mp4"
-    if not video_filename.lower().endswith(".mp4"):
-        video_filename = "video.mp4"
+    download_mime = downloaded.mime or mime_hint or ""
+    send_as_image = target_media == "image" and download_mime.startswith("image/")
+    filename = downloaded.filename or (
+        "image.png" if send_as_image else "video.mp4"
+    )
+    if send_as_image:
+        if not filename.lower().endswith((".png", ".jpg", ".jpeg", ".webp")):
+            filename = "image.png"
+    elif not filename.lower().endswith(".mp4"):
+        filename = "video.mp4"
+
     try:
-        if downloaded.size <= _TELEGRAM_VIDEO_MAX_BYTES:
-            message = await dp.bot.send_video(
-                job.user_id,
-                BufferedInputFile(
-                    downloaded.content,
-                    filename=video_filename,
-                    mime_type=downloaded.mime,
-                ),
-                supports_streaming=True,
-                duration=duration_seconds or None,
-            )
-        elif downloaded.size <= _TELEGRAM_DOCUMENT_MAX_BYTES:
-            message = await dp.bot.send_document(
-                job.user_id,
-                BufferedInputFile(
-                    downloaded.content,
-                    filename=video_filename,
-                    mime_type=downloaded.mime,
-                ),
-            )
-            method = "document"
+        if send_as_image:
+            if downloaded.size <= _TELEGRAM_PHOTO_MAX_BYTES:
+                message = await dp.bot.send_photo(
+                    job.user_id,
+                    BufferedInputFile(
+                        downloaded.content,
+                        filename=filename,
+                        mime_type=downloaded.mime,
+                    ),
+                )
+                method = "photo"
+            elif downloaded.size <= _TELEGRAM_DOCUMENT_MAX_BYTES:
+                message = await dp.bot.send_document(
+                    job.user_id,
+                    BufferedInputFile(
+                        downloaded.content,
+                        filename=filename,
+                        mime_type=downloaded.mime,
+                    ),
+                )
+                method = "document"
+            else:
+                await _handle_delivery_failure(
+                    dp,
+                    job,
+                    config,
+                    db,
+                    error_reporter=error_reporter,
+                    message=i18n.t("status.delivery_too_large"),
+                    reason="too_large",
+                    extra_log={"asset_bytes": downloaded.size},
+                    key_mask=downloaded.key_mask or expected_mask,
+                )
+                return None
         else:
-            await _handle_delivery_failure(
-                dp,
-                job,
-                config,
-                db,
-                error_reporter=error_reporter,
-                message=i18n.t("status.delivery_too_large"),
-                reason="too_large",
-                extra_log={"asset_bytes": downloaded.size},
-                key_mask=downloaded.key_mask or expected_mask,
-            )
-            return None
+            if downloaded.size <= _TELEGRAM_VIDEO_MAX_BYTES:
+                message = await dp.bot.send_video(
+                    job.user_id,
+                    BufferedInputFile(
+                        downloaded.content,
+                        filename=filename,
+                        mime_type=downloaded.mime,
+                    ),
+                    supports_streaming=True,
+                    duration=duration_seconds or None,
+                )
+            elif downloaded.size <= _TELEGRAM_DOCUMENT_MAX_BYTES:
+                message = await dp.bot.send_document(
+                    job.user_id,
+                    BufferedInputFile(
+                        downloaded.content,
+                        filename=filename,
+                        mime_type=downloaded.mime,
+                    ),
+                )
+                method = "document"
+            else:
+                await _handle_delivery_failure(
+                    dp,
+                    job,
+                    config,
+                    db,
+                    error_reporter=error_reporter,
+                    message=i18n.t("status.delivery_too_large"),
+                    reason="too_large",
+                    extra_log={"asset_bytes": downloaded.size},
+                    key_mask=downloaded.key_mask or expected_mask,
+                )
+                return None
     except Exception:
         log.exception("Failed to send Gemini video to user_id=%s", job.user_id)
         await _handle_delivery_failure(
@@ -2503,6 +2560,10 @@ async def _deliver_remote_video(
     elif method == "document" and message.document:
         file_id = message.document.file_id
         file_size = message.document.file_size or downloaded.size
+    elif method == "photo" and message.photo:
+        photo = message.photo[-1]
+        file_id = photo.file_id
+        file_size = photo.file_size or downloaded.size
     else:
         file_id = ""
         file_size = downloaded.size
