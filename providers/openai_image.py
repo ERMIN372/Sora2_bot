@@ -2,7 +2,10 @@
 from __future__ import annotations
 
 import base64
+import json
 import logging
+import re
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 from uuid import uuid4
 
@@ -53,6 +56,14 @@ class OpenAIImageClient(BaseProviderClient):
         ]
         self._default_model = fallback_models[0] if fallback_models else "dall-e-3"
         self._pending: Dict[str, Dict[str, Any]] = {}
+        self._pending_dir = Path("attached_assets") / "pending" / self.provider_name
+        try:
+            self._pending_dir.mkdir(parents=True, exist_ok=True)
+        except Exception:  # pragma: no cover - filesystem guard
+            log.warning(
+                "Failed to initialise pending cache directory dir=%s", self._pending_dir,
+                exc_info=True,
+            )
 
     def _jobs_path(self) -> str:  # pragma: no cover - unused by enqueue
         return "/images/generations"
@@ -151,6 +162,7 @@ class OpenAIImageClient(BaseProviderClient):
             "duration_ms": duration_ms,
         }
         self._pending[job_id] = record
+        self._persist_pending_record(job_id, record)
         result_payload = {
             "payload": data,
             "inline_assets": inline_assets,
@@ -166,6 +178,8 @@ class OpenAIImageClient(BaseProviderClient):
     async def get_job_status(self, job_id: str) -> ProviderJobStatus:
         record = self._pending.pop(job_id, None)
         if not record:
+            record = self._load_pending_record(job_id)
+        if not record:
             return ProviderJobStatus(
                 job_id=job_id,
                 status="failed",
@@ -175,6 +189,7 @@ class OpenAIImageClient(BaseProviderClient):
                 status_code=404,
                 duration_ms=0,
             )
+        self._delete_pending_record(job_id)
         asset_map = record.get("asset_map") or {}
         inline_assets = record.get("inline_assets") or []
         assets_meta = record.get("assets") or []
@@ -197,6 +212,39 @@ class OpenAIImageClient(BaseProviderClient):
             status_code=int(record.get("status_code", 200)),
             duration_ms=int(record.get("duration_ms", 0)),
         )
+
+    def _pending_path(self, job_id: str) -> Path:
+        safe_id = re.sub(r"[^A-Za-z0-9_.-]", "_", job_id or "job") or "job"
+        return self._pending_dir / f"{safe_id}.json"
+
+    def _persist_pending_record(self, job_id: str, record: Dict[str, Any]) -> None:
+        path = self._pending_path(job_id)
+        try:
+            with path.open("w", encoding="utf-8") as handle:
+                json.dump(record, handle, ensure_ascii=False)
+        except Exception:  # pragma: no cover - filesystem guard
+            log.warning("Failed to persist OpenAI image result job_id=%s", job_id, exc_info=True)
+
+    def _load_pending_record(self, job_id: str) -> Optional[Dict[str, Any]]:
+        path = self._pending_path(job_id)
+        try:
+            with path.open("r", encoding="utf-8") as handle:
+                data = json.load(handle)
+        except FileNotFoundError:
+            return None
+        except Exception:  # pragma: no cover - filesystem guard
+            log.warning("Failed to load OpenAI image result job_id=%s", job_id, exc_info=True)
+            return None
+        if isinstance(data, dict):
+            return data
+        return None
+
+    def _delete_pending_record(self, job_id: str) -> None:
+        path = self._pending_path(job_id)
+        try:
+            path.unlink(missing_ok=True)
+        except Exception:  # pragma: no cover - filesystem guard
+            log.debug("Failed to remove OpenAI image cache job_id=%s", job_id, exc_info=True)
 
 
 __all__ = ["OpenAIImageClient"]
