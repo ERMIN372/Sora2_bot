@@ -43,6 +43,9 @@ if not isinstance(_LOG_LEVEL, int):
     _LOG_LEVEL = logging.INFO
 
 logging.basicConfig(level=_LOG_LEVEL, format=_LOG_FORMAT, datefmt="%Y-%m-%d %H:%M:%S")
+logging.getLogger("aiogram").setLevel(logging.DEBUG)
+logging.getLogger("uvicorn.error").setLevel(logging.INFO)
+logging.getLogger("uvicorn.access").setLevel(logging.INFO)
 log = logging.getLogger(__name__)
 
 if not isinstance(getattr(logging, _LOG_LEVEL_NAME, None), int):
