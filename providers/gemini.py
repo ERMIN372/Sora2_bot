@@ -9,6 +9,7 @@ import logging
 import os
 import re
 import time
+from pathlib import Path
 from fractions import Fraction
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple
 from uuid import uuid4
@@ -302,6 +303,14 @@ class GeminiGenerativeClient(BaseProviderClient):
             process_id=f"pid={os.getpid()}",  # pragma: no cover - runtime value
             logger=log,
         )
+        self._pending_dir = Path("attached_assets") / "pending" / provider_name
+        try:
+            self._pending_dir.mkdir(parents=True, exist_ok=True)
+        except Exception:  # pragma: no cover - filesystem guard
+            log.warning(
+                "Failed to initialise pending cache directory dir=%s", self._pending_dir,
+                exc_info=True,
+            )
         self._load_available_models()
         self._error_handler = ApiErrorHandler(
             provider=provider_name,
@@ -1023,6 +1032,13 @@ class GeminiGenerativeClient(BaseProviderClient):
                 if idempotency_key:
                     meta["idempotency_key"] = idempotency_key
                 self._pending[job_id] = (payload_json, 200, duration_ms, meta)
+                self._persist_pending_record(
+                    job_id,
+                    payload=payload_json,
+                    status_code=200,
+                    duration_ms=duration_ms,
+                    meta=meta,
+                )
                 size = request_settings.get("size")
                 self._log_generation_feedback(
                     status_code=200,
@@ -1377,6 +1393,8 @@ class GeminiGenerativeClient(BaseProviderClient):
     async def get_job_status(self, job_id: str) -> ProviderJobStatus:
         record = self._pending.pop(job_id, None)
         if record is None:
+            record = self._load_pending_record(job_id)
+        if record is None:
             return ProviderJobStatus(
                 job_id=job_id,
                 status="failed",
@@ -1386,6 +1404,7 @@ class GeminiGenerativeClient(BaseProviderClient):
                 status_code=404,
                 duration_ms=0,
             )
+        self._delete_pending_record(job_id)
         payload, status_code, duration_ms, meta = record
         status, error, assets, inline_assets, asset_meta = self._extract_result(payload)
         inline_assets_copy = [dict(asset) for asset in inline_assets]
@@ -1415,6 +1434,61 @@ class GeminiGenerativeClient(BaseProviderClient):
             status_code=status_code,
             duration_ms=duration_ms,
         )
+
+    def _pending_path(self, job_id: str) -> Path:
+        safe_id = re.sub(r"[^A-Za-z0-9_.-]", "_", job_id or "job") or "job"
+        return self._pending_dir / f"{safe_id}.json"
+
+    def _persist_pending_record(
+        self,
+        job_id: str,
+        *,
+        payload: Dict[str, Any],
+        status_code: int,
+        duration_ms: int,
+        meta: Dict[str, Any],
+    ) -> None:
+        path = self._pending_path(job_id)
+        record = {
+            "payload": payload,
+            "status_code": status_code,
+            "duration_ms": duration_ms,
+            "meta": meta,
+        }
+        try:
+            with path.open("w", encoding="utf-8") as handle:
+                json.dump(record, handle, ensure_ascii=False)
+        except Exception:  # pragma: no cover - filesystem guard
+            log.warning("Failed to persist pending Gemini result job_id=%s", job_id, exc_info=True)
+
+    def _load_pending_record(
+        self, job_id: str
+    ) -> Optional[Tuple[Dict[str, Any], int, int, Dict[str, Any]]]:
+        path = self._pending_path(job_id)
+        try:
+            with path.open("r", encoding="utf-8") as handle:
+                data = json.load(handle)
+        except FileNotFoundError:
+            return None
+        except Exception:  # pragma: no cover - filesystem guard
+            log.warning("Failed to load pending Gemini result job_id=%s", job_id, exc_info=True)
+            return None
+        payload = data.get("payload") if isinstance(data, dict) else {}
+        if not isinstance(payload, dict):
+            payload = {}
+        status_code = int(data.get("status_code", 200)) if isinstance(data, dict) else 200
+        duration_ms = int(data.get("duration_ms", 0)) if isinstance(data, dict) else 0
+        meta = data.get("meta") if isinstance(data, dict) else {}
+        if not isinstance(meta, dict):
+            meta = {}
+        return payload, status_code, duration_ms, meta
+
+    def _delete_pending_record(self, job_id: str) -> None:
+        path = self._pending_path(job_id)
+        try:
+            path.unlink(missing_ok=True)
+        except Exception:  # pragma: no cover - filesystem guard
+            log.debug("Failed to remove pending Gemini cache job_id=%s", job_id, exc_info=True)
 
     def _extract_result(
         self, payload: Dict[str, Any]
