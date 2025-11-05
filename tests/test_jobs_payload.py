@@ -14,6 +14,7 @@ from config import (
     PricingConfig,
 )
 from jobs import JobQueue, PendingJob
+from generation_gate import compute_generation_idempotency_key
 from providers.base import ProviderJobStatus, ProviderJobSubmission
 from services.gemini_key import mask_gemini_key
 
@@ -217,6 +218,107 @@ _ORIGINAL_ASYNCIO_SLEEP = asyncio.sleep
 
 def _immediate_sleep(_: float):
     return _ORIGINAL_ASYNCIO_SLEEP(0)
+
+
+def test_submit_returns_existing_job_for_duplicate(config: Config, fake_db: FakeDB) -> None:
+    async def _run() -> None:
+        provider_status = ProviderJobStatus(
+            job_id="job-new",
+            status="queued",
+            status_code=202,
+            duration_ms=10,
+            assets={},
+            error=None,
+            data={},
+        )
+
+        provider = StubProvider(provider_status)
+        queue = JobQueue(
+            db=fake_db,
+            providers={"veo": provider},
+            default_provider="veo",
+            config=config,
+            gate=None,
+        )
+
+        existing = fake_db.jobs["job-1"]
+        idempotency_key = compute_generation_idempotency_key(
+            user_id=existing.user_id,
+            prompt=existing.prompt,
+            size=existing.size or "",
+            model=existing.model or config.gemini_model_video,
+            content_type=existing.content_type,
+        )
+        existing.idempotency_key = idempotency_key
+        fake_db.idempotency_index[idempotency_key] = existing.id
+
+        record = await queue.submit(
+            user_id=existing.user_id,
+            prompt=existing.prompt,
+            size=existing.size or "",
+            model=existing.model,
+            corr_id="corr-duplicate",
+            username=existing.username,
+        )
+
+        assert record is existing
+        assert provider.submissions == []
+
+    asyncio.run(_run())
+
+
+def test_submit_retries_failed_job(monkeypatch, config: Config, fake_db: FakeDB) -> None:
+    async def _run() -> None:
+        provider_status = ProviderJobStatus(
+            job_id="job-2",
+            status="queued",
+            status_code=202,
+            duration_ms=15,
+            assets={},
+            error=None,
+            data={},
+        )
+
+        provider = StubProvider(provider_status)
+        queue = JobQueue(
+            db=fake_db,
+            providers={"veo": provider},
+            default_provider="veo",
+            config=config,
+            gate=None,
+        )
+
+        existing = fake_db.jobs["job-1"]
+        existing.status = "failed"
+        idempotency_key = compute_generation_idempotency_key(
+            user_id=existing.user_id,
+            prompt=existing.prompt,
+            size=existing.size or "",
+            model=existing.model or config.gemini_model_video,
+            content_type=existing.content_type,
+        )
+        existing.idempotency_key = idempotency_key
+        fake_db.idempotency_index[idempotency_key] = existing.id
+
+        events: list[dict[str, Any]] = []
+        monkeypatch.setattr("jobs.log_event", lambda **kwargs: events.append(kwargs))
+
+        record = await queue.submit(
+            user_id=42,
+            prompt="make a video",
+            size="1280x720",
+            model=config.gemini_model_video,
+            corr_id="corr-retry",
+            username="tester",
+        )
+
+        assert record.id == "job-2"
+        assert record.status == "queued"
+        assert provider.submissions and provider.submissions[0].job_id == "job-2"
+        assert fake_db.jobs["job-2"].idempotency_key == fake_db.jobs["job-1"].idempotency_key
+        assert any(event.get("event") == "request" for event in events)
+
+    asyncio.run(_run())
 
 
 def test_process_job_records_inline_payload(monkeypatch, config: Config, fake_db: FakeDB) -> None:
