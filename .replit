@@ -8,3 +8,27 @@ run = "python main.py"
 [[ports]]
 localPort = 8080
 onOpen = "open-preview"
+
+[workflows]
+runButton = "Project"
+
+[[workflows.workflow]]
+name = "Project"
+mode = "parallel"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "telegram-bot"
+
+[[workflows.workflow]]
+name = "telegram-bot"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "python main.py"
+waitForPort = 8080
+
+[workflows.workflow.metadata]
+outputType = "console"
