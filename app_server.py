@@ -449,7 +449,7 @@ def _yookassa_router(
     return router
 
 
-def _telegram_router(dp: Dispatcher) -> APIRouter:
+def _telegram_router(dp: Dispatcher, bot: Bot) -> APIRouter:
     router = APIRouter()
 
     # [TG_WEBHOOK_ROUTE]
@@ -484,6 +484,13 @@ def _telegram_router(dp: Dispatcher) -> APIRouter:
             return Response(status_code=200)
 
         try:
+            set_bot_ctx = getattr(Bot, "set_current", None)
+            if callable(set_bot_ctx):
+                set_bot_ctx(bot)
+            set_dispatcher_ctx = getattr(Dispatcher, "set_current", None)
+            if callable(set_dispatcher_ctx):
+                set_dispatcher_ctx(dp)
+
             await dp.process_update(update)
         except Exception:
             log.exception("Webhook: handler crashed", extra={"update_json": data})
@@ -529,7 +536,7 @@ def create_app(
 
     app = _create_base_app()
 
-    app.include_router(_telegram_router(dp))
+    app.include_router(_telegram_router(dp, bot))
     app.include_router(_yookassa_router(config=config, processor=processor))
 
     return app, processor
