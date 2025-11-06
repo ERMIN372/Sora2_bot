@@ -10,6 +10,7 @@ import logging
 import mimetypes
 import time
 from dataclasses import dataclass, field
+from decimal import Decimal
 import re
 import uuid
 from datetime import datetime
@@ -98,12 +99,22 @@ from telegram_files import BufferedInputFile
 from utils import build_inline_data_from_telegram_file
 import yookassa_client
 
+
 # Поддерживаемые соотношения сторон
-ASPECT_RATIO_OPTIONS = {
+ASPECT_RATIO_OPTIONS: Dict[str, str] = {
     "horizontal": "16:9",
     "vertical": "9:16",
 }
 DEFAULT_ASPECT_RATIO = ASPECT_RATIO_OPTIONS["horizontal"]
+DEFAULT_HD_ENABLED = False
+
+DEFAULT_VIDEO_DURATION = 10
+VIDEO_DURATION_OPTIONS: Tuple[int, int, int] = (10, 15, 25)
+VIDEO_PRICE_RUB: Dict[int, Decimal] = {
+    10: Decimal("119"),
+    15: Decimal("169"),
+    25: Decimal("269"),
+}
 
 
 log = logging.getLogger(__name__)
@@ -113,6 +124,12 @@ SIZE_OPTIONS: Dict[str, str] = {
     "vertical": "720x1280",
     "horizontal": "1280x720",
 }
+
+
+def _resolve_video_size(aspect_ratio: str, hd: bool) -> str:
+    if aspect_ratio == ASPECT_RATIO_OPTIONS["vertical"]:
+        return "1080x1920" if hd else "720x1280"
+    return "1920x1080" if hd else "1280x720"
 
 
 async def safe_callback_answer(callback: CallbackQuery, *args: Any, **kwargs: Any) -> None:
@@ -136,10 +153,8 @@ _TELEGRAM_PHOTO_MAX_BYTES = 10 * 1024 * 1024
 _TELEGRAM_DOCUMENT_MAX_BYTES = 2 * 1024 * 1024 * 1024
 
 
-SIZE_LABEL_KEYS: Dict[str, str] = {
-    "vertical": "chips.vertical",
-    "horizontal": "chips.horizontal",
-}
+def _append_checkmark(label: str, selected: bool) -> str:
+    return f"{label} ✅" if selected else label
 
 MAX_INLINE_VIDEO_BYTES = 9 * 1024 * 1024
 
@@ -409,6 +424,9 @@ class OrderContext:
     created_at: float = field(default_factory=time.time)
     corr_id: Optional[str] = None
     aspect_ratio: Optional[str] = None
+    duration_seconds: Optional[int] = None
+    hd: bool = False
+    price_rub: Decimal = Decimal("0")
 
     def key(self) -> str:
         parts = [
@@ -419,6 +437,9 @@ class OrderContext:
             self.size,
             self.model,
             self.aspect_ratio or "",
+            str(self.duration_seconds or 0),
+            "hd" if self.hd else "sd",
+            str(self.price_rub),
         ]
         return "|".join(parts)
 
@@ -843,12 +864,21 @@ async def _notify_support(
 class UserSession:
     """Transient per-user settings and cached context."""
 
-    last_size: str = SIZE_OPTIONS["horizontal"]
+    last_size: str = field(
+        default_factory=lambda: _resolve_video_size(
+            DEFAULT_ASPECT_RATIO, DEFAULT_HD_ENABLED
+        )
+    )
     last_aspect_ratio: str = DEFAULT_ASPECT_RATIO
+    video_duration: int = DEFAULT_VIDEO_DURATION
+    hd_enabled: bool = DEFAULT_HD_ENABLED
     pending_order: Optional[OrderContext] = None
     awaiting_payment: bool = False
     last_launch_key: Optional[str] = None
     last_launch_ts: float = 0.0
+
+    def update_video_size(self) -> None:
+        self.last_size = _resolve_video_size(self.last_aspect_ratio, self.hd_enabled)
 
 
 class SessionManager:
@@ -877,10 +907,6 @@ def _main_keyboard(config: Config) -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True)
 
 
-def _mark_selected(label: str, selected: bool) -> str:
-    return f"✅ {label}" if selected else label
-
-
 def _back_button(target: str) -> InlineKeyboardButton:
     return InlineKeyboardButton(
         text=i18n.t("buttons.back"), callback_data=f"flow:back:{target}"
@@ -891,23 +917,65 @@ def _build_back_keyboard(target: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[[_back_button(target)]])
 
 
-def _build_options_keyboard(
-    session: UserSession, context: str, back_target: Optional[str] = None
+def _build_video_settings_keyboard(
+    session: UserSession, context: str, *, include_back: bool = True
 ) -> InlineKeyboardMarkup:
-    size_row = []
-    for token, value in SIZE_OPTIONS.items():
-        label_key = SIZE_LABEL_KEYS[token]
-        label = i18n.t(label_key)
-        size_row.append(
+    prompt_row = [
+        InlineKeyboardButton(
+            text=i18n.t("video.prompt.current_prompt"), callback_data="noop"
+        )
+    ]
+    image_row = [
+        InlineKeyboardButton(
+            text=i18n.t("video.prompt.current_image"), callback_data="noop"
+        )
+    ]
+    duration_row: list[InlineKeyboardButton] = []
+    for option in VIDEO_DURATION_OPTIONS:
+        label = _append_checkmark(f"{option} сек.", session.video_duration == option)
+        duration_row.append(
             InlineKeyboardButton(
-                text=_mark_selected(label, session.last_size == value),
-                callback_data=f"opt:size:{context}:{token}",
+                text=label, callback_data=f"opt:duration:{context}:{option}"
             )
         )
-    rows: list[list[InlineKeyboardButton]] = [size_row]
-    if back_target:
-        rows.append([_back_button(back_target)])
+    aspect_row: list[InlineKeyboardButton] = []
+    for token, ratio in ASPECT_RATIO_OPTIONS.items():
+        label = _append_checkmark(ratio, session.last_aspect_ratio == ratio)
+        aspect_row.append(
+            InlineKeyboardButton(
+                text=label, callback_data=f"opt:aspect:{context}:{token}"
+            )
+        )
+    hd_button = InlineKeyboardButton(
+        text=_append_checkmark("HD", session.hd_enabled),
+        callback_data=f"opt:hd:{context}:toggle",
+    )
+    start_button = InlineKeyboardButton(
+        text=i18n.t("video.prompt.start_button"), callback_data="start_generation"
+    )
+    rows: list[list[InlineKeyboardButton]] = [
+        prompt_row,
+        image_row,
+        duration_row,
+        aspect_row,
+        [hd_button],
+        [start_button],
+    ]
+    if include_back:
+        rows.append([_back_button("video_mode")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _video_price_rub(duration: int) -> Decimal:
+    return VIDEO_PRICE_RUB.get(duration, VIDEO_PRICE_RUB[DEFAULT_VIDEO_DURATION])
+
+
+def _format_video_price(duration: int, config: Config) -> str:
+    return config.format_rubles(_video_price_rub(duration))
+
+
+def _video_quality_label(hd: bool) -> str:
+    return i18n.t("video.prompt.quality_hd") if hd else i18n.t("video.prompt.quality_sd")
 
 
 def _build_confirmation_keyboard(*, can_launch: bool, include_back: bool = True) -> InlineKeyboardMarkup:
@@ -1047,8 +1115,14 @@ def _create_order(
 ) -> OrderContext:
     size = session.last_size if include_size else ""
     aspect_ratio = session.last_aspect_ratio if include_size else None
+    duration_seconds = session.video_duration if category == "video" else None
+    hd_enabled = session.hd_enabled if category == "video" else False
     resolved_product = _resolve_product_key(category, provider, model, product)
+    price_rub = Decimal("0")
     credits_cost = config.get_product_credits(resolved_product)
+    if category == "video" and duration_seconds:
+        price_rub = _video_price_rub(duration_seconds)
+        credits_cost = config.credits_for_rubles(price_rub)
     if credits_cost <= 0:
         credits_cost = config.generation_cost_credits
     return OrderContext(
@@ -1063,6 +1137,9 @@ def _create_order(
         model_label=model_label or _resolve_model_label(model, config),
         image_file_id=image_file_id,
         aspect_ratio=aspect_ratio,
+        duration_seconds=duration_seconds,
+        hd=hd_enabled,
+        price_rub=price_rub,
     )
 
 
@@ -1093,6 +1170,20 @@ async def _notify_pro_unavailable(message: Message) -> None:
     await message.answer(i18n.t("errors.pro_unavailable"))
 
 
+def _video_prompt_body(
+    *, session: UserSession, mode: Literal["text", "photo"], model_label: str, config: Config
+) -> str:
+    template = "video.prompt.photo" if mode == "photo" else "video.prompt.text"
+    return i18n.t(
+        template,
+        model=model_label,
+        duration=session.video_duration,
+        aspect=session.last_aspect_ratio,
+        quality=_video_quality_label(session.hd_enabled),
+        price=_format_video_price(session.video_duration, config),
+    )
+
+
 async def _send_generation_prompt(
     message: Message,
     *,
@@ -1101,15 +1192,14 @@ async def _send_generation_prompt(
     mode: Literal["text", "photo"],
     model_label: str,
     include_size: bool,
+    config: Config,
 ) -> None:
     if category == "video":
-        size = session.last_size if include_size else ""
-        if mode == "photo":
-            body = i18n.t("video.prompt.photo", size=size, model=model_label)
-        else:
-            body = i18n.t("video.prompt.text", size=size, model=model_label)
+        body = _video_prompt_body(
+            session=session, mode=mode, model_label=model_label, config=config
+        )
         if include_size:
-            markup = _build_options_keyboard(session, mode, back_target="video_mode")
+            markup = _build_video_settings_keyboard(session, mode)
         else:
             markup = _build_back_keyboard("video_mode")
     else:
@@ -1121,6 +1211,17 @@ async def _send_generation_prompt(
     await message.answer(body, reply_markup=markup)
 
 
+def _order_price_text(order: OrderContext, config: Config) -> str:
+    credits_cost = order.credits_cost or config.generation_cost_credits
+    if order.price_rub and order.price_rub > 0:
+        rub_value = order.price_rub
+    else:
+        rub_value = config.rubles_for_credits(credits_cost)
+    rub_text = config.format_rubles(rub_value)
+    credits_text = format_credits(credits_cost)
+    return f"{rub_text} · {credits_text}"
+
+
 async def _send_order_confirmation(
     *,
     bot: Bot,
@@ -1130,7 +1231,7 @@ async def _send_order_confirmation(
     can_launch: bool,
     include_back: bool = True,
 ) -> Message:
-    price_text = config.format_price_tag(order.credits_cost or config.generation_cost_credits)
+    price_text = _order_price_text(order, config)
     prompt_text: SafeText = format_prompt(order.prompt)
     if order.category == "image":
         if order.flow == "photo":
@@ -1149,11 +1250,17 @@ async def _send_order_confirmation(
             )
     else:
         size_value = order.size or "—"
+        duration_value = order.duration_seconds or DEFAULT_VIDEO_DURATION
+        aspect_value = order.aspect_ratio or DEFAULT_ASPECT_RATIO
+        quality_value = _video_quality_label(order.hd)
         if order.flow == "photo":
             body = i18n.t(
                 "video.confirm.photo",
                 prompt=prompt_text,
                 size=size_value,
+                duration=duration_value,
+                aspect=aspect_value,
+                quality=quality_value,
                 model=order.model_label,
                 price=price_text,
             )
@@ -1162,6 +1269,9 @@ async def _send_order_confirmation(
                 "video.confirm.text",
                 prompt=prompt_text,
                 size=size_value,
+                duration=duration_value,
+                aspect=aspect_value,
+                quality=quality_value,
                 model=order.model_label,
                 price=price_text,
             )
@@ -1456,6 +1566,8 @@ async def _launch_order(
         "image_file_id": order.image_file_id,
         "aspect_ratio": order.aspect_ratio,
         "product": order.product,
+        "duration_seconds": order.duration_seconds,
+        "hd": order.hd,
     }
 
     gate_result = await gate.evaluate(
@@ -1510,6 +1622,8 @@ async def _launch_order(
             "preflight_reason": preflight.reason,
             "preflight_scope": preflight.scope,
             "preflight_auto_sanitized": preflight.auto_sanitized,
+            "duration_seconds": order.duration_seconds,
+            "hd": order.hd,
         },
     )
 
@@ -1555,8 +1669,9 @@ async def _launch_order(
 
     provider_settings: Dict[str, Any] = {}
     if order.category == "video":
-        provider_settings["duration"] = 6
-        provider_settings.setdefault("duration_seconds", 6)
+        if order.duration_seconds:
+            provider_settings["duration"] = order.duration_seconds
+            provider_settings.setdefault("duration_seconds", order.duration_seconds)
         if order.aspect_ratio:
             provider_settings.setdefault("aspect_ratio", order.aspect_ratio)
     if order.image_file_id:
@@ -1577,6 +1692,7 @@ async def _launch_order(
             username=user.username,
             provider=provider_key,
             settings=provider_settings or None,
+            credits_cost=credits_cost,
             original_prompt=original_prompt,
             sanitized_prompt=order.prompt,
             auto_sanitized=preflight.auto_sanitized,
@@ -2983,6 +3099,7 @@ async def handle_photo_input(
             mode="photo",
             model_label=model_label,
             include_size=include_size,
+            config=config,
         )
         return
     largest = max(message.photo, key=lambda item: item.file_size or 0)
@@ -3088,6 +3205,7 @@ async def video_mode_callback_handler(
         mode=mode,
         model_label=model_label,
         include_size=include_size,
+        config=config,
     )
 
 
@@ -3132,6 +3250,7 @@ async def image_mode_callback_handler(
         mode=mode,
         model_label=model_label,
         include_size=False,
+        config=config,
     )
 
 
@@ -3139,15 +3258,16 @@ async def option_callback_handler(
     callback: CallbackQuery, state: FSMContext, config: Config
 ) -> None:
     data = (callback.data or "").split(":")
-    if len(data) != 4:
+    if len(data) < 3:
         await safe_callback_answer(callback)
         return
-    _, option_type, context, token = data
+    _, option_type, context, *rest = data
     user = callback.from_user
     if user is None:  # pragma: no cover - defensive
         await safe_callback_answer(callback)
         return
     session = SESSION_MANAGER.get(user.id)
+    token = rest[-1] if rest else ""
     if option_type == "size":
         value = SIZE_OPTIONS.get(token)
         if value:
@@ -3155,25 +3275,47 @@ async def option_callback_handler(
             aspect = ASPECT_RATIO_OPTIONS.get(token)
             if aspect:
                 session.last_aspect_ratio = aspect
+                session.update_video_size()
+    elif option_type == "duration":
+        try:
+            duration_value = int(token)
+        except ValueError:
+            duration_value = None
+        if duration_value in VIDEO_DURATION_OPTIONS:
+            session.video_duration = duration_value
+    elif option_type == "aspect":
+        ratio = ASPECT_RATIO_OPTIONS.get(token)
+        if ratio:
+            session.last_aspect_ratio = ratio
+            session.update_video_size()
+    elif option_type == "hd":
+        session.hd_enabled = not session.hd_enabled
+        session.update_video_size()
     await safe_callback_answer(callback)
     state_data = await state.get_data()
     if state_data.get("flow_type", "video") != "video":
         return
     model = state_data.get("model") or config.default_video_model
     model_label = state_data.get("model_label") or _resolve_model_label(model, config)
+    mode = context if context in {"text", "photo"} else "text"
     try:
-        if context == "photo":
-            body = i18n.t("video.prompt.photo", size=session.last_size, model=model_label)
-        else:
-            body = i18n.t("video.prompt.text", size=session.last_size, model=model_label)
+        body = _video_prompt_body(
+            session=session, mode=mode, model_label=model_label, config=config
+        )
         await callback.message.edit_text(
             body,
-            reply_markup=_build_options_keyboard(
-                session, context, back_target="video_mode"
-            ),
+            reply_markup=_build_video_settings_keyboard(session, mode),
         )
     except Exception:  # pragma: no cover - Telegram may block edits on old messages
         log.debug("Failed to edit options message", exc_info=True)
+
+
+async def noop_callback_handler(callback: CallbackQuery) -> None:
+    await safe_callback_answer(callback)
+
+
+async def start_generation_callback_handler(callback: CallbackQuery) -> None:
+    await safe_callback_answer(callback, i18n.t("video.prompt.start_hint"))
 
 
 async def order_callback_handler(
@@ -3231,6 +3373,7 @@ async def order_callback_handler(
             mode=order.flow,
             model_label=model_label,
             include_size=include_size,
+            config=config,
         )
         return
     if action == "launch":
@@ -4818,6 +4961,16 @@ def register_handlers(
     dp.register_callback_query_handler(
         lambda call, state: image_mode_callback_handler(call, state, config),
         lambda call: call.data and call.data.startswith("image:mode:"),
+        state="*",
+    )
+    dp.register_callback_query_handler(
+        lambda call: noop_callback_handler(call),
+        lambda call: call.data == "noop",
+        state="*",
+    )
+    dp.register_callback_query_handler(
+        lambda call: start_generation_callback_handler(call),
+        lambda call: call.data == "start_generation",
         state="*",
     )
     dp.register_callback_query_handler(

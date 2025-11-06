@@ -227,13 +227,26 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "image.model.gemini": "Gemini Nano Banana — 5 ₽ за 1 изображение",
         "image.model.unavailable": "недоступно",
         "video.prompt.text": (
-            "Опишите, что нужно создать. Текущий кадр: {size}. Модель: {model}.\n"
-            "Используйте подсказки ниже или пришлите описание."
+            "В этом разделе нужно задать настройки для видео с помощью {model}.\n"
+            "1. Опишите ролик в сообщении «Промпт».\n"
+            "2. Прикрепите изображение, если нужно.\n"
+            "3. Выберите длительность и соотношение сторон ниже.\n"
+            "4. Режим «HD» повышает детализацию.\n\n"
+            "Текущие настройки: {duration} сек · {aspect} · {quality}\n"
+            "Стоимость: {price}"
         ),
         "video.prompt.photo": (
-            "Пришлите фото и, при желании, подпись-промпт.\n"
-            "Текущий кадр: {size}. Модель: {model}."
+            "Пришлите фото и, при желании, подпись-промпт для модели {model}.\n"
+            "Задайте длительность и формат на клавиатуре ниже.\n\n"
+            "Текущие настройки: {duration} сек · {aspect} · {quality}\n"
+            "Стоимость: {price}"
         ),
+        "video.prompt.current_prompt": "Текущий промпт: отправьте текст",
+        "video.prompt.current_image": "Изображение: не добавлено",
+        "video.prompt.start_button": "▶️ Начать генерацию",
+        "video.prompt.start_hint": "Пришлите описание или фото, чтобы продолжить.",
+        "video.prompt.quality_hd": "HD",
+        "video.prompt.quality_sd": "Стандарт",
         "image.prompt.text": (
             "Опишите, что нужно создать. Модель: {model}.\n"
             "Пришлите описание сообщением."
@@ -243,13 +256,15 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         ),
         "video.confirm.text": (
             "✍️ Запрос: {prompt}\n"
-            "🎛 Кадр: {size} · Модель: {model}\n"
+            "🎛 Формат: {duration} сек · {aspect} · {quality}\n"
+            "🎞 Кадр: {size} · Модель: {model}\n"
             "Стоимость: {price}"
         ),
         "video.confirm.photo": (
             "📎 Референс принят.\n"
             "✍️ Запрос: {prompt}\n"
-            "🎛 Кадр: {size} · Модель: {model}\n"
+            "🎛 Формат: {duration} сек · {aspect} · {quality}\n"
+            "🎞 Кадр: {size} · Модель: {model}\n"
             "Стоимость: {price}"
         ),
         "image.confirm.text": (
