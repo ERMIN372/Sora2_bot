@@ -812,6 +812,7 @@ class JobQueue:
         preflight_scope: Optional[str] = None,
         idempotency_key: Optional[str] = None,
         content_type: str = "video",
+        credits_cost: Optional[int] = None,
     ) -> GenerationJobRecord:
         model_key = model or self._config.default_video_model
         client, provider_key = self._resolve_provider(provider or model_key)
@@ -893,6 +894,7 @@ class JobQueue:
         video_id = _extract_video_id(submission.data, client=client)
         operation_name = submission.data.get("operation_name") if isinstance(submission.data, dict) else None
         now = datetime.utcnow()
+        effective_cost = credits_cost or self._config.generation_cost_credits
         record = GenerationJobRecord(
             id=job_id,
             user_id=user_id,
@@ -906,7 +908,7 @@ class JobQueue:
             image_file_id=image_file_id,
             size=size,
             model=model_key,
-            cost_credits=self._config.generation_cost_credits,
+            cost_credits=effective_cost,
             username=username,
             corr_id=corr_id,
             content_type=content_type_value,
@@ -951,7 +953,7 @@ class JobQueue:
             model=model_key,
             provider=provider_key,
             size=size,
-            credits_cost=self._config.generation_cost_credits,
+            credits_cost=effective_cost,
             duration_ms=submission.duration_ms,
             status_code=submission.status_code,
             prompt=None,
