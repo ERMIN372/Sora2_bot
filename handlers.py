@@ -196,6 +196,7 @@ class GenerationStates(StatesGroup):
 
     video_model = State()
     video_mode = State()
+    image_model = State()
     image_mode = State()
     text_prompt = State()
     photo_prompt = State()
@@ -462,6 +463,14 @@ class VideoModelOption:
     label: str
 
 
+@dataclass(frozen=True)
+class ImageModelOption:
+    key: str
+    model: str
+    provider: str
+    label: str
+
+
 def _normalise_video_model_name(name: str) -> str:
     value = (name or "").strip()
     if "/" in value:
@@ -596,6 +605,65 @@ def _video_model_options(config: Config) -> list[VideoModelOption]:
     return options
 
 
+def _image_model_options(config: Config) -> list[ImageModelOption]:
+    used_keys: Set[str] = set()
+    seen_models: Set[str] = set()
+    options: list[ImageModelOption] = []
+
+    def _register(model_name: str, provider: str, label: str) -> None:
+        key = model_name.strip()
+        if not key:
+            return
+        normalised = key.lower()
+        if normalised in seen_models:
+            return
+        seen_models.add(normalised)
+        option_key = _make_model_option_key(key, used_keys)
+        options.append(
+            ImageModelOption(
+                key=option_key,
+                model=key,
+                provider=provider,
+                label=label,
+            )
+        )
+
+    gemini_model = (config.gemini_model_image or "").strip()
+    if config.gemini_enabled and gemini_model:
+        _register(gemini_model, "gemini-image", i18n.t("image.model.gemini"))
+
+    if config.openai_image_enabled:
+        for candidate in config.fallback_image_models:
+            if not isinstance(candidate, str):
+                continue
+            model_name = candidate.strip()
+            if not model_name:
+                continue
+            lowered = model_name.lower()
+            if lowered == "dall-e-3":
+                _register(model_name, model_name, i18n.t("image.model.dalle3"))
+
+    return options
+
+
+def _default_image_model_option(config: Config) -> Optional[ImageModelOption]:
+    options = _image_model_options(config)
+    if not options:
+        return None
+    preferred = (config.gemini_model_image or "").strip().lower()
+    for option in options:
+        if option.model.lower() == preferred:
+            return option
+    return options[0]
+
+
+def _find_image_model_option(config: Config, key: str) -> Optional[ImageModelOption]:
+    for option in _image_model_options(config):
+        if option.key == key:
+            return option
+    return None
+
+
 def _find_video_model_option(config: Config, key: str) -> Optional[VideoModelOption]:
     for option in _video_model_options(config):
         if option.key == key:
@@ -654,12 +722,20 @@ def _resolve_model_label(model: str, config: Config) -> str:
             return option.label
         if _normalise_video_model_name(option.model) == _normalise_video_model_name(model):
             return option.label
+    normalised = (model or "").strip().lower()
+    for option in _image_model_options(config):
+        if option.model.lower() == normalised or option.provider.lower() == normalised:
+            return option.label
+        if option.label == model:
+            return option.label
     if model in {config.gemini_model_video, "veo", "veo2", "gemini-video"}:
         return i18n.t("video.models.veo")
     if model in {config.sora_model_video, "sora", "sora-video", "openai-video"}:
         return i18n.t("video.models.sora")
-    if model in {config.gemini_model_image, "gemini-image", "gemini"}:
+    if normalised in {(config.gemini_model_image or "").strip().lower(), "gemini-image", "gemini"}:
         return i18n.t("image.model.gemini")
+    if normalised == "dall-e-3":
+        return i18n.t("image.model.dalle3")
     return model
 
 
@@ -799,9 +875,11 @@ def _extract_video_identifiers(
 
 
 def _image_model_description(config: Config) -> str:
-    if config.gemini_enabled:
-        return i18n.t("image.model.gemini")
-    return i18n.t("image.model.unavailable")
+    options = _image_model_options(config)
+    if not options:
+        return i18n.t("image.model.unavailable")
+    labels = [option.label for option in options]
+    return ", ".join(dict.fromkeys(labels))
 
 
 def _map_provider_error(error: ProviderAPIError) -> tuple[str, str, bool, str]:
@@ -1122,6 +1200,21 @@ def _build_video_models_keyboard(options: list[VideoModelOption]) -> InlineKeybo
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+def _build_image_models_keyboard(options: list[ImageModelOption]) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    for option in options:
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=option.label,
+                    callback_data=f"image:model:{option.key}",
+                )
+            ]
+        )
+    rows.append([_back_button("main")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
 def _build_mode_keyboard(category: Literal["video", "image"]) -> InlineKeyboardMarkup:
     if category == "video":
         text_label = i18n.t("video.mode.text")
@@ -1132,7 +1225,7 @@ def _build_mode_keyboard(category: Literal["video", "image"]) -> InlineKeyboardM
         text_label = i18n.t("image.mode.text")
         photo_label = i18n.t("image.mode.photo")
         prefix = "image:mode"
-        back_target = "main"
+        back_target = "image_model"
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text=text_label, callback_data=f"{prefix}:text")],
@@ -1500,6 +1593,33 @@ async def flow_back_callback_handler(
         except Exception:  # pragma: no cover - Telegram edits may fail
             await callback.message.answer(
                 i18n.t("image.mode.prompt"), reply_markup=keyboard
+            )
+        return
+    if target == "image_model":
+        options = _image_model_options(config)
+        if not options:
+            await callback.message.answer(i18n.t("errors.image_generation_disabled"))
+            await state.finish()
+            await _send_main_menu(callback.message, config)
+            return
+        await state.update_data(
+            flow_type="image",
+            model=None,
+            provider=None,
+            model_label=None,
+            include_size=False,
+            product=_resolve_product_key("image", None, None),
+            mode=None,
+        )
+        await GenerationStates.image_model.set()
+        keyboard = _build_image_models_keyboard(options)
+        try:
+            await callback.message.edit_text(
+                i18n.t("image.models.prompt"), reply_markup=keyboard
+            )
+        except Exception:  # pragma: no cover - Telegram edits may fail
+            await callback.message.answer(
+                i18n.t("image.models.prompt"), reply_markup=keyboard
             )
         return
 
@@ -3119,23 +3239,38 @@ async def generate_image_menu(
     await state.finish()
     user_id = await _ensure_user(message, db)
     SESSION_MANAGER.get(user_id)
-    if not config.gemini_enabled:
+    options = _image_model_options(config)
+    if not options:
         await message.answer(i18n.t("errors.image_generation_disabled"))
         await _send_main_menu(message, config)
         return
-    model_label = i18n.t("image.model.gemini")
     await state.update_data(
         flow_type="image",
-        model=config.gemini_model_image,
-        provider="gemini-image",
-        model_label=model_label,
+        model=None,
+        provider=None,
+        model_label=None,
         include_size=False,
-        product=_resolve_product_key("image", "gemini-image", config.gemini_model_image),
+        product=_resolve_product_key("image", None, None),
+        mode=None,
     )
-    await GenerationStates.image_mode.set()
+    if len(options) == 1:
+        option = options[0]
+        await state.update_data(
+            model=option.model,
+            provider=option.provider,
+            model_label=option.label,
+            product=_resolve_product_key("image", option.provider, option.model),
+        )
+        await GenerationStates.image_mode.set()
+        await message.answer(
+            i18n.t("image.mode.prompt"),
+            reply_markup=_build_mode_keyboard("image"),
+        )
+        return
+    await GenerationStates.image_model.set()
     await message.answer(
-        i18n.t("image.mode.prompt"),
-        reply_markup=_build_mode_keyboard("image"),
+        i18n.t("image.models.prompt"),
+        reply_markup=_build_image_models_keyboard(options),
     )
 
 
@@ -3161,9 +3296,24 @@ async def handle_text_input(
     session = SESSION_MANAGER.get(user_id)
     state_data = await state.get_data()
     category = state_data.get("flow_type", "video")
-    model = state_data.get("model") or config.default_video_model
-    provider = state_data.get("provider") or model
-    model_label = state_data.get("model_label") or _resolve_model_label(model, config)
+    if category == "image":
+        model = state_data.get("model")
+        provider = state_data.get("provider")
+        model_label = state_data.get("model_label")
+        if not model or not provider or not model_label:
+            default_option = _default_image_model_option(config)
+            if default_option is None:
+                await message.answer(i18n.t("errors.image_generation_disabled"))
+                await state.finish()
+                await _send_main_menu(message, config)
+                return
+            model = default_option.model
+            provider = default_option.provider
+            model_label = default_option.label
+    else:
+        model = state_data.get("model") or config.default_video_model
+        provider = state_data.get("provider") or model
+        model_label = state_data.get("model_label") or _resolve_model_label(model, config)
     include_size = bool(state_data.get("include_size", category == "video"))
     model, provider, model_label = await _ensure_supported_video_model(
         message,
@@ -3214,9 +3364,24 @@ async def handle_photo_input(
     session = SESSION_MANAGER.get(user_id)
     state_data = await state.get_data()
     category = state_data.get("flow_type", "video")
-    model = state_data.get("model") or config.default_video_model
-    provider = state_data.get("provider") or model
-    model_label = state_data.get("model_label") or _resolve_model_label(model, config)
+    if category == "image":
+        model = state_data.get("model")
+        provider = state_data.get("provider")
+        model_label = state_data.get("model_label")
+        if not model or not provider or not model_label:
+            default_option = _default_image_model_option(config)
+            if default_option is None:
+                await message.answer(i18n.t("errors.image_generation_disabled"))
+                await state.finish()
+                await _send_main_menu(message, config)
+                return
+            model = default_option.model
+            provider = default_option.provider
+            model_label = default_option.label
+    else:
+        model = state_data.get("model") or config.default_video_model
+        provider = state_data.get("provider") or model
+        model_label = state_data.get("model_label") or _resolve_model_label(model, config)
     include_size = bool(state_data.get("include_size", category == "video"))
     model, provider, model_label = await _ensure_supported_video_model(
         message,
@@ -3270,6 +3435,40 @@ async def handle_photo_input(
         db=db,
         config=config,
     )
+
+
+async def image_model_callback_handler(
+    callback: CallbackQuery, state: FSMContext, config: Config
+) -> None:
+    await safe_callback_answer(callback)
+    parts = (callback.data or "").split(":")
+    if len(parts) != 3:
+        return
+    _, _, key = parts
+    option = _find_image_model_option(config, key)
+    if option is None:
+        await safe_callback_answer(callback, "Модель недоступна", show_alert=True)
+        return
+    await state.update_data(
+        flow_type="image",
+        model=option.model,
+        provider=option.provider,
+        model_label=option.label,
+        include_size=False,
+        product=_resolve_product_key("image", option.provider, option.model),
+        mode=None,
+    )
+    await GenerationStates.image_mode.set()
+    try:
+        await callback.message.edit_text(
+            i18n.t("image.mode.prompt"),
+            reply_markup=_build_mode_keyboard("image"),
+        )
+    except Exception:  # pragma: no cover - Telegram edits may fail
+        await callback.message.answer(
+            i18n.t("image.mode.prompt"),
+            reply_markup=_build_mode_keyboard("image"),
+        )
 
 
 async def video_model_callback_handler(
@@ -3390,9 +3589,19 @@ async def image_mode_callback_handler(
         return
     session = SESSION_MANAGER.get(user.id)
     data = await state.get_data()
-    model = data.get("model") or config.gemini_model_image
-    provider = data.get("provider") or "gemini-image"
-    model_label = data.get("model_label") or _resolve_model_label(model, config)
+    model = data.get("model")
+    provider = data.get("provider")
+    model_label = data.get("model_label")
+    if not model or not provider or not model_label:
+        default_option = _default_image_model_option(config)
+        if default_option is None:
+            await callback.message.answer(i18n.t("errors.image_generation_disabled"))
+            await state.finish()
+            await _send_main_menu(callback.message, config)
+            return
+        model = default_option.model
+        provider = default_option.provider
+        model_label = default_option.label
     product = _resolve_product_key("image", provider, model, data.get("product"))
     await state.update_data(
         flow_type="image",
@@ -5163,6 +5372,11 @@ def register_handlers(
     dp.register_callback_query_handler(
         lambda call, state: video_mode_callback_handler(call, state, config),
         lambda call: call.data and call.data.startswith("video:mode:"),
+        state="*",
+    )
+    dp.register_callback_query_handler(
+        lambda call, state: image_model_callback_handler(call, state, config),
+        lambda call: call.data and call.data.startswith("image:model:"),
         state="*",
     )
     dp.register_callback_query_handler(

@@ -487,6 +487,14 @@ class JobQueue:
             for model_name in self._config.fallback_image_models
             if isinstance(model_name, str) and model_name.strip()
         ]
+        requested_model = str(settings.get("model") or "").strip().lower()
+        primary_model = (self._config.gemini_model_image or "").strip().lower()
+        if requested_model and primary_model and requested_model == primary_model:
+            log.info(
+                "Gemini fallback skipped corr_id=%s reason=user_selected_model",
+                corr_id,
+            )
+            return None
         if not fallback_models:
             log.info(
                 "Gemini fallback skipped corr_id=%s reason=no_fallback_models",
