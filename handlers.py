@@ -115,6 +115,8 @@ VIDEO_PRICE_RUB: Dict[int, Decimal] = {
     15: Decimal("169"),
     25: Decimal("269"),
 }
+VEO_FIXED_DURATION = 8
+VEO_FIXED_PRICE_RUB = Decimal("89")
 
 
 log = logging.getLogger(__name__)
@@ -490,6 +492,20 @@ def _make_model_option_key(name: str, used: Set[str]) -> str:
         counter += 1
     used.add(key)
     return key
+
+
+def _is_veo_context(
+    provider: Optional[str], product: Optional[str], model: Optional[str] = None
+) -> bool:
+    provider_key = (provider or "").strip().lower()
+    if provider_key.startswith("veo"):
+        return True
+    product_key = (product or "").strip().lower()
+    if product_key == "veo3":
+        return True
+    if model and _is_veo_video_model_name(model):
+        return True
+    return False
 
 
 def _video_model_options(config: Config) -> list[VideoModelOption]:
@@ -872,6 +888,8 @@ class UserSession:
     last_aspect_ratio: str = DEFAULT_ASPECT_RATIO
     video_duration: int = DEFAULT_VIDEO_DURATION
     hd_enabled: bool = DEFAULT_HD_ENABLED
+    sora_video_duration: int = DEFAULT_VIDEO_DURATION
+    sora_hd_enabled: bool = DEFAULT_HD_ENABLED
     pending_order: Optional[OrderContext] = None
     awaiting_payment: bool = False
     last_launch_key: Optional[str] = None
@@ -918,8 +936,14 @@ def _build_back_keyboard(target: str) -> InlineKeyboardMarkup:
 
 
 def _build_video_settings_keyboard(
-    session: UserSession, context: str, *, include_back: bool = True
+    session: UserSession,
+    context: str,
+    *,
+    include_back: bool = True,
+    provider: Optional[str] = None,
+    product: Optional[str] = None,
 ) -> InlineKeyboardMarkup:
+    is_veo = _is_veo_context(provider, product)
     prompt_row = [
         InlineKeyboardButton(
             text=i18n.t("video.prompt.current_prompt"), callback_data="noop"
@@ -931,13 +955,16 @@ def _build_video_settings_keyboard(
         )
     ]
     duration_row: list[InlineKeyboardButton] = []
-    for option in VIDEO_DURATION_OPTIONS:
-        label = _append_checkmark(f"{option} сек.", session.video_duration == option)
-        duration_row.append(
-            InlineKeyboardButton(
-                text=label, callback_data=f"opt:duration:{context}:{option}"
+    if not is_veo:
+        for option in VIDEO_DURATION_OPTIONS:
+            label = _append_checkmark(
+                f"{option} сек.", session.video_duration == option
             )
-        )
+            duration_row.append(
+                InlineKeyboardButton(
+                    text=label, callback_data=f"opt:duration:{context}:{option}"
+                )
+            )
     aspect_row: list[InlineKeyboardButton] = []
     for token, ratio in ASPECT_RATIO_OPTIONS.items():
         label = _append_checkmark(ratio, session.last_aspect_ratio == ratio)
@@ -956,22 +983,32 @@ def _build_video_settings_keyboard(
     rows: list[list[InlineKeyboardButton]] = [
         prompt_row,
         image_row,
-        duration_row,
         aspect_row,
-        [hd_button],
         [start_button],
     ]
+    if duration_row:
+        rows.insert(2, duration_row)
+    if not is_veo:
+        rows.insert(-1, [hd_button])
     if include_back:
         rows.append([_back_button("video_mode")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def _video_price_rub(duration: int) -> Decimal:
-    return VIDEO_PRICE_RUB.get(duration, VIDEO_PRICE_RUB[DEFAULT_VIDEO_DURATION])
+def _video_price_rub(
+    duration: Optional[int], provider: Optional[str], product: Optional[str]
+) -> Decimal:
+    if _is_veo_context(provider, product):
+        return VEO_FIXED_PRICE_RUB
+    if duration is not None:
+        return VIDEO_PRICE_RUB.get(duration, VIDEO_PRICE_RUB[DEFAULT_VIDEO_DURATION])
+    return VIDEO_PRICE_RUB[DEFAULT_VIDEO_DURATION]
 
 
-def _format_video_price(duration: int, config: Config) -> str:
-    return config.format_rubles(_video_price_rub(duration))
+def _format_video_price(
+    duration: Optional[int], config: Config, provider: Optional[str], product: Optional[str]
+) -> str:
+    return config.format_rubles(_video_price_rub(duration, provider, product))
 
 
 def _video_quality_label(hd: bool) -> str:
@@ -1120,8 +1157,11 @@ def _create_order(
     resolved_product = _resolve_product_key(category, provider, model, product)
     price_rub = Decimal("0")
     credits_cost = config.get_product_credits(resolved_product)
-    if category == "video" and duration_seconds:
-        price_rub = _video_price_rub(duration_seconds)
+    if category == "video":
+        if _is_veo_context(provider, resolved_product, model):
+            duration_seconds = VEO_FIXED_DURATION
+            hd_enabled = False
+        price_rub = _video_price_rub(duration_seconds, provider, resolved_product)
         credits_cost = config.credits_for_rubles(price_rub)
     if credits_cost <= 0:
         credits_cost = config.generation_cost_credits
@@ -1171,16 +1211,31 @@ async def _notify_pro_unavailable(message: Message) -> None:
 
 
 def _video_prompt_body(
-    *, session: UserSession, mode: Literal["text", "photo"], model_label: str, config: Config
+    *,
+    session: UserSession,
+    mode: Literal["text", "photo"],
+    model_label: str,
+    config: Config,
+    provider: Optional[str],
+    product: Optional[str],
 ) -> str:
-    template = "video.prompt.photo" if mode == "photo" else "video.prompt.text"
+    is_veo = _is_veo_context(provider, product)
+    template = "video.prompt.photo_veo" if mode == "photo" else "video.prompt.text_veo"
+    duration_value: int
+    quality_label = _video_quality_label(session.hd_enabled)
+    if is_veo:
+        duration_value = VEO_FIXED_DURATION
+        quality_label = _video_quality_label(False)
+    else:
+        template = "video.prompt.photo" if mode == "photo" else "video.prompt.text"
+        duration_value = session.video_duration
     return i18n.t(
         template,
         model=model_label,
-        duration=session.video_duration,
+        duration=duration_value,
         aspect=session.last_aspect_ratio,
-        quality=_video_quality_label(session.hd_enabled),
-        price=_format_video_price(session.video_duration, config),
+        quality=quality_label,
+        price=_format_video_price(duration_value, config, provider, product),
     )
 
 
@@ -1193,13 +1248,31 @@ async def _send_generation_prompt(
     model_label: str,
     include_size: bool,
     config: Config,
+    provider: Optional[str] = None,
+    product: Optional[str] = None,
 ) -> None:
     if category == "video":
+        if _is_veo_context(provider, product):
+            if session.video_duration != VEO_FIXED_DURATION:
+                session.video_duration = VEO_FIXED_DURATION
+            if session.hd_enabled:
+                session.hd_enabled = False
+                session.update_video_size()
         body = _video_prompt_body(
-            session=session, mode=mode, model_label=model_label, config=config
+            session=session,
+            mode=mode,
+            model_label=model_label,
+            config=config,
+            provider=provider,
+            product=product,
         )
         if include_size:
-            markup = _build_video_settings_keyboard(session, mode)
+            markup = _build_video_settings_keyboard(
+                session,
+                mode,
+                provider=provider,
+                product=product,
+            )
         else:
             markup = _build_back_keyboard("video_mode")
     else:
@@ -3100,6 +3173,8 @@ async def handle_photo_input(
             model_label=model_label,
             include_size=include_size,
             config=config,
+            provider=provider,
+            product=product,
         )
         return
     largest = max(message.photo, key=lambda item: item.file_size or 0)
@@ -3143,13 +3218,33 @@ async def video_model_callback_handler(
     if option is None:
         await safe_callback_answer(callback, "Модель недоступна", show_alert=True)
         return
+    user = callback.from_user
+    if user is None:  # pragma: no cover - defensive
+        return
+    session = SESSION_MANAGER.get(user.id)
+    state_data = await state.get_data()
+    prev_provider = state_data.get("provider")
+    prev_product = state_data.get("product")
+    if not _is_veo_context(prev_provider, prev_product):
+        session.sora_video_duration = session.video_duration
+        session.sora_hd_enabled = session.hd_enabled
+    resolved_product = _resolve_product_key("video", option.provider, option.model)
+    if _is_veo_context(option.provider, resolved_product, option.model):
+        session.video_duration = VEO_FIXED_DURATION
+        if session.hd_enabled:
+            session.hd_enabled = False
+        session.update_video_size()
+    else:
+        session.video_duration = session.sora_video_duration
+        session.hd_enabled = session.sora_hd_enabled
+        session.update_video_size()
     await state.update_data(
         flow_type="video",
         model=option.model,
         provider=option.provider,
         model_label=option.label,
         include_size=True,
-        product=_resolve_product_key("video", option.provider, option.model),
+        product=resolved_product,
     )
     await GenerationStates.video_mode.set()
     try:
@@ -3206,6 +3301,8 @@ async def video_mode_callback_handler(
         model_label=model_label,
         include_size=include_size,
         config=config,
+        provider=provider,
+        product=product,
     )
 
 
@@ -3267,6 +3364,12 @@ async def option_callback_handler(
         await safe_callback_answer(callback)
         return
     session = SESSION_MANAGER.get(user.id)
+    state_data = await state.get_data()
+    category = state_data.get("flow_type", "video")
+    model = state_data.get("model") or config.default_video_model
+    provider = state_data.get("provider") or model
+    product = _resolve_product_key(category, provider, model, state_data.get("product"))
+    is_veo = _is_veo_context(provider, product, model)
     token = rest[-1] if rest else ""
     if option_type == "size":
         value = SIZE_OPTIONS.get(token)
@@ -3277,34 +3380,46 @@ async def option_callback_handler(
                 session.last_aspect_ratio = aspect
                 session.update_video_size()
     elif option_type == "duration":
-        try:
-            duration_value = int(token)
-        except ValueError:
-            duration_value = None
-        if duration_value in VIDEO_DURATION_OPTIONS:
-            session.video_duration = duration_value
+        if not is_veo:
+            try:
+                duration_value = int(token)
+            except ValueError:
+                duration_value = None
+            if duration_value in VIDEO_DURATION_OPTIONS:
+                session.video_duration = duration_value
+                session.sora_video_duration = duration_value
     elif option_type == "aspect":
         ratio = ASPECT_RATIO_OPTIONS.get(token)
         if ratio:
             session.last_aspect_ratio = ratio
             session.update_video_size()
     elif option_type == "hd":
-        session.hd_enabled = not session.hd_enabled
-        session.update_video_size()
+        if not is_veo:
+            session.hd_enabled = not session.hd_enabled
+            session.sora_hd_enabled = session.hd_enabled
+            session.update_video_size()
     await safe_callback_answer(callback)
-    state_data = await state.get_data()
-    if state_data.get("flow_type", "video") != "video":
+    if category != "video":
         return
-    model = state_data.get("model") or config.default_video_model
     model_label = state_data.get("model_label") or _resolve_model_label(model, config)
     mode = context if context in {"text", "photo"} else "text"
     try:
         body = _video_prompt_body(
-            session=session, mode=mode, model_label=model_label, config=config
+            session=session,
+            mode=mode,
+            model_label=model_label,
+            config=config,
+            provider=provider,
+            product=product,
         )
         await callback.message.edit_text(
             body,
-            reply_markup=_build_video_settings_keyboard(session, mode),
+            reply_markup=_build_video_settings_keyboard(
+                session,
+                mode,
+                provider=provider,
+                product=product,
+            ),
         )
     except Exception:  # pragma: no cover - Telegram may block edits on old messages
         log.debug("Failed to edit options message", exc_info=True)
@@ -3355,6 +3470,20 @@ async def order_callback_handler(
             await GenerationStates.text_prompt.set()
         model_label = order.model_label or _resolve_model_label(order.model, config)
         include_size = order.category == "video"
+        product_key = _resolve_product_key(
+            order.category, order.provider, order.model, order.product
+        )
+        if order.category == "video":
+            if _is_veo_context(order.provider, product_key, order.model):
+                session.video_duration = VEO_FIXED_DURATION
+                if session.hd_enabled:
+                    session.hd_enabled = False
+            else:
+                session.video_duration = order.duration_seconds or DEFAULT_VIDEO_DURATION
+                session.hd_enabled = bool(order.hd)
+                session.sora_video_duration = session.video_duration
+                session.sora_hd_enabled = session.hd_enabled
+            session.update_video_size()
         await state.update_data(
             flow_type=order.category,
             mode=order.flow,
@@ -3362,9 +3491,7 @@ async def order_callback_handler(
             provider=order.provider,
             model_label=model_label,
             include_size=include_size,
-            product=_resolve_product_key(
-                order.category, order.provider, order.model, order.product
-            ),
+            product=product_key,
         )
         await _send_generation_prompt(
             callback.message,
@@ -3374,6 +3501,8 @@ async def order_callback_handler(
             model_label=model_label,
             include_size=include_size,
             config=config,
+            provider=order.provider,
+            product=product_key,
         )
         return
     if action == "launch":
