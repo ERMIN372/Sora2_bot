@@ -1507,6 +1507,41 @@ class GeminiGenerativeClient(BaseProviderClient):
                             corr_id=corr_id,
                             payload=payload_json,
                         )
+                        job_id = str(uuid4())
+                        assets_meta: Dict[str, Any] = dict(asset_meta)
+                        meta = {
+                            "prompt": decision.prompt,
+                            "settings": request_settings or {},
+                            "payload": payload_json,
+                            "assets_meta": assets_meta,
+                            "request": request_meta,
+                            "request_mode": actual_method,
+                            "task": decision.task,
+                            "key_mask": self._key_mask,
+                            "model": decision.model,
+                            "api_version": decision.api_version,
+                        }
+                        if response_id:
+                            meta["response_id"] = response_id
+                        if idempotency_key:
+                            meta["idempotency_key"] = idempotency_key
+                        self._pending[job_id] = (payload_json, 200, duration_ms, meta)
+                        self._persist_pending_record(
+                            job_id,
+                            payload=payload_json,
+                            status_code=200,
+                            duration_ms=duration_ms,
+                            meta=meta,
+                        )
+                        size = request_settings.get("size")
+                        corr_id = idempotency_key or response_id or job_id
+                        self._log_generation_feedback(
+                            status_code=200,
+                            provider_message=None,
+                            safety_feedback=safety_feedback,
+                            corr_id=corr_id,
+                            payload=payload_json,
+                        )
                         log.info(
                             "gemini.call corr_id=%s provider=%s model=%s method=%s version=%s size=%s status=%s latency_ms=%s",
                             corr_id or "",
@@ -1529,7 +1564,7 @@ class GeminiGenerativeClient(BaseProviderClient):
                             duration_ms,
                         )
                         return ProviderJobSubmission(
-                            job_id=None,
+                            job_id=job_id,
                             status_code=200,
                             duration_ms=duration_ms,
                             data={
