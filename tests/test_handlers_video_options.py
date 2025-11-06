@@ -10,10 +10,13 @@ from config import (
     PricingConfig,
 )
 from handlers import (
+    ADMIN_SORA_DURATION_OPTION,
     DEFAULT_VIDEO_DURATION,
     UserSession,
     VEO_FIXED_DURATION,
     VEO_FIXED_PRICE_RUB,
+    VIDEO_DURATION_OPTIONS,
+    _available_duration_options,
     _create_order,
 )
 
@@ -95,3 +98,36 @@ def test_create_order_for_sora_preserves_duration_and_hd(config: Config) -> None
     )
 
     assert order_default.duration_seconds == DEFAULT_VIDEO_DURATION
+
+
+def test_available_duration_options_for_admin_sora() -> None:
+    options = _available_duration_options(
+        provider="sora",
+        product="sora",
+        model="sora-2",
+        is_admin=True,
+    )
+
+    assert options == (ADMIN_SORA_DURATION_OPTION,) + VIDEO_DURATION_OPTIONS
+
+
+def test_available_duration_options_for_regular_user() -> None:
+    options = _available_duration_options(
+        provider="sora",
+        product="sora",
+        model="sora-2",
+        is_admin=False,
+    )
+
+    assert options == VIDEO_DURATION_OPTIONS
+
+
+def test_available_duration_options_for_veo_returns_empty() -> None:
+    options = _available_duration_options(
+        provider="veo",
+        product="veo3",
+        model="veo-3.0-generate-001",
+        is_admin=True,
+    )
+
+    assert options == ()

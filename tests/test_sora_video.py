@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from config import Config
+from providers.base import BaseProviderClient, ProviderAPIError
 from providers.sora_video import SoraVideoClient
 
 
@@ -120,5 +121,34 @@ def test_get_job_status_fetches_remote(sora_config: Config) -> None:
             assert status.error == "bad"
             assert status.status_code == 500
             mock_request.assert_awaited_once_with("GET", "/v1beta/responses/resp-3")
+
+    asyncio.run(scenario())
+
+
+def test_request_network_error_raises_friendly_message(sora_config: Config) -> None:
+    client = SoraVideoClient(config=sora_config)
+
+    async def scenario() -> None:
+        client._rate_limiter.acquire = AsyncMock(return_value=None)
+        client._rate_limiter.penalize = AsyncMock(return_value=None)
+        network_error = ProviderAPIError(
+            provider="sora",
+            status_code=0,
+            message="Provider request timed out",
+            error_type="timeout",
+            provider_message="",
+        )
+        with patch.object(
+            BaseProviderClient,
+            "_perform_request",
+            new=AsyncMock(side_effect=network_error),
+        ):
+            with pytest.raises(ProviderAPIError) as exc_info:
+                await client._request("POST", "/v1beta/responses", json={})
+
+        error = exc_info.value
+        assert error.message == "Sora API временно недоступен, попробуйте позже"
+        assert error.error_type == "timeout"
+        assert error.retryable is True
 
     asyncio.run(scenario())
