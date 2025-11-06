@@ -572,14 +572,26 @@ class SoraVideoClient(BaseProviderClient):
                     exc.status_code,
                     raw_body,
                 )
+                if exc.status_code == 0:
+                    friendly_message = "Sora API временно недоступен, попробуйте позже"
+                    raise ProviderAPIError(
+                        provider="sora",
+                        status_code=exc.status_code,
+                        message=friendly_message,
+                        error_type=exc.error_type or "network",
+                        error_code=error_code or exc.error_code or "network_error",
+                        provider_message=raw_body or exc.provider_message,
+                        retryable=True,
+                        duration_ms=exc.duration_ms,
+                    ) from exc
                 raise ProviderAPIError(
                     provider="sora",
                     status_code=exc.status_code,
                     message=str(exc) or "Sora API error",
-                    error_type="unknown",
-                    error_code=error_code or exc.error_code,
+                    error_type=exc.error_type or "unknown",
+                    error_code=error_code or exc.error_code or "unknown_error",
                     provider_message=raw_body or exc.provider_message,
-                    retryable=False,
+                    retryable=exc.retryable,
                     duration_ms=exc.duration_ms,
                 ) from exc
 

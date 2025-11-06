@@ -109,7 +109,8 @@ DEFAULT_ASPECT_RATIO = ASPECT_RATIO_OPTIONS["horizontal"]
 DEFAULT_HD_ENABLED = False
 
 DEFAULT_VIDEO_DURATION = 10
-VIDEO_DURATION_OPTIONS: Tuple[int, int, int] = (10, 15, 25)
+ADMIN_SORA_DURATION_OPTION = 4
+VIDEO_DURATION_OPTIONS: Tuple[int, ...] = (10, 15, 25)
 VIDEO_PRICE_RUB: Dict[int, Decimal] = {
     10: Decimal("119"),
     15: Decimal("169"),
@@ -506,6 +507,38 @@ def _is_veo_context(
     if model and _is_veo_video_model_name(model):
         return True
     return False
+
+
+def _is_sora_context(
+    provider: Optional[str], product: Optional[str], model: Optional[str] = None
+) -> bool:
+    provider_key = (provider or "").strip().lower()
+    if provider_key.startswith("sora") or provider_key in {"sora-video", "openai-video"}:
+        return True
+    product_key = (product or "").strip().lower()
+    if product_key == "sora":
+        return True
+    if model and _is_sora_video_model_name(model):
+        return True
+    return False
+
+
+def _available_duration_options(
+    *,
+    provider: Optional[str],
+    product: Optional[str],
+    model: Optional[str],
+    is_admin: bool,
+) -> Tuple[int, ...]:
+    if _is_veo_context(provider, product, model):
+        return ()
+    options: list[int] = list(VIDEO_DURATION_OPTIONS)
+    if is_admin and _is_sora_context(provider, product, model):
+        if ADMIN_SORA_DURATION_OPTION not in options:
+            options.insert(0, ADMIN_SORA_DURATION_OPTION)
+        else:
+            options = sorted(options, key=lambda value: (value != ADMIN_SORA_DURATION_OPTION, value))
+    return tuple(options)
 
 
 def _video_model_options(config: Config) -> list[VideoModelOption]:
@@ -942,8 +975,10 @@ def _build_video_settings_keyboard(
     include_back: bool = True,
     provider: Optional[str] = None,
     product: Optional[str] = None,
+    model: Optional[str] = None,
+    is_admin: bool = False,
 ) -> InlineKeyboardMarkup:
-    is_veo = _is_veo_context(provider, product)
+    is_veo = _is_veo_context(provider, product, model)
     prompt_row = [
         InlineKeyboardButton(
             text=i18n.t("video.prompt.current_prompt"), callback_data="noop"
@@ -955,8 +990,14 @@ def _build_video_settings_keyboard(
         )
     ]
     duration_row: list[InlineKeyboardButton] = []
-    if not is_veo:
-        for option in VIDEO_DURATION_OPTIONS:
+    duration_options = _available_duration_options(
+        provider=provider,
+        product=product,
+        model=model,
+        is_admin=is_admin,
+    )
+    if duration_options:
+        for option in duration_options:
             label = _append_checkmark(
                 f"{option} сек.", session.video_duration == option
             )
@@ -1250,9 +1291,11 @@ async def _send_generation_prompt(
     config: Config,
     provider: Optional[str] = None,
     product: Optional[str] = None,
+    model: Optional[str] = None,
+    is_admin: bool = False,
 ) -> None:
     if category == "video":
-        if _is_veo_context(provider, product):
+        if _is_veo_context(provider, product, model):
             if session.video_duration != VEO_FIXED_DURATION:
                 session.video_duration = VEO_FIXED_DURATION
             if session.hd_enabled:
@@ -1272,6 +1315,8 @@ async def _send_generation_prompt(
                 mode,
                 provider=provider,
                 product=product,
+                model=model,
+                is_admin=is_admin,
             )
         else:
             markup = _build_back_keyboard("video_mode")
@@ -3165,6 +3210,7 @@ async def handle_photo_input(
     )
     product = _resolve_product_key(category, provider, model, state_data.get("product"))
     if not message.photo:
+        is_admin = _is_admin(user_id, config)
         await _send_generation_prompt(
             message,
             session=session,
@@ -3175,6 +3221,8 @@ async def handle_photo_input(
             config=config,
             provider=provider,
             product=product,
+            model=model,
+            is_admin=is_admin,
         )
         return
     largest = max(message.photo, key=lambda item: item.file_size or 0)
@@ -3293,6 +3341,7 @@ async def video_mode_callback_handler(
         await callback.message.edit_reply_markup()
     except Exception:  # pragma: no cover - Telegram edits may fail
         log.debug("Failed to clear mode keyboard", exc_info=True)
+    is_admin = _is_admin(user.id, config)
     await _send_generation_prompt(
         callback.message,
         session=session,
@@ -3303,6 +3352,8 @@ async def video_mode_callback_handler(
         config=config,
         provider=provider,
         product=product,
+        model=model,
+        is_admin=is_admin,
     )
 
 
@@ -3370,6 +3421,13 @@ async def option_callback_handler(
     provider = state_data.get("provider") or model
     product = _resolve_product_key(category, provider, model, state_data.get("product"))
     is_veo = _is_veo_context(provider, product, model)
+    is_admin = _is_admin(user.id, config)
+    available_durations = _available_duration_options(
+        provider=provider,
+        product=product,
+        model=model,
+        is_admin=is_admin,
+    )
     token = rest[-1] if rest else ""
     if option_type == "size":
         value = SIZE_OPTIONS.get(token)
@@ -3380,12 +3438,12 @@ async def option_callback_handler(
                 session.last_aspect_ratio = aspect
                 session.update_video_size()
     elif option_type == "duration":
-        if not is_veo:
+        if not is_veo and available_durations:
             try:
                 duration_value = int(token)
             except ValueError:
                 duration_value = None
-            if duration_value in VIDEO_DURATION_OPTIONS:
+            if duration_value in available_durations:
                 session.video_duration = duration_value
                 session.sora_video_duration = duration_value
     elif option_type == "aspect":
@@ -3419,6 +3477,8 @@ async def option_callback_handler(
                 mode,
                 provider=provider,
                 product=product,
+                model=model,
+                is_admin=is_admin,
             ),
         )
     except Exception:  # pragma: no cover - Telegram may block edits on old messages

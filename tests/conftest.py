@@ -24,6 +24,39 @@ except ModuleNotFoundError:  # pragma: no cover - test environment shim
     sys.modules["dotenv"] = dotenv_stub
 
 try:  # pragma: no cover - prefer real dependency
+    from yookassa import Configuration as _YKConfiguration  # type: ignore
+except ModuleNotFoundError:  # pragma: no cover - test environment shim
+    yookassa_stub = types.ModuleType("yookassa")
+
+    class Configuration:  # pragma: no cover - minimal stub
+        account_id: str = ""
+        secret_key: str = ""
+
+        @classmethod
+        def configure(cls, *_: Any, **__: Any) -> None:
+            return None
+
+    class _Confirmation:  # pragma: no cover - minimal stub
+        confirmation_url = "https://example.com"
+
+    class Payment:  # pragma: no cover - minimal stub
+        id: str = "pay-test"
+        status: str = "pending"
+        confirmation = _Confirmation()
+
+        @classmethod
+        def create(cls, *_: Any, **__: Any):
+            return cls()
+
+        @classmethod
+        def find_one(cls, *_: Any, **__: Any):
+            return cls()
+
+    yookassa_stub.Configuration = Configuration
+    yookassa_stub.Payment = Payment
+    sys.modules["yookassa"] = yookassa_stub
+
+try:  # pragma: no cover - prefer real dependency
     from aiogram import Bot as _AiogramBot  # type: ignore
 except ModuleNotFoundError:  # pragma: no cover - test environment shim
     aiogram_stub = types.ModuleType("aiogram")
