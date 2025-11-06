@@ -824,6 +824,24 @@ def _map_provider_error(error: ProviderAPIError) -> tuple[str, str, bool, str]:
         or "safety" in error_code
     )
 
+    finish_reason = getattr(error, "finish_reason", None)
+    finish_code = (finish_reason or "").upper()
+
+    if error_type == "gemini_empty_image":
+        if finish_code in {"IMAGE_SAFETY", "IMAGE_PROHIBITED_CONTENT"}:
+            message = "Запрос заблокирован безопасностью модели (опасное/запрещённое содержание)."
+            short = "Запрос заблокирован безопасностью модели"
+            hint = "gemini_empty_image_blocked"
+        else:
+            suggestion = (
+                "Попробуйте переформулировать запрос безопаснее, например: "
+                "«плюшевая капибара в игрушечном авто, статичный кадр, закрытая площадка, дневной свет»."
+            )
+            message = "Gemini не смог сгенерировать изображение. " + suggestion
+            short = "Gemini не вернул изображение"
+            hint = "gemini_empty_image"
+        return message, short, notify_support, hint
+
     if error_code == "invalid_model" or error_type == "invalid_model":
         message = (
             "Выбранная модель Sora не поддерживается. "

@@ -37,9 +37,52 @@ from services.retry_policy import RetryDecision, next_attempt
 from services.rate_limiter import AsyncRateLimiter
 
 from .api_error_handler import ApiErrorHandler
-from .base import BaseProviderClient, ProviderAPIError, ProviderJobStatus, ProviderJobSubmission
+from .base import (
+    BaseProviderClient,
+    ProviderAPIError,
+    ProviderJobStatus,
+    ProviderJobSubmission,
+    _sanitize_headers,
+)
 
 log = logging.getLogger(__name__)
+
+
+_IMAGE_RETRYABLE_REASONS = {"IMAGE_OTHER", "NO_IMAGE", "STOP"}
+_IMAGE_BLOCK_REASONS = {"IMAGE_SAFETY", "IMAGE_PROHIBITED_CONTENT"}
+_IMAGE_RETRY_DELAYS = (1.5, 3.0)
+
+
+class GeminiImageEmptyError(ProviderAPIError):
+    """Raised when Gemini returns a response without inline image data."""
+
+    def __init__(
+        self,
+        *,
+        provider: str,
+        finish_reason: Optional[str],
+        response_id: Optional[str],
+        headers: Optional[Mapping[str, Any]],
+        prompt_feedback: Optional[Mapping[str, Any]] = None,
+        safety_ratings: Optional[Any] = None,
+        duration_ms: Optional[int] = None,
+    ) -> None:
+        message = "Gemini не вернул изображение"
+        super().__init__(
+            provider=provider,
+            status_code=200,
+            message=message,
+            error_type="gemini_empty_image",
+            provider_message=message,
+            retryable=False,
+            duration_ms=duration_ms,
+        )
+        self.finish_reason = finish_reason
+        self.response_id = response_id
+        self.headers = dict(headers or {})
+        self.prompt_feedback = prompt_feedback
+        self.safety_ratings = safety_ratings
+
 
 
 def _has_generate_content_flag(model_meta: dict) -> bool:
@@ -197,6 +240,145 @@ def _ensure_iterable(value: Any) -> Iterable[Any]:
     if isinstance(value, (list, tuple, set, frozenset)):
         return value
     return (value,)
+
+
+def _extract_prompt_feedback(payload: Mapping[str, Any]) -> Optional[Mapping[str, Any]]:
+    if not isinstance(payload, Mapping):
+        return None
+    feedback = payload.get("prompt_feedback") or payload.get("promptFeedback")
+    return feedback if isinstance(feedback, Mapping) else None
+
+
+def _extract_safety_ratings(feedback: Optional[Mapping[str, Any]]) -> Optional[Any]:
+    if not isinstance(feedback, Mapping):
+        return None
+    ratings = feedback.get("safety_ratings") or feedback.get("safetyRatings")
+    return ratings
+
+
+def _extract_response_headers(response: Any) -> Dict[str, str]:
+    sdk_response = getattr(response, "sdk_http_response", None)
+    headers = getattr(sdk_response, "headers", None)
+    if headers is None:
+        return {}
+    if isinstance(headers, Mapping):
+        raw = {str(key): headers[key] for key in headers}
+    elif hasattr(headers, "items"):
+        try:
+            raw = {str(key): value for key, value in headers.items()}
+        except Exception:  # pragma: no cover - defensive
+            raw = {}
+    else:
+        raw = {}
+    return _sanitize_headers({k: str(v) for k, v in raw.items()})
+
+
+def _extract_images_from_gemini(response: Any) -> Tuple[List[Dict[str, Any]], Optional[str]]:
+    candidates = getattr(response, "candidates", None)
+    finish_reason: Optional[str] = None
+    if candidates:
+        primary = candidates[0]
+        finish_reason = getattr(primary, "finish_reason", None)
+        content_obj = getattr(primary, "content", None)
+        parts = getattr(content_obj, "parts", None)
+    else:
+        parts = None
+    if not parts and isinstance(response, Mapping):
+        candidates_json = response.get("candidates")
+        if isinstance(candidates_json, list) and candidates_json:
+            first = candidates_json[0]
+            if isinstance(first, Mapping):
+                finish_reason = first.get("finishReason") or first.get("finish_reason")
+                content_json = first.get("content")
+                if isinstance(content_json, Mapping):
+                    parts = content_json.get("parts")
+    images: List[Dict[str, Any]] = []
+    if isinstance(parts, list):
+        for part in parts:
+            inline = None
+            if hasattr(part, "inline_data"):
+                inline = getattr(part, "inline_data")
+            elif isinstance(part, Mapping):
+                inline = part.get("inline_data") or part.get("inlineData")
+            if inline is None:
+                continue
+            data = getattr(inline, "data", None)
+            if data is None and isinstance(inline, Mapping):
+                data = inline.get("data")
+            if not data:
+                continue
+            if isinstance(data, str):
+                try:
+                    decoded = base64.b64decode(data)
+                except (binascii.Error, ValueError):
+                    decoded = data.encode("utf-8")
+            else:
+                decoded = bytes(data)
+            mime = (
+                getattr(inline, "mime_type", None)
+                or getattr(inline, "mimeType", None)
+                if not isinstance(inline, Mapping)
+                else inline.get("mime_type")
+                or inline.get("mimeType")
+            )
+            images.append({"data": decoded, "mime_type": mime or "image/png"})
+    if not finish_reason and candidates:
+        primary = candidates[0]
+        if isinstance(primary, Mapping):
+            finish_reason = primary.get("finishReason") or primary.get("finish_reason")
+    return images, finish_reason
+
+
+def _prepare_flash_image_assets(
+    response: Any,
+    payload_json: Mapping[str, Any],
+    *,
+    provider_name: str,
+    duration_ms: int,
+) -> Tuple[List[Dict[str, Any]], Dict[str, str], Dict[str, Dict[str, Any]], Optional[str]]:
+    images, finish_reason = _extract_images_from_gemini(response)
+    inline_assets: List[Dict[str, Any]] = []
+    asset_map: Dict[str, str] = {}
+    asset_meta: Dict[str, Dict[str, Any]] = {}
+    for index, image in enumerate(images):
+        raw = image.get("data")
+        if not raw:
+            continue
+        binary = raw if isinstance(raw, (bytes, bytearray)) else bytes(raw)
+        encoded = base64.b64encode(binary).decode("ascii")
+        mime = image.get("mime_type") or "image/png"
+        data_uri = f"data:{mime};base64,{encoded}"
+        key = f"inline_{index}"
+        entry = {
+            "key": key,
+            "kind": "image",
+            "mime": mime,
+            "bytes": len(binary),
+            "data_uri": data_uri,
+            "data_url": data_uri,
+        }
+        inline_assets.append(entry)
+        asset_map[key] = data_uri
+        asset_meta[key] = {
+            "inline": True,
+            "kind": "image",
+            "mime": mime,
+            "bytes": len(binary),
+        }
+    if inline_assets:
+        return inline_assets, asset_map, asset_meta, finish_reason
+    prompt_feedback = _extract_prompt_feedback(payload_json)
+    safety_ratings = _extract_safety_ratings(prompt_feedback)
+    headers = _extract_response_headers(response)
+    raise GeminiImageEmptyError(
+        provider=provider_name,
+        finish_reason=finish_reason,
+        response_id=getattr(response, "response_id", None),
+        headers=headers,
+        prompt_feedback=prompt_feedback,
+        safety_ratings=safety_ratings,
+        duration_ms=duration_ms,
+    )
 
 
 def _convert_setting_list(value: Any, model_cls: Any) -> Optional[List[Any]]:
@@ -958,6 +1140,7 @@ class GeminiGenerativeClient(BaseProviderClient):
         last_error: Optional[ProviderAPIError] = None
         downgraded_categories: Set[str] = set()
         server_retry_index = 0
+        image_retry_count = 0
         while attempt <= self._config.request_retries:
             model_override = request_settings.get("model") or self._model
             try:
@@ -1031,6 +1214,66 @@ class GeminiGenerativeClient(BaseProviderClient):
                 }
                 if idempotency_key:
                     meta["idempotency_key"] = idempotency_key
+                if (
+                    self._task == "image"
+                    and isinstance(decision.model, str)
+                    and decision.model.lower() == "gemini-2.5-flash-image"
+                    and actual_method == "generate_content"
+                ):
+                    try:
+                        inline_assets, asset_map, asset_meta, finish_reason = _prepare_flash_image_assets(
+                            response,
+                            payload_json,
+                            provider_name=self.provider_name,
+                            duration_ms=duration_ms,
+                        )
+                    except GeminiImageEmptyError as image_error:
+                        finish_code = (image_error.finish_reason or "").upper()
+                        log.warning(
+                            "gemini.image.empty assets_count=0 inline_count=0 finish_reason=%s response_id=%s",
+                            finish_code or "",
+                            getattr(response, "response_id", ""),
+                        )
+                        self._log_generation_feedback(
+                            status_code=200,
+                            provider_message=image_error.message,
+                            safety_feedback=safety_feedback,
+                            corr_id=idempotency_key,
+                            payload=payload_json if isinstance(payload_json, Mapping) else None,
+                        )
+                        if finish_code in _IMAGE_BLOCK_REASONS:
+                            raise image_error
+                        if (
+                            finish_code in _IMAGE_RETRYABLE_REASONS
+                            and image_retry_count < len(_IMAGE_RETRY_DELAYS)
+                        ):
+                            retry_delay = _IMAGE_RETRY_DELAYS[image_retry_count]
+                            image_retry_count += 1
+                            log.warning(
+                                "Retrying Gemini image request finish_reason=%s delay_ms=%s attempt=%s/%s",
+                                finish_code or "",
+                                int(retry_delay * 1000),
+                                image_retry_count,
+                                len(_IMAGE_RETRY_DELAYS),
+                            )
+                            await asyncio.sleep(retry_delay)
+                            continue
+                        raise image_error
+                    else:
+                        payload_json = dict(payload_json)
+                        meta["payload"] = payload_json
+                        payload_json.setdefault("inline_assets", inline_assets)
+                        meta["assets_meta"].update(asset_meta)
+                        meta["finish_reason"] = finish_reason
+                        response_id = getattr(response, "response_id", "")
+                        log.info(
+                            "gemini.image.inline assets_count=%s inline_count=%s finish_reason=%s response_id=%s",
+                            len(asset_map),
+                            len(inline_assets),
+                            (finish_reason or "") or "",
+                            response_id or "",
+                        )
+                        meta.setdefault("response_id", response_id)
                 self._pending[job_id] = (payload_json, 200, duration_ms, meta)
                 self._persist_pending_record(
                     job_id,
@@ -1739,4 +1982,5 @@ __all__ = [
     "GeminiImageClient",
     "GeminiTextClient",
     "_has_generate_content_flag",
+    "GeminiImageEmptyError",
 ]
