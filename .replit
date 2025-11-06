@@ -7,7 +7,7 @@ run = "python main.py"
 
 [[ports]]
 localPort = 8080
-onOpen = "open-preview"
+externalPort = 8080
 
 [workflows]
 runButton = "Project"
@@ -32,3 +32,6 @@ waitForPort = 8080
 
 [workflows.workflow.metadata]
 outputType = "console"
+
+[agent]
+expertMode = true
