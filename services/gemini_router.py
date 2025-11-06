@@ -9,8 +9,8 @@ from typing import Dict, Iterable, List, Mapping, Optional, Set, Tuple
 
 from google.genai import Client as _GenAIClient
 
-from config import Config
-from services.gemini_client import get_media_client, get_text_client
+from config import Config, RoutingCfg
+from services.gemini_client import get_gemini_client
 
 log = logging.getLogger(__name__)
 
@@ -93,6 +93,18 @@ def _normalise_supported(methods: Iterable[str]) -> Tuple[str, ...]:
         if normalised not in seen:
             seen.append(normalised)
     return tuple(seen)
+
+
+def _preferred_api_version(task: str, model: str) -> str:
+    if task == "text":
+        return RoutingCfg.TEXT_API_VERSION
+    default = RoutingCfg.MEDIA_API_VERSION
+    if task != "image":
+        return default
+    model_name = (model or "").strip().lower()
+    if model_name.endswith("-image"):
+        return "v1"
+    return default
 
 
 def _rewrite_prompt(prompt: str) -> Tuple[str, bool, Optional[str]]:
@@ -239,14 +251,9 @@ class GeminiRouter:
                 method = "generate_images"
             elif "generate_content" in supported_methods:
                 method = "generate_content"
-        if normalised_task == "text":
-            api_version = "v1"
-            client = get_text_client(self._config)
-            cache_key = "text"
-        else:
-            api_version = "v1beta"
-            client = get_media_client(self._config)
-            cache_key = "media"
+        api_version = _preferred_api_version(normalised_task, selected_model)
+        client = get_gemini_client(self._config, api_version=api_version)
+        cache_key = f"{api_version}:{normalised_task}"
         self._load_catalog(client, cache_key)
         self._ensure_supported(selected_model, method, normalised_task)
 

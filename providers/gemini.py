@@ -577,7 +577,7 @@ class GeminiGenerativeClient(BaseProviderClient):
         model: str,
         provider_name: str,
         task: str,
-        api_version: str,
+        api_version: str | None,
         safety_settings: Optional[List[types.SafetySetting]] = None,
     ) -> None:
         base_url = self._resolve_base_url(config)
@@ -588,12 +588,12 @@ class GeminiGenerativeClient(BaseProviderClient):
             provider_name=provider_name,
         )
         self._task = task
-        if self._task in ("image", "video"):
-            resolved_version = "v1beta"
-            http_opts = types.HttpOptions(api_version="v1beta")
-        else:
-            resolved_version = "v1"
-            http_opts = types.HttpOptions(api_version="v1")
+        resolved_version = self._resolve_api_version(
+            task=self._task,
+            model=model,
+            api_version=api_version,
+        )
+        http_opts = types.HttpOptions(api_version=resolved_version)
 
         self._client = genai.Client(
             api_key=api_key,
@@ -649,6 +649,30 @@ class GeminiGenerativeClient(BaseProviderClient):
                 error_type="invalid_model",
                 provider_message="model_not_available",
             )
+
+    @staticmethod
+    def _resolve_api_version(
+        *, task: str, model: str, api_version: str | None
+    ) -> str:
+        """Pick the correct Gemini API version for the requested task/model."""
+
+        requested = (api_version or "").strip().lower()
+        if requested in {"text", "v1"}:
+            return "v1"
+        if requested in {"media", "v1beta"}:
+            return "v1beta"
+        if requested in {"auto", "default"}:
+            requested = ""
+
+        default_version = "v1beta" if task in {"image", "video"} else "v1"
+        if requested:
+            # Unknown explicit value – fall back to default to stay operational.
+            return default_version
+
+        model_name = (model or "").strip().lower()
+        if task == "image" and model_name.endswith("-image"):
+            return "v1"
+        return default_version
 
     def _resolve_base_url(self, config: Config) -> str:
         endpoint = (config.gemini_api_endpoint or "").strip()
@@ -1126,7 +1150,7 @@ class GeminiGenerativeClient(BaseProviderClient):
                 )
                 if decision and decision.task in {"image", "video"}:
                     message = (
-                        "Для изображений и видео используй v1beta; для текста — v1."
+                        "Проверь версию API: text → v1, video → v1beta, а модели gemini-*-image работают через v1."
                     )
                 if status_code == 404 and decision and decision.task == "image":
                     error_type = "provider_misconfigured"
@@ -2248,7 +2272,7 @@ class GeminiImageClient(GeminiGenerativeClient):
             model=config.gemini_model_image,
             provider_name="gemini-image",
             task="image",
-            api_version="v1beta",
+            api_version=None,
         )
 
 __all__ = [
