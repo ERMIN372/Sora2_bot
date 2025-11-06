@@ -2264,6 +2264,11 @@ class JobQueue:
             gsheets_ok=gsheets_ok,
             extra=done_extra,
         )
+        job = await self._db.get_job(pending.job_id)
+        if job:
+            if job_extra:
+                job.extra.update(job_extra)
+            await self._notify(job)
         return True
 
     async def _handle_download_failure_inline(
