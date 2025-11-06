@@ -273,6 +273,68 @@ def _extract_response_headers(response: Any) -> Dict[str, str]:
     return _sanitize_headers({k: str(v) for k, v in raw.items()})
 
 
+def _prepare_images_assets(
+    response: Any,
+    *,
+    provider_name: str,
+    duration_ms: int,
+) -> Tuple[List[Dict[str, Any]], Dict[str, str], Dict[str, Dict[str, Any]]]:
+    images = getattr(response, "images", None) or []
+    inline_assets: List[Dict[str, Any]] = []
+    asset_map: Dict[str, str] = {}
+    asset_meta: Dict[str, Dict[str, Any]] = {}
+    for index, img in enumerate(images):
+        data = getattr(img, "data", None)
+        mime = getattr(img, "mime_type", None)
+        if data is None:
+            data = getattr(img, "image_bytes", None)
+        if data is None and hasattr(img, "image"):
+            nested = getattr(img, "image")
+            data = getattr(nested, "data", None)
+            if data is None:
+                data = getattr(nested, "image_bytes", None)
+            mime = mime or getattr(nested, "mime_type", None)
+        if isinstance(data, str):
+            try:
+                data_bytes = base64.b64decode(data)
+            except Exception:
+                data_bytes = data.encode("utf-8")
+        else:
+            data_bytes = bytes(data or b"")
+        if not data_bytes:
+            continue
+        encoded = base64.b64encode(data_bytes).decode("ascii")
+        mime = (mime or getattr(img, "mime_type", None) or "image/png") or "image/png"
+        data_uri = f"data:{mime};base64,{encoded}"
+        key = f"inline_{index}"
+        inline_assets.append(
+            {
+                "key": key,
+                "kind": "image",
+                "mime": mime,
+                "bytes": len(data_bytes),
+                "data_uri": data_uri,
+                "data_url": data_uri,
+            }
+        )
+        asset_map[key] = data_uri
+        asset_meta[key] = {
+            "inline": True,
+            "kind": "image",
+            "mime": mime,
+            "bytes": len(data_bytes),
+        }
+    if inline_assets:
+        return inline_assets, asset_map, asset_meta
+    raise GeminiImageEmptyError(
+        provider=provider_name,
+        finish_reason=None,
+        response_id=getattr(response, "response_id", None),
+        headers=_extract_response_headers(response),
+        duration_ms=duration_ms,
+    )
+
+
 def _extract_images_from_gemini(
     response: Any,
 ) -> Tuple[List[Dict[str, Any]], Optional[str], Optional[str]]:
@@ -399,6 +461,64 @@ def _prepare_flash_image_assets(
         safety_ratings=safety_ratings,
         duration_ms=duration_ms,
     )
+
+
+def _analyse_empty_image_response(
+    payload_json: Mapping[str, Any],
+    *,
+    response: Any,
+    error: GeminiImageEmptyError,
+) -> Tuple[Optional[str], Optional[str], bool]:
+    headers = {}
+    if hasattr(error, "headers") and isinstance(error.headers, Mapping):
+        headers = {str(k): str(error.headers[k]) for k in error.headers}
+    else:
+        headers = _extract_response_headers(response)
+    header_lookup = {str(key).lower(): str(value) for key, value in headers.items()}
+    finish_code = (error.finish_reason or "").upper() or None
+    header_candidates = (
+        "x-generative-ai-finish-reason",
+        "x-generative-ai-output-status",
+        "x-goog-rai-filtered-reason",
+        "x-goog-image-response-status",
+        "x-goog-ai-response-code",
+    )
+    for name in header_candidates:
+        header_value = header_lookup.get(name)
+        if header_value:
+            finish_code = str(header_value).upper()
+            break
+    provider_reasons: List[str] = []
+    if isinstance(payload_json, Mapping):
+        for key in ("status", "finish_reason", "finishReason"):
+            value = payload_json.get(key)
+            if value and not finish_code:
+                finish_code = str(value).upper()
+        generated_images = payload_json.get("generated_images") or payload_json.get("generatedImages")
+        if isinstance(generated_images, list):
+            for item in generated_images:
+                if not isinstance(item, Mapping):
+                    continue
+                reason = item.get("rai_filtered_reason") or item.get("raiFilteredReason")
+                if reason:
+                    text = str(reason)
+                    provider_reasons.append(text)
+                    if not finish_code:
+                        finish_code = text.upper()
+    merged_reason = None
+    if provider_reasons:
+        merged_reason = "; ".join(dict.fromkeys(provider_reasons))
+    reason_upper = (finish_code or "").upper()
+    safety_trigger = False
+    if reason_upper in _IMAGE_BLOCK_REASONS:
+        safety_trigger = True
+    elif provider_reasons:
+        for reason in provider_reasons:
+            lowered = reason.lower()
+            if "safety" in lowered or "prohibit" in lowered or "policy" in lowered:
+                safety_trigger = True
+                break
+    return finish_code, merged_reason, safety_trigger
 
 
 def _convert_setting_list(value: Any, model_cls: Any) -> Optional[List[Any]]:
@@ -906,16 +1026,18 @@ class GeminiGenerativeClient(BaseProviderClient):
         prompt: str,
         settings: Dict[str, Any],
         payload: Dict[str, Any],
+        force_mode: Optional[str] = None,
     ) -> Tuple[Any, Dict[str, Any], Dict[str, Any]]:
         contents = payload.get("contents")
         config = payload.get("config")
-        method = decision.method
+        method = force_mode or decision.method
         if (
             decision.task == "image"
             and isinstance(decision.model, str)
             and decision.model.lower() == "gemini-2.5-flash-image"
+            and not force_mode
         ):
-            method = "generate_content"
+            method = "generate_images"
         prompt_text = prompt
         if contents is None:
             contents = self._build_contents(prompt=prompt, settings=settings)
@@ -1161,6 +1283,8 @@ class GeminiGenerativeClient(BaseProviderClient):
         downgraded_categories: Set[str] = set()
         server_retry_index = 0
         image_retry_count = 0
+        force_mode: Optional[str] = None
+        fallback_to_content = False
         while attempt <= self._config.request_retries:
             model_override = request_settings.get("model") or self._model
             try:
@@ -1184,6 +1308,7 @@ class GeminiGenerativeClient(BaseProviderClient):
                 prompt=decision.prompt,
                 settings=request_settings,
                 payload=payload_dict,
+                force_mode=force_mode,
             )
             actual_method = request_meta.get("mode", decision.method)
             request_meta.update(
@@ -1232,56 +1357,57 @@ class GeminiGenerativeClient(BaseProviderClient):
                     payload_json = response
                 else:
                     payload_json = {"response": response}
-                job_id = str(uuid4())
                 safety_feedback = self._extract_safety_feedback(response, payload_json)
-                meta = {
-                    "prompt": decision.prompt,
-                    "settings": request_settings or {},
-                    "payload": payload_json,
-                    "assets_meta": {},
-                    "request": request_meta,
-                    "request_mode": actual_method,
-                    "task": decision.task,
-                    "key_mask": self._key_mask,
-                    "model": decision.model,
-                    "api_version": decision.api_version,
-                }
-                if idempotency_key:
-                    meta["idempotency_key"] = idempotency_key
-                if (
+                is_flash_image = (
                     self._task == "image"
                     and isinstance(decision.model, str)
                     and decision.model.lower() == "gemini-2.5-flash-image"
-                    and actual_method == "generate_content"
-                ):
+                )
+                if is_flash_image:
                     try:
-                        (
-                            inline_assets,
-                            asset_map,
-                            asset_meta,
-                            finish_reason,
-                            response_id,
-                        ) = _prepare_flash_image_assets(
-                            response,
-                            payload_json,
-                            provider_name=self.provider_name,
-                            duration_ms=duration_ms,
-                        )
+                        if actual_method == "generate_images":
+                            inline_assets, asset_map, asset_meta = _prepare_images_assets(
+                                response,
+                                provider_name=self.provider_name,
+                                duration_ms=duration_ms,
+                            )
+                            finish_reason: Optional[str] = None
+                            response_id = getattr(response, "response_id", None)
+                        else:
+                            (
+                                inline_assets,
+                                asset_map,
+                                asset_meta,
+                                finish_reason,
+                                response_id,
+                            ) = _prepare_flash_image_assets(
+                                response,
+                                payload_json,
+                                provider_name=self.provider_name,
+                                duration_ms=duration_ms,
+                            )
                     except GeminiImageEmptyError as image_error:
-                        finish_code = (image_error.finish_reason or "").upper()
+                        finish_code, provider_message, safety_block = _analyse_empty_image_response(
+                            payload_json if isinstance(payload_json, Mapping) else {},
+                            response=response,
+                            error=image_error,
+                        )
+                        finish_code_upper = (finish_code or "").upper()
                         log.warning(
                             "gemini.sync.result.empty finish_reason=%s response_id=%s",
-                            finish_code or "",
-                            image_error.response_id or getattr(response, "response_id", ""),
+                            finish_code_upper or "",
+                            image_error.response_id
+                            or getattr(response, "response_id", "")
+                            or "",
                         )
                         self._log_generation_feedback(
                             status_code=200,
-                            provider_message=image_error.message,
+                            provider_message=provider_message or image_error.message,
                             safety_feedback=safety_feedback,
                             corr_id=idempotency_key,
                             payload=payload_json if isinstance(payload_json, Mapping) else None,
                         )
-                        if finish_code in _IMAGE_BLOCK_REASONS:
+                        if safety_block or finish_code_upper in _IMAGE_BLOCK_REASONS:
                             raise ProviderAPIError(
                                 provider=self.provider_name,
                                 status_code=400,
@@ -1291,16 +1417,22 @@ class GeminiGenerativeClient(BaseProviderClient):
                                     "авто на закрытой площадке, статичный кадр."
                                 ),
                                 error_type="safety",
-                                provider_message=image_error.message,
+                                provider_message=provider_message or image_error.message,
                                 retryable=False,
                             ) from image_error
-                        retriable = finish_code in _IMAGE_RETRYABLE_REASONS or not finish_code
-                        if retriable and image_retry_count < len(_IMAGE_RETRY_DELAYS):
+                        retriable = (
+                            finish_code_upper in _IMAGE_RETRYABLE_REASONS or not finish_code_upper
+                        )
+                        if (
+                            actual_method == "generate_images"
+                            and retriable
+                            and image_retry_count < len(_IMAGE_RETRY_DELAYS)
+                        ):
                             retry_delay = _IMAGE_RETRY_DELAYS[image_retry_count]
                             image_retry_count += 1
                             log.warning(
                                 "Retrying Gemini image request finish_reason=%s delay_ms=%s attempt=%s/%s",
-                                finish_code or "",
+                                finish_code_upper or "",
                                 int(retry_delay * 1000),
                                 image_retry_count,
                                 len(_IMAGE_RETRY_DELAYS),
@@ -1315,16 +1447,22 @@ class GeminiGenerativeClient(BaseProviderClient):
                                 "Попробуй ещё раз или переформулируй запрос."
                             ),
                             error_type="provider_unavailable",
-                            provider_message=image_error.message,
+                            provider_message=provider_message or image_error.message,
                             retryable=False,
                         ) from image_error
                     else:
                         payload_json = dict(payload_json)
-                        meta["payload"] = payload_json
                         payload_json.setdefault("inline_assets", inline_assets)
-                        meta["assets_meta"].update(asset_meta)
-                        meta["finish_reason"] = finish_reason
-                        response_id = response_id or getattr(response, "response_id", "")
+                        if asset_meta:
+                            assets_meta = payload_json.setdefault("assets_meta", {})
+                            if isinstance(assets_meta, dict):
+                                assets_meta.update(asset_meta)
+                            else:
+                                payload_json["assets_meta"] = dict(asset_meta)
+                        if finish_reason:
+                            payload_json.setdefault("finish_reason", finish_reason)
+                        if response_id:
+                            payload_json.setdefault("response_id", response_id)
                         log.info(
                             "gemini.sync.result.ok",
                             extra={"assets": len(asset_map), "response_id": response_id or ""},
@@ -1336,7 +1474,61 @@ class GeminiGenerativeClient(BaseProviderClient):
                             (finish_reason or "") or "",
                             response_id or "",
                         )
-                        meta.setdefault("response_id", response_id)
+                        size = request_settings.get("size")
+                        corr_id = idempotency_key or response_id or "inline"
+                        self._log_generation_feedback(
+                            status_code=200,
+                            provider_message=None,
+                            safety_feedback=safety_feedback,
+                            corr_id=corr_id,
+                            payload=payload_json,
+                        )
+                        log.info(
+                            "gemini.call corr_id=%s provider=%s model=%s method=%s version=%s size=%s status=%s latency_ms=%s",
+                            corr_id or "",
+                            self.provider_name,
+                            decision.model,
+                            actual_method,
+                            decision.api_version,
+                            size or "",
+                            200,
+                            duration_ms,
+                        )
+                        log.info(
+                            "gemini.generate done model=%s method=%s version=%s env=%s key_mask=%s corr_id=%s latency_ms=%s",
+                            decision.model,
+                            actual_method,
+                            decision.api_version,
+                            self._environment,
+                            self._key_mask or "",
+                            corr_id or "",
+                            duration_ms,
+                        )
+                        return ProviderJobSubmission(
+                            job_id=None,
+                            status_code=200,
+                            duration_ms=duration_ms,
+                            data={
+                                "inline_assets": inline_assets,
+                                "assets_meta": asset_meta,
+                                "payload": payload_json,
+                            },
+                        )
+                job_id = str(uuid4())
+                meta = {
+                    "prompt": decision.prompt,
+                    "settings": request_settings or {},
+                    "payload": payload_json,
+                    "assets_meta": {},
+                    "request": request_meta,
+                    "request_mode": actual_method,
+                    "task": decision.task,
+                    "key_mask": self._key_mask,
+                    "model": decision.model,
+                    "api_version": decision.api_version,
+                }
+                if idempotency_key:
+                    meta["idempotency_key"] = idempotency_key
                 self._pending[job_id] = (payload_json, 200, duration_ms, meta)
                 self._persist_pending_record(
                     job_id,
@@ -1412,6 +1604,25 @@ class GeminiGenerativeClient(BaseProviderClient):
                     duration_ms=duration_ms,
                     decision=decision,
                 )
+                is_flash_image = (
+                    self._task == "image"
+                    and isinstance(decision.model, str)
+                    and decision.model.lower() == "gemini-2.5-flash-image"
+                )
+                if (
+                    is_flash_image
+                    and actual_method == "generate_images"
+                    and provider_error.status_code in {400, 404}
+                    and not fallback_to_content
+                ):
+                    log.warning(
+                        "gemini.image.fallback method=generate_images status=%s switching_to=generate_content",
+                        provider_error.status_code,
+                    )
+                    force_mode = "generate_content"
+                    fallback_to_content = True
+                    image_retry_count = 0
+                    continue
                 log.error(
                     "gemini.api.error status=%s code=%s message=%s",
                     provider_error.status_code,
