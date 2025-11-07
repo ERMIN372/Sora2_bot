@@ -1305,7 +1305,9 @@ class GeminiGenerativeClient(BaseProviderClient):
         server_retry_index = 0
         image_retry_count = 0
         force_mode: Optional[str] = None
+        forced_api_version: Optional[str] = None
         fallback_to_content = False
+        attempted_api_versions: Set[str] = set()
         while attempt <= self._config.request_retries:
             model_override = request_settings.get("model") or self._model
             try:
@@ -1314,6 +1316,7 @@ class GeminiGenerativeClient(BaseProviderClient):
                     model=model_override,
                     prompt=prompt,
                     assets=request_settings,
+                    forced_api_version=forced_api_version,
                 )
             except GeminiRoutingError as exc:
                 raise ProviderAPIError(
@@ -1331,6 +1334,9 @@ class GeminiGenerativeClient(BaseProviderClient):
                 payload=payload_dict,
                 force_mode=force_mode,
             )
+            decision_version = (decision.api_version or "").strip().lower()
+            if decision_version:
+                attempted_api_versions.add(decision_version)
             actual_method = request_meta.get("mode", decision.method)
             request_meta.update(
                 {
@@ -1660,6 +1666,24 @@ class GeminiGenerativeClient(BaseProviderClient):
                     duration_ms=duration_ms,
                     decision=decision,
                 )
+                if (
+                    decision.task == "image"
+                    and provider_error.status_code in {400, 404}
+                ):
+                    alt_version = "v1beta" if decision_version == "v1" else "v1"
+                    if alt_version not in attempted_api_versions:
+                        log.warning(
+                            "gemini.api.version_switch task=%s model=%s from=%s to=%s",
+                            decision.task,
+                            decision.model,
+                            decision.api_version,
+                            alt_version,
+                        )
+                        forced_api_version = alt_version
+                        force_mode = None
+                        fallback_to_content = False
+                        image_retry_count = 0
+                        continue
                 is_flash_image = (
                     self._task == "image"
                     and isinstance(decision.model, str)
