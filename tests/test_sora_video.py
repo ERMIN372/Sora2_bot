@@ -37,7 +37,7 @@ def test_enqueue_job_builds_payload(sora_config: Config) -> None:
             mock_request.assert_awaited_once()
             call_args = mock_request.await_args
             assert call_args.args[0] == "POST"
-            assert call_args.args[1] == "/v1beta/responses"
+            assert call_args.args[1] == ("v1", "responses")
             payload = call_args.kwargs["json"]
             assert payload["model"] == "sora-2"
             assert payload["input"][0]["content"][0]["text"] == "Make a cool video"
@@ -120,7 +120,7 @@ def test_get_job_status_fetches_remote(sora_config: Config) -> None:
             assert status.status == "failed"
             assert status.error == "bad"
             assert status.status_code == 500
-            mock_request.assert_awaited_once_with("GET", "/v1beta/responses/resp-3")
+            mock_request.assert_awaited_once_with("GET", ("v1", "responses", "resp-3"))
 
     asyncio.run(scenario())
 
@@ -144,7 +144,7 @@ def test_request_network_error_raises_friendly_message(sora_config: Config) -> N
             new=AsyncMock(side_effect=network_error),
         ):
             with pytest.raises(ProviderAPIError) as exc_info:
-                await client._request("POST", "/v1beta/responses", json={})
+                await client._request("POST", "/v1/responses", json={})
 
         error = exc_info.value
         assert error.message == "Sora API временно недоступен, попробуйте позже"

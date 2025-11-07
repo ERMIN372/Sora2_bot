@@ -5,15 +5,16 @@ import asyncio
 import json
 import logging
 import math
+import os
 import re
 import tempfile
 import time
 from pathlib import Path
-from typing import Any, Dict, Iterable, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
 
 import aiohttp
 
-from config import Config, SORA_DEFAULT_MODEL, SORA_SUPPORTED_MODELS
+from config import DEBUG_SORA, Config, SORA_DEFAULT_MODEL, SORA_SUPPORTED_MODELS
 
 from .api_error_handler import ApiErrorHandler
 from .base import (
@@ -22,8 +23,11 @@ from .base import (
     ProviderJobStatus,
     ProviderJobSubmission,
     _extract_request_id,
+    _join_url,
     _mask_secret,
+    _sanitize_headers,
     _serialise_for_log,
+    _truncate,
 )
 from services.payload_sanitize import (
     log_removed_keys,
@@ -34,6 +38,9 @@ from services.payload_whitelists import SORA_VIDEO_ALLOWED
 from services.rate_limiter import AsyncRateLimiter
 
 log = logging.getLogger(__name__)
+
+_DEBUG_SORA_ENABLED_DEFAULT = bool(DEBUG_SORA)
+_DEBUG_PREVIEW_LIMIT = 3072
 
 
 _SIZE_PATTERN = re.compile(r"^(\d+)[xX](\d+)$")
@@ -165,13 +172,14 @@ class SoraVideoClient(BaseProviderClient):
         raw_version = (config.openai_api_version_video or "v1beta").strip().strip("/")
         if not raw_version:
             raw_version = "v1beta"
-        if raw_version.lower().startswith("v1beta"):
-            api_version = raw_version
-        else:
-            api_version = "v1beta"
-            log.debug(
-                "SoraVideoClient forcing API version to v1beta (requested=%s)", raw_version
+        normalised_version = raw_version.lower()
+        if normalised_version not in {"v1", "v1beta"}:
+            log.warning(
+                "Unsupported Sora API version requested=%s; falling back to v1beta",
+                raw_version,
             )
+            normalised_version = "v1beta"
+        api_version = "v1beta" if normalised_version == "v1beta" else "v1"
         beta_header = (config.openai_beta_header or "video=1").strip()
         default_headers: Dict[str, str] = {}
         if beta_header:
@@ -186,8 +194,9 @@ class SoraVideoClient(BaseProviderClient):
             default_headers=default_headers,
         )
         log.debug(
-            "SoraVideoClient configured base_url=%s beta=%s org_id=%s api_key=%s",
+            "SoraVideoClient configured base_url=%s api_version=%s beta=%s org_id=%s api_key=%s",
             base_url,
+            api_version,
             beta_header or "default",
             _mask_secret(config.openai_org_id),
             _mask_secret(api_key),
@@ -195,10 +204,7 @@ class SoraVideoClient(BaseProviderClient):
         self._beta_header = beta_header
         self._organization_id = (config.openai_org_id or "").strip()
         self._api_version = api_version
-        self._api_prefix = f"/{self._api_version}"
-        self._content_endpoint_template = (
-            f"{self._base_url}{self._api_prefix}/videos/{{video_id}}/content"
-        )
+        self._debug_enabled = bool(config.debug_sora or _DEBUG_SORA_ENABLED_DEFAULT)
         self._last_download_meta: Dict[str, Any] = {}
         self._supported_models = set(SORA_SUPPORTED_MODELS)
         configured_model = config.resolved_sora_video_model
@@ -230,11 +236,74 @@ class SoraVideoClient(BaseProviderClient):
     def supported_models(self) -> Tuple[str, ...]:
         return tuple(sorted(self._supported_models))
 
-    def _build_api_path(self, suffix: str) -> str:
-        suffix = (suffix or "").lstrip("/")
-        if not suffix:
-            return self._api_prefix
-        return f"{self._api_prefix}/{suffix}"
+    def _build_endpoint_segments(self, *suffix: str) -> Tuple[str, ...]:
+        segments: List[str] = [self._api_version]
+        for part in suffix:
+            text = str(part or "").strip("/")
+            if not text:
+                continue
+            segments.extend(fragment for fragment in text.split("/") if fragment)
+        return tuple(segments)
+
+    def _endpoint_path(self, *suffix: str) -> str:
+        segments = self._build_endpoint_segments(*suffix)
+        return "/" + "/".join(segments)
+
+    def _resolve_target(
+        self, path: Union[str, Iterable[str], None]
+    ) -> Tuple[Tuple[str, ...], str, str]:
+        raw_segments: List[str] = []
+        if isinstance(path, str):
+            raw_segments.extend(
+                fragment
+                for fragment in path.strip("/").split("/")
+                if fragment
+            )
+        elif isinstance(path, Iterable):
+            for part in path:
+                text = str(part or "").strip("/")
+                if not text:
+                    continue
+                raw_segments.extend(fragment for fragment in text.split("/") if fragment)
+        if not raw_segments:
+            raw_segments = [self._api_version]
+        elif raw_segments[0] not in {"v1", "v1beta"}:
+            raw_segments.insert(0, self._api_version)
+        segments = tuple(raw_segments)
+        endpoint = "/" + "/".join(segments)
+        url = _join_url(self._base_url, *segments)
+        return segments, endpoint, url
+
+    def responses_url(self) -> str:
+        """Return the fully-qualified Responses API URL used for Sora."""
+
+        _, _, url = self._resolve_target(self._build_endpoint_segments("responses"))
+        return url
+
+    def responses_path(self) -> str:
+        """Return the relative Responses API path used for Sora."""
+
+        return self._endpoint_path("responses")
+
+    def _log_debug(self, event: str, payload: Dict[str, Any]) -> None:
+        if not self._debug_enabled:
+            return
+        entry = dict(payload)
+        entry.setdefault("provider", self.provider_name)
+        entry.setdefault("event", event)
+        try:
+            message = json.dumps(entry, ensure_ascii=False, default=str)
+        except (TypeError, ValueError):  # pragma: no cover - defensive
+            message = json.dumps(
+                {
+                    "event": event,
+                    "provider": self.provider_name,
+                    "unserializable": True,
+                    "payload_repr": repr(payload),
+                },
+                ensure_ascii=False,
+            )
+        log.info(message)
 
     async def enqueue_job(
         self,
@@ -263,8 +332,9 @@ class SoraVideoClient(BaseProviderClient):
             settings=settings,
             payload=payload or {},
         )
-        endpoint = self._build_api_path("responses")
-        url = f"{self._base_url}{endpoint}"
+        endpoint_segments = self._build_endpoint_segments("responses")
+        endpoint = "/" + "/".join(endpoint_segments)
+        url = _join_url(self._base_url, *endpoint_segments)
         serialised_payload = _serialise_for_log(request_payload, limit=2048)
         log.debug("Sora request: url=%s, payload=%s", url, serialised_payload)
         log.info(
@@ -276,7 +346,7 @@ class SoraVideoClient(BaseProviderClient):
         )
         data, status_code, duration_ms = await self._request(
             "POST",
-            endpoint,
+            endpoint_segments,
             json=request_payload,
             idempotency_key=idempotency_key,
         )
@@ -329,15 +399,16 @@ class SoraVideoClient(BaseProviderClient):
             status_code = 200
             duration_ms = 0
         else:
-            endpoint = self._build_api_path(f"responses/{job_id}")
-            url = f"{self._base_url}{endpoint}"
+            endpoint_segments = self._build_endpoint_segments("responses", job_id)
+            endpoint = "/" + "/".join(endpoint_segments)
+            url = _join_url(self._base_url, *endpoint_segments)
             log.debug("Sora request: url=%s, payload=%s", url, "")
             log.info(
                 "sora.status start endpoint=%s method=%s",
                 endpoint,
                 "GET",
             )
-            data, status_code, duration_ms = await self._request("GET", endpoint)
+            data, status_code, duration_ms = await self._request("GET", endpoint_segments)
             error_type = None
             error_code = None
             error_message = None
@@ -470,24 +541,26 @@ class SoraVideoClient(BaseProviderClient):
     async def _request(
         self,
         method: str,
-        path: str,
+        path: Union[str, Iterable[str]],
         *,
         idempotency_key: Optional[str] = None,
         **kwargs: Any,
     ) -> Tuple[Dict[str, Any], int, int]:
-        url = f"{self._base_url}{path}"
+        _, endpoint, url = self._resolve_target(path)
         request_kwargs = dict(kwargs)
         extra_headers = request_kwargs.pop("headers", {})
         params_payload = request_kwargs.get("params")
         json_payload = request_kwargs.get("json")
         data_payload = request_kwargs.get("data")
         payload = json_payload or data_payload or params_payload
-        log.debug("Sora request: url=%s, payload=%s", url, _serialise_for_log(payload, limit=2048))
+        payload_preview = _serialise_for_log(payload, limit=_DEBUG_PREVIEW_LIMIT)
+        log.debug("Sora request: url=%s, payload=%s", url, payload_preview)
 
         headers = self._build_headers()
         if idempotency_key:
             headers.setdefault("Idempotency-Key", idempotency_key)
         headers.update(extra_headers)
+        safe_headers = _sanitize_headers(dict(headers))
 
         attempt = 0
         backoff_delay = self._config.retry_backoff
@@ -495,6 +568,20 @@ class SoraVideoClient(BaseProviderClient):
 
         while True:
             await self._rate_limiter.acquire()
+            self._log_debug(
+                "sora.debug.request",
+                {
+                    "method": method,
+                    "url": url,
+                    "endpoint": endpoint,
+                    "api_version": self._api_version,
+                    "attempt": attempt + 1,
+                    "headers": safe_headers,
+                    "idempotency_key": headers.get("Idempotency-Key", ""),
+                    "body_preview": payload_preview,
+                    "base": self._base_url,
+                },
+            )
             try:
                 data, status_code, duration_ms = await super()._perform_request(
                     method,
@@ -505,7 +592,7 @@ class SoraVideoClient(BaseProviderClient):
             except ProviderAPIError as exc:
                 raw_body = exc.provider_message or ""
                 error_code, error_type, error_message, error_payload = _parse_error_payload(raw_body)
-                serialised_error = _serialise_for_log(error_payload, limit=2048)
+                serialised_error = _serialise_for_log(error_payload, limit=_DEBUG_PREVIEW_LIMIT)
                 log.error(
                     "sora.api.error status=%s code=%s message=%s",
                     exc.status_code,
@@ -524,6 +611,29 @@ class SoraVideoClient(BaseProviderClient):
                     raw_body,
                     serialised_error,
                 )
+                self._log_debug(
+                    "sora.debug.error",
+                    {
+                        "method": method,
+                        "url": url,
+                        "endpoint": endpoint,
+                        "status": exc.status_code,
+                        "duration_ms": exc.duration_ms or 0,
+                        "error_type": error_type or exc.error_type,
+                        "error_code": error_code or exc.error_code,
+                        "body_preview": _truncate(raw_body, limit=_DEBUG_PREVIEW_LIMIT),
+                    },
+                )
+
+                if exc.status_code == 404 and "/v1/v1beta/" in url:
+                    log.critical(
+                        "suspect_misconfigured_endpoint provider=%s method=%s url=%s",
+                        self.provider_name,
+                        method,
+                        url,
+                    )
+                if exc.status_code == 401:
+                    log.error("sora.auth_error method=%s url=%s hint=check OPENAI_API_KEY", method, url)
 
                 if exc.status_code in self._error_handler.SERVER_ERROR_STATUSES:
                     delay = self._error_handler.server_retry_delay(server_retry_index)
@@ -554,7 +664,11 @@ class SoraVideoClient(BaseProviderClient):
                         fallback_code=error_code or exc.error_code,
                     ) from exc
 
-                if exc.retryable and attempt < self._config.request_retries and exc.status_code not in self._error_handler.SERVER_ERROR_STATUSES:
+                if (
+                    exc.retryable
+                    and attempt < self._config.request_retries
+                    and exc.status_code not in self._error_handler.SERVER_ERROR_STATUSES
+                ):
                     attempt += 1
                     log.warning(
                         "sora.http.retry status=%s attempt=%s/%s delay=%s",
@@ -567,32 +681,54 @@ class SoraVideoClient(BaseProviderClient):
                     backoff_delay *= self._config.retry_backoff
                     continue
 
-                log.error(
-                    "sora.http.unknown_error status=%s body=%s",
-                    exc.status_code,
-                    raw_body,
-                )
+                log.error("sora.http.unknown_error status=%s body=%s", exc.status_code, raw_body)
+
+                friendly_code: Optional[str] = None
+                friendly_message: Optional[str] = None
+
                 if exc.status_code == 0:
+                    friendly_code = error_code or exc.error_code or "network_error"
                     friendly_message = "Sora API временно недоступен, попробуйте позже"
                     raise ProviderAPIError(
                         provider="sora",
                         status_code=exc.status_code,
                         message=friendly_message,
                         error_type=exc.error_type or "network",
-                        error_code=error_code or exc.error_code or "network_error",
+                        error_code=friendly_code,
                         provider_message=raw_body or exc.provider_message,
                         retryable=True,
                         duration_ms=exc.duration_ms,
+                        code=friendly_code,
                     ) from exc
+
+                if exc.status_code == 404 and "/v1/v1beta/" in url:
+                    friendly_code = "endpoint_misconfigured"
+                    friendly_message = "Sora endpoint misconfigured (double version prefix)"
+                elif exc.status_code == 401:
+                    friendly_code = "auth_failed"
+                    friendly_message = "Sora authentication failed; check OPENAI_API_KEY"
+                elif exc.status_code == 429:
+                    friendly_code = "rate_limited"
+                    friendly_message = "Sora API rate limit exceeded"
+                elif exc.status_code >= 500:
+                    friendly_code = "server_error"
+                    friendly_message = "Sora API server error"
+
                 raise ProviderAPIError(
                     provider="sora",
                     status_code=exc.status_code,
-                    message=str(exc) or "Sora API error",
-                    error_type=exc.error_type or "unknown",
-                    error_code=error_code or exc.error_code or "unknown_error",
+                    message=friendly_message
+                    or error_message
+                    or str(exc)
+                    or "Sora API error",
+                    error_type=friendly_code or error_type or exc.error_type or "unknown",
+                    error_code=friendly_code or error_code or exc.error_code or "unknown_error",
                     provider_message=raw_body or exc.provider_message,
                     retryable=exc.retryable,
                     duration_ms=exc.duration_ms,
+                    code=friendly_code or error_code or exc.error_code,
+                    body=raw_body,
+                    request_id=exc.request_id,
                 ) from exc
 
             error_code = None
@@ -609,7 +745,7 @@ class SoraVideoClient(BaseProviderClient):
                         error_code,
                         error_message,
                     )
-            serialised_response = _serialise_for_log(data, limit=2048)
+            serialised_response = _serialise_for_log(data, limit=_DEBUG_PREVIEW_LIMIT)
             log.debug("Sora response: status=%s, body=%s", status_code, serialised_response)
             log.debug(
                 "sora.http.response method=%s url=%s status=%s duration_ms=%s error_type=%s error_code=%s error_message=%s json=%s",
@@ -622,6 +758,27 @@ class SoraVideoClient(BaseProviderClient):
                 error_message,
                 serialised_response,
             )
+            meta = dict(self._last_response_meta or {})
+            response_headers = meta.get("headers") or {}
+            request_id = meta.get("request_id") or ""
+            content_length = (
+                response_headers.get("Content-Length")
+                or response_headers.get("content-length")
+                or ""
+            )
+            self._log_debug(
+                "sora.debug.response",
+                {
+                    "method": method,
+                    "url": url,
+                    "endpoint": endpoint,
+                    "status": status_code,
+                    "duration_ms": duration_ms,
+                    "request_id": request_id,
+                    "content_length": content_length,
+                    "body_preview": serialised_response,
+                },
+            )
             return data, status_code, duration_ms
 
     async def download_content(self, video_id: str, format: str = "mp4") -> Path:
@@ -631,8 +788,9 @@ class SoraVideoClient(BaseProviderClient):
         fmt = (format or "mp4").strip().lower()
         if fmt not in allowed_formats:
             fmt = "mp4"
-        endpoint = self._build_api_path(f"videos/{video_id}/content")
-        url = f"{self._base_url}{endpoint}"
+        endpoint_segments = self._build_endpoint_segments("videos", video_id, "content")
+        endpoint = "/" + "/".join(endpoint_segments)
+        url = _join_url(self._base_url, *endpoint_segments)
         params = {"format": fmt}
         headers = self._build_headers()
         headers.pop("Content-Type", None)
@@ -892,3 +1050,63 @@ class SoraVideoClient(BaseProviderClient):
             return False
         status = self._extract_status(payload)
         return status in _TERMINAL_STATUSES
+
+
+async def sora_self_test(config: Config) -> Tuple[str, Dict[str, Any]]:
+    """Execute a minimal self-test request against the Sora Responses API."""
+
+    client = SoraVideoClient(config=config)
+    payload = client._build_request_payload(  # type: ignore[attr-defined]
+        prompt="ping",
+        settings={"model": client._default_model, "duration": 1},
+        payload={},
+    )
+    metadata = payload.setdefault("metadata", {})
+    if isinstance(metadata, dict):
+        metadata.setdefault("max_output_tokens", "1")
+        metadata.setdefault("test_prompt", "ping")
+    target_segments = client._build_endpoint_segments("responses")
+    url = _join_url(client._base_url, *target_segments)
+    log.info("sora.self_test.start url=%s", url)
+    try:
+        data, status_code, duration_ms = await client._request(
+            "POST",
+            target_segments,
+            json=payload,
+        )
+        log.info(
+            "sora.self_test.success url=%s status=%s duration_ms=%s",
+            url,
+            status_code,
+            duration_ms,
+        )
+        return "ok", {
+            "url": url,
+            "status": status_code,
+            "duration_ms": duration_ms,
+            "response": data,
+        }
+    except ProviderAPIError as exc:
+        details = {
+            "url": url,
+            "status": exc.status_code,
+            "error_type": exc.error_type,
+            "error_code": exc.error_code,
+            "message": str(exc),
+        }
+        if exc.status_code == 404 and "/v1/v1beta/" in url:
+            log.error("sora.self_test.endpoint_misconfigured url=%s", url)
+            return "endpoint_misconfigured", details
+        log.error(
+            "sora.self_test.error url=%s status=%s error_type=%s error_code=%s",
+            url,
+            exc.status_code,
+            exc.error_type,
+            exc.error_code,
+        )
+        return "error", details
+    except Exception as exc:  # pragma: no cover - defensive
+        log.exception("sora.self_test.exception url=%s", url)
+        return "exception", {"url": url, "message": str(exc)}
+    finally:
+        await client.close()

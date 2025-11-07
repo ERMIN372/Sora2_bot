@@ -6,7 +6,7 @@ import json
 import logging
 import time
 from dataclasses import dataclass
-from typing import Any, Dict, Mapping, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 import aiohttp
 
@@ -41,6 +41,43 @@ def _sanitize_headers(headers: Dict[str, str]) -> Dict[str, str]:
         else:
             safe[key] = value
     return safe
+
+
+def _join_url(base: str, *parts: str) -> str:
+    base_clean = (base or "").rstrip("/")
+    segments: List[str] = []
+    for part in parts:
+        if part is None:
+            continue
+        text = str(part).strip("/")
+        if not text:
+            continue
+        segments.extend(segment for segment in text.split("/") if segment)
+
+    if segments:
+        first_segment = segments[0]
+        if first_segment in {"v1", "v1beta"}:
+            if base_clean.endswith("/v1"):
+                base_clean = base_clean[: -len("/v1")]
+            elif base_clean.endswith("/v1beta"):
+                base_clean = base_clean[: -len("/v1beta")]
+        joined = "/".join(segments)
+        url = f"{base_clean}/{joined}" if base_clean else joined
+    else:
+        url = base_clean
+
+    if not url:
+        return ""
+
+    # Guard against accidental double version segments specific to the responses API.
+    if "/v1/v1beta/" in url:
+        url = url.replace("/v1/v1beta/", "/v1beta/", 1)
+    if url.endswith("/v1/v1beta"):
+        url = url[: -len("/v1/v1beta")] + "/v1beta"
+    if url.endswith("/v1/v1beta/responses"):
+        url = url[: -len("/v1/v1beta/responses")] + "/v1beta/responses"
+
+    return url
 
 
 def _extract_request_id(headers: Mapping[str, str]) -> Optional[str]:

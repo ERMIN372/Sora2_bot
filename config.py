@@ -18,6 +18,23 @@ log = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 DEBUG_GEMINI = bool(os.getenv("DEBUG_GEMINI", "").strip())
+DEBUG_SORA = bool(os.getenv("DEBUG_SORA", "").strip())
+
+
+def _normalise_openai_version(raw: str, default: str = "v1") -> str:
+    candidate = (raw or default).strip().strip("/") or default
+    lowered = candidate.lower()
+    if lowered not in {"v1", "v1beta"}:
+        log.warning(
+            "Unsupported OpenAI API version %s; falling back to %s",
+            candidate,
+            default,
+        )
+        return default
+    return lowered
+
+
+OPENAI_API_VERSION = _normalise_openai_version(os.getenv("OPENAI_API_VERSION", "v1"))
 
 
 def _env_flag(name: str) -> bool:
@@ -307,7 +324,7 @@ class Config:
     # Значение "sora" больше не поддерживается и приведёт к ошибке "Model not found" в Sora API.
     sora_model_video: str = SORA_DEFAULT_MODEL
     openai_api_base: str = OPENAI_API_BASE
-    openai_api_version_video: str = "v1"
+    openai_api_version_video: str = OPENAI_API_VERSION
     openai_beta_header: str = DEFAULT_OPENAI_BETA_HEADER
     sora_requests_per_minute: int = 60
     gemini_requests_per_minute: int = 120
@@ -357,6 +374,7 @@ class Config:
     veo_operation_timeout_seconds: float = 12 * 60.0
     veo_operation_idle_timeout_seconds: float = 120.0
     debug_gemini: bool = False
+    debug_sora: bool = False
 
     @property
     def yookassa_enabled(self) -> bool:
@@ -650,9 +668,13 @@ def load_config() -> Config:
     openai_org_id = env_str("OPENAI_ORG_ID", Config.openai_org_id or "").strip() or None
     if openai_org_id:
         log.debug("OPENAI_ORG_ID configured=%s", _mask_secret(openai_org_id))
-    openai_api_version_video = env_str(
+    openai_api_version_video_raw = env_str(
         "OPENAI_API_VERSION_VIDEO", Config.openai_api_version_video
     ).strip()
+    openai_api_version_video = _normalise_openai_version(
+        openai_api_version_video_raw or Config.openai_api_version_video,
+        Config.openai_api_version_video,
+    )
     openai_beta_header = env_str("OPENAI_BETA_HEADER", Config.openai_beta_header).strip()
     provider_timeout_s = env_float("PROVIDER_TIMEOUT_S", Config.provider_timeout_s)
     log.debug(
@@ -663,6 +685,7 @@ def load_config() -> Config:
         provider_timeout_s,
     )
     debug_gemini = DEBUG_GEMINI
+    debug_sora = DEBUG_SORA
     raw_sora_model = os.getenv("SORA_MODEL_VIDEO", Config.sora_model_video).strip()
     sora_model_video = raw_sora_model or Config.sora_model_video
     if sora_model_video not in SORA_SUPPORTED_MODELS:
@@ -779,6 +802,7 @@ def load_config() -> Config:
             "SUPPORT_NOTIFY_INTERVAL", Config.support_notify_interval
         ),
         debug_gemini=debug_gemini,
+        debug_sora=debug_sora,
     )
 
 
