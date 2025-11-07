@@ -931,6 +931,16 @@ def _map_provider_error(error: ProviderAPIError) -> tuple[str, str, bool, str]:
         hint = "invalid_model"
         return message, short, notify_support, hint
 
+    if error_code == "endpoint_misconfigured" or error_type == "endpoint_misconfigured":
+        notify_support = True
+        message = (
+            "Sora: неверный endpoint (двойной префикс версий). "
+            "Проверь OPENAI_API_BASE / OPENAI_API_VERSION."
+        )
+        short = "Неверный endpoint Sora"
+        hint = "endpoint_misconfigured"
+        return message, short, notify_support, hint
+
     if policy_trigger:
         detail_source = raw_provider_message
         message = "Запрос нарушает правила контента."
@@ -2045,6 +2055,12 @@ async def _launch_order(
             exc.provider_message or str(exc),
         )
         message, short, notify_support, hint = _map_provider_error(exc)
+        if hint == "endpoint_misconfigured":
+            message = (
+                "Sora: неверный endpoint (двойной префикс версий). "
+                "Проверь OPENAI_API_BASE / OPENAI_API_VERSION. "
+                f"Подробности в логе corr_id={corr_id}"
+            )
         refunded = False
         try:
             await db.add_credits(user_id, credits_cost)
