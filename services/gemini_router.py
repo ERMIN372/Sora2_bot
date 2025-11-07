@@ -238,6 +238,7 @@ class GeminiRouter:
         model: Optional[str],
         prompt: str,
         assets: Optional[Mapping[str, object]] = None,
+        forced_api_version: Optional[str] = None,
     ) -> RouteDecision:
         normalised_task = _normalise_task(task)
         if normalised_task not in _TASK_METHOD:
@@ -251,7 +252,12 @@ class GeminiRouter:
                 method = "generate_images"
             elif "generate_content" in supported_methods:
                 method = "generate_content"
-        api_version = _preferred_api_version(normalised_task, selected_model)
+        if forced_api_version:
+            api_version = forced_api_version.strip() or _preferred_api_version(
+                normalised_task, selected_model
+            )
+        else:
+            api_version = _preferred_api_version(normalised_task, selected_model)
         client = get_gemini_client(self._config, api_version=api_version)
         cache_key = f"{api_version}:{normalised_task}"
         self._load_catalog(client, cache_key)
