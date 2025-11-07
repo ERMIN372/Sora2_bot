@@ -318,6 +318,7 @@ class Config:
     veo_poll_interval_max_seconds: float = 6.0
     veo_operation_timeout_seconds: float = 12 * 60.0
     veo_operation_idle_timeout_seconds: float = 120.0
+    debug_gemini: bool = False
 
     @property
     def yookassa_enabled(self) -> bool:
@@ -623,6 +624,7 @@ def load_config() -> Config:
         openai_beta_header or "default",
         provider_timeout_s,
     )
+    debug_gemini = bool(os.getenv("DEBUG_GEMINI"))
     raw_sora_model = os.getenv("SORA_MODEL_VIDEO", Config.sora_model_video).strip()
     sora_model_video = raw_sora_model or Config.sora_model_video
     if sora_model_video not in SORA_SUPPORTED_MODELS:
@@ -738,6 +740,7 @@ def load_config() -> Config:
         support_notify_interval=_get_env_int(
             "SUPPORT_NOTIFY_INTERVAL", Config.support_notify_interval
         ),
+        debug_gemini=debug_gemini,
     )
 
 
@@ -834,3 +837,4 @@ class Models:
     TEXT_MODEL = "gemini-2.5-flash"
     IMAGE_MODEL = "gemini-2.5-flash-image"
     VIDEO_MODEL = "veo-3.0-generate-001"
+

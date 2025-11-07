@@ -17,7 +17,7 @@ from uuid import uuid4
 from google import genai  # type: ignore[import-untyped]
 from google.genai import errors as genai_errors, types
 
-from config import Config, SafetyCfg
+from config import Config, SafetyCfg, _mask_secret
 from services.gemini_key import ensure_gemini_key_logged
 from services.gemini_client import get_media_client, get_text_client
 from services.gemini_router import (
@@ -518,6 +518,18 @@ def _analyse_empty_image_response(
             if "safety" in lowered or "prohibit" in lowered or "policy" in lowered:
                 safety_trigger = True
                 break
+    debug_headers = {
+        name: header_lookup.get(name)
+        for name in header_candidates
+        if header_lookup.get(name)
+    }
+    log.debug(
+        "gemini.empty_image.analysis finish_code=%s reason=%s safety=%s headers=%s",
+        finish_code or "",
+        merged_reason or "",
+        safety_trigger,
+        debug_headers,
+    )
     return finish_code, merged_reason, safety_trigger
 
 
@@ -566,6 +578,17 @@ def _infer_aspect_ratio(size: Optional[str]) -> Optional[str]:
     return f"{ratio.numerator}:{ratio.denominator}"
 
 
+def _truncate_preview(text: Optional[str], limit: int = 160) -> Optional[str]:
+    if not isinstance(text, str):
+        return None
+    cleaned = text.strip()
+    if not cleaned:
+        return None
+    if len(cleaned) <= limit:
+        return cleaned
+    return f"{cleaned[:limit]}…(+{len(cleaned) - limit} chars)"
+
+
 class GeminiGenerativeClient(BaseProviderClient):
     """Base client for synchronous Gemini API calls."""
 
@@ -587,6 +610,9 @@ class GeminiGenerativeClient(BaseProviderClient):
             api_key=api_key,
             provider_name=provider_name,
         )
+        self._debug_enabled = bool(getattr(config, "debug_gemini", False))
+        if self._debug_enabled and log.getEffectiveLevel() > logging.DEBUG:
+            log.setLevel(logging.DEBUG)
         self._task = task
         resolved_version = self._resolve_api_version(
             task=self._task,
@@ -625,6 +651,25 @@ class GeminiGenerativeClient(BaseProviderClient):
             process_id=f"pid={os.getpid()}",  # pragma: no cover - runtime value
             logger=log,
         )
+        self._log_debug_event(
+            "gemini.config",
+            {
+                "provider": provider_name,
+                "task": task,
+                "model": model,
+                "api_version": self._api_version,
+                "environment": self._environment,
+                "api_mode": (config.gemini_api_mode or "developer"),
+                "media_safety": _enum_code(self._media_safety_threshold),
+                "text_safety": [
+                    _enum_code(getattr(entry, "threshold", ""))
+                    for entry in self._safety_settings
+                ],
+                "fallback_models": list(getattr(config, "fallback_image_models", []) or []),
+                "key_mask": self._key_mask or _mask_secret(self._api_key),
+            },
+            level=logging.INFO if self._debug_enabled else logging.DEBUG,
+        )
         self._pending_dir = Path("attached_assets") / "pending" / provider_name
         try:
             self._pending_dir.mkdir(parents=True, exist_ok=True)
@@ -649,6 +694,53 @@ class GeminiGenerativeClient(BaseProviderClient):
                 error_type="invalid_model",
                 provider_message="model_not_available",
             )
+
+    def _sanitize_debug_value(self, value: Any, depth: int = 0) -> Any:
+        if value is None:
+            return None
+        if isinstance(value, (bool, int, float)):
+            return value
+        if isinstance(value, str):
+            if value.startswith("data:") and ";base64," in value:
+                return f"data-uri({len(value)})"
+            if len(value) > 160:
+                return f"{value[:160]}…(+{len(value) - 160} chars)"
+            return value
+        if isinstance(value, (list, tuple)):
+            items = [self._sanitize_debug_value(item, depth + 1) for item in list(value)[:5]]
+            if len(value) > 5:
+                items.append(f"…(+{len(value) - 5} items)")
+            return items
+        if isinstance(value, dict):
+            result: Dict[str, Any] = {}
+            for index, (key, item) in enumerate(value.items()):
+                if index >= 8:
+                    result["…"] = f"(+{len(value) - index} keys)"
+                    break
+                result[str(key)] = self._sanitize_debug_value(item, depth + 1)
+            return result
+        return str(value)
+
+    def _log_debug_event(
+        self,
+        name: str,
+        details: Optional[Mapping[str, Any]] = None,
+        *,
+        level: Optional[int] = None,
+    ) -> None:
+        if not details:
+            payload: Dict[str, Any] = {}
+        else:
+            payload = {
+                key: self._sanitize_debug_value(value)
+                for key, value in details.items()
+                if value not in (None, "", [], {})
+            }
+        if not payload:
+            payload = {}
+        message = f"{name} {json.dumps(payload, ensure_ascii=False, sort_keys=True)}"
+        target_level = level or (logging.INFO if self._debug_enabled else logging.DEBUG)
+        log.log(target_level, message)
 
     @staticmethod
     def _resolve_api_version(
@@ -1116,6 +1208,27 @@ class GeminiGenerativeClient(BaseProviderClient):
             "api_version": decision.api_version,
             "config": config.model_dump(mode="json") if hasattr(config, "model_dump") else config,
         }
+        settings_dict = dict(settings or {})
+        payload_keys = sorted(payload.keys()) if isinstance(payload, dict) else []
+        self._log_debug_event(
+            "gemini.prepare",
+            {
+                "task": decision.task,
+                "model": decision.model,
+                "method": method,
+                "router_method": decision.method,
+                "api_version": decision.api_version,
+                "force_mode": force_mode or "",
+                "prompt_chars": len(prompt_text or ""),
+                "prompt_preview": _truncate_preview(prompt_text),
+                "settings_keys": sorted(settings_dict.keys()),
+                "size": settings_dict.get("size"),
+                "aspect_ratio": settings_dict.get("aspect_ratio"),
+                "mime_type": settings_dict.get("mime_type")
+                or settings_dict.get("response_mime_type"),
+                "payload_keys": payload_keys,
+            },
+        )
         generator = getattr(decision.client.models, method)
         return generator, request_kwargs, request_meta
 
@@ -1327,6 +1440,18 @@ class GeminiGenerativeClient(BaseProviderClient):
                     retryable=False,
                 ) from exc
 
+            self._log_debug_event(
+                "gemini.attempt",
+                {
+                    "attempt": attempt + 1,
+                    "task": self._task,
+                    "decision_model": decision.model,
+                    "decision_method": decision.method,
+                    "forced_mode": force_mode or "",
+                    "forced_version": forced_api_version or "",
+                    "fallback_to_content": fallback_to_content,
+                },
+            )
             generator, request_kwargs, request_meta = self._prepare_generate_call(
                 decision=decision,
                 prompt=decision.prompt,
@@ -1360,6 +1485,17 @@ class GeminiGenerativeClient(BaseProviderClient):
                 self._key_mask or "",
                 idempotency_key or "",
             )
+            self._log_debug_event(
+                "gemini.call.start",
+                {
+                    "model": decision.model,
+                    "method": actual_method,
+                    "api_version": decision.api_version,
+                    "task": decision.task,
+                    "corr_id": idempotency_key,
+                    "request_meta": request_meta,
+                },
+            )
             try:
                 await self._rate_limiter.acquire()
                 if (
@@ -1385,6 +1521,31 @@ class GeminiGenerativeClient(BaseProviderClient):
                 else:
                     payload_json = {"response": response}
                 safety_feedback = self._extract_safety_feedback(response, payload_json)
+                self._log_debug_event(
+                    "gemini.call.result",
+                    {
+                        "model": decision.model,
+                        "method": actual_method,
+                        "api_version": decision.api_version,
+                        "duration_ms": duration_ms,
+                        "status_code": 200,
+                        "finish_reason": (
+                            payload_json.get("finish_reason")
+                            or payload_json.get("finishReason")
+                            or getattr(response, "finish_reason", None)
+                        ),
+                        "candidate_count": len(payload_json.get("candidates", []) or []),
+                        "image_count": len(payload_json.get("images", []) or []),
+                        "generated_images": len(
+                            payload_json.get("generated_images", [])
+                            or payload_json.get("generatedImages", [])
+                        ),
+                        "prompt_feedback": bool(
+                            payload_json.get("prompt_feedback")
+                            or payload_json.get("promptFeedback")
+                        ),
+                    },
+                )
                 is_flash_image = (
                     self._task == "image"
                     and isinstance(decision.model, str)
@@ -1413,11 +1574,35 @@ class GeminiGenerativeClient(BaseProviderClient):
                                 provider_name=self.provider_name,
                                 duration_ms=duration_ms,
                             )
+                        self._log_debug_event(
+                            "gemini.inline_assets",
+                            {
+                                "corr_id": idempotency_key,
+                                "inline_count": len(inline_assets),
+                                "asset_bytes": [asset.get("bytes") for asset in inline_assets],
+                                "asset_mime": [asset.get("mime") for asset in inline_assets],
+                                "method": actual_method,
+                            },
+                        )
                     except GeminiImageEmptyError as image_error:
                         finish_code, provider_message, safety_block = _analyse_empty_image_response(
                             payload_json if isinstance(payload_json, Mapping) else {},
                             response=response,
                             error=image_error,
+                        )
+                        self._log_debug_event(
+                            "gemini.empty_image",
+                            {
+                                "method": actual_method,
+                                "finish_code": finish_code,
+                                "safety_block": safety_block,
+                                "response_id": image_error.response_id,
+                                "prompt_feedback": bool(
+                                    payload_json.get("prompt_feedback")
+                                    if isinstance(payload_json, Mapping)
+                                    else False
+                                ),
+                            },
                         )
                         finish_code_upper = (finish_code or "").upper()
                         log.warning(
@@ -1442,6 +1627,15 @@ class GeminiGenerativeClient(BaseProviderClient):
                             log.warning(
                                 "gemini.image.empty -> fallback: switching method generate_images -> generate_content; reason=%s",
                                 finish_code_upper or "NO_IMAGE",
+                            )
+                            self._log_debug_event(
+                                "gemini.fallback",
+                                {
+                                    "from": "generate_images",
+                                    "to": "generate_content",
+                                    "finish_code": finish_code_upper or "",
+                                    "reason": "empty_image",
+                                },
                             )
                             force_mode = "generate_content"
                             fallback_to_content = True
@@ -1476,6 +1670,15 @@ class GeminiGenerativeClient(BaseProviderClient):
                                 int(retry_delay * 1000),
                                 image_retry_count,
                                 len(_IMAGE_RETRY_DELAYS),
+                            )
+                            self._log_debug_event(
+                                "gemini.retry",
+                                {
+                                    "reason": finish_code_upper or "",
+                                    "delay_ms": int(retry_delay * 1000),
+                                    "attempt": image_retry_count,
+                                    "max_attempts": len(_IMAGE_RETRY_DELAYS),
+                                },
                             )
                             await asyncio.sleep(retry_delay)
                             continue
@@ -1549,6 +1752,17 @@ class GeminiGenerativeClient(BaseProviderClient):
                             duration_ms=duration_ms,
                             meta=meta,
                         )
+                        self._log_debug_event(
+                            "gemini.pending.store",
+                            {
+                                "job_id": job_id,
+                                "corr_id": corr_id,
+                                "status_code": 200,
+                                "duration_ms": duration_ms,
+                                "inline_assets": len(inline_assets),
+                                "has_asset_meta": bool(asset_meta),
+                            },
+                        )
                         size = request_settings.get("size")
                         corr_id = idempotency_key or response_id or job_id
                         self._log_generation_feedback(
@@ -1578,6 +1792,17 @@ class GeminiGenerativeClient(BaseProviderClient):
                             self._key_mask or "",
                             corr_id or "",
                             duration_ms,
+                        )
+                        self._log_debug_event(
+                            "gemini.inline_return",
+                            {
+                                "corr_id": corr_id,
+                                "job_id": job_id,
+                                "inline_count": len(inline_assets),
+                                "asset_bytes": [asset.get("bytes") for asset in inline_assets],
+                                "asset_mime": [asset.get("mime") for asset in inline_assets],
+                                "duration_ms": duration_ms,
+                            },
                         )
                         return ProviderJobSubmission(
                             job_id=job_id,
@@ -1611,6 +1836,21 @@ class GeminiGenerativeClient(BaseProviderClient):
                     status_code=200,
                     duration_ms=duration_ms,
                     meta=meta,
+                )
+                self._log_debug_event(
+                    "gemini.pending.store",
+                    {
+                        "job_id": job_id,
+                        "corr_id": idempotency_key,
+                        "status_code": 200,
+                        "duration_ms": duration_ms,
+                        "inline_assets": len(
+                            payload_json.get("inline_assets", [])
+                            if isinstance(payload_json, Mapping)
+                            else []
+                        ),
+                        "has_asset_meta": bool(meta.get("assets_meta")),
+                    },
                 )
                 size = request_settings.get("size")
                 self._log_generation_feedback(
@@ -1692,6 +1932,16 @@ class GeminiGenerativeClient(BaseProviderClient):
                             decision.api_version,
                             alt_version,
                         )
+                        self._log_debug_event(
+                            "gemini.api.version_switch",
+                            {
+                                "task": decision.task,
+                                "model": decision.model,
+                                "from": decision.api_version,
+                                "to": alt_version,
+                                "status_code": provider_error.status_code,
+                            },
+                        )
                         forced_api_version = alt_version
                         force_mode = None
                         fallback_to_content = False
@@ -1711,6 +1961,15 @@ class GeminiGenerativeClient(BaseProviderClient):
                     log.warning(
                         "gemini.image.fallback method=generate_images status=%s switching_to=generate_content",
                         provider_error.status_code,
+                    )
+                    self._log_debug_event(
+                        "gemini.fallback",
+                        {
+                            "from": "generate_images",
+                            "to": "generate_content",
+                            "status_code": provider_error.status_code,
+                            "reason": "api_error",
+                        },
                     )
                     force_mode = "generate_content"
                     fallback_to_content = True
@@ -1804,8 +2063,20 @@ class GeminiGenerativeClient(BaseProviderClient):
                     self._config.request_retries + 1,
                     provider_error,
                 )
+                self._log_debug_event(
+                    "gemini.retry",
+                    {
+                        "provider": self.provider_name,
+                        "model": decision.model,
+                        "method": actual_method,
+                        "attempt": attempt + 1,
+                        "max_attempts": self._config.request_retries + 1,
+                        "error_type": provider_error.error_type,
+                        "status_code": provider_error.status_code,
+                    },
+                )
                 await asyncio.sleep(delay)
-                delay *= self._config.retry_backoff
+                delay *= max(1.0, float(self._config.retry_backoff))
                 continue
             except Exception as exc:  # pragma: no cover - network guard
                 duration_ms = int((time.monotonic() - start) * 1000)
@@ -1877,6 +2148,18 @@ class GeminiGenerativeClient(BaseProviderClient):
                     attempt + 1,
                     self._config.request_retries + 1,
                     provider_error,
+                )
+                self._log_debug_event(
+                    "gemini.retry",
+                    {
+                        "provider": self.provider_name,
+                        "model": decision.model,
+                        "method": actual_method,
+                        "attempt": attempt + 1,
+                        "max_attempts": self._config.request_retries + 1,
+                        "error_type": provider_error.error_type,
+                        "status_code": provider_error.status_code,
+                    },
                 )
                 await asyncio.sleep(delay)
                 delay *= self._config.retry_backoff
@@ -2002,9 +2285,15 @@ class GeminiGenerativeClient(BaseProviderClient):
 
     async def get_job_status(self, job_id: str) -> ProviderJobStatus:
         record = self._pending.pop(job_id, None)
+        source = "memory" if record is not None else "disk"
         if record is None:
             record = self._load_pending_record(job_id)
         if record is None:
+            self._log_debug_event(
+                "gemini.pending.miss",
+                {"job_id": job_id},
+                level=logging.DEBUG,
+            )
             return ProviderJobStatus(
                 job_id=job_id,
                 status="failed",
@@ -2017,6 +2306,17 @@ class GeminiGenerativeClient(BaseProviderClient):
         self._delete_pending_record(job_id)
         payload, status_code, duration_ms, meta = record
         status, error, assets, inline_assets, asset_meta = self._extract_result(payload)
+        self._log_debug_event(
+            "gemini.pending.load",
+            {
+                "job_id": job_id,
+                "source": source,
+                "status_code": status_code,
+                "duration_ms": duration_ms,
+                "inline_count": len(inline_assets),
+                "asset_keys": list(assets.keys())[:5],
+            },
+        )
         inline_assets_copy = [dict(asset) for asset in inline_assets]
         assets_meta = meta.get("assets_meta")
         if not isinstance(assets_meta, dict):
