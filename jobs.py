@@ -421,6 +421,9 @@ class JobQueue:
         self._stopped = asyncio.Event()
         self._notification_callbacks: Dict[str, Callable[[GenerationJobRecord], Awaitable[None]]] = {}
         self._environment = (config.environment or "dev").lower()
+        self._debug_enabled = bool(getattr(config, "debug_gemini", False))
+        if self._debug_enabled and log.getEffectiveLevel() > logging.DEBUG:
+            log.setLevel(logging.DEBUG)
         self._error_reporter = error_reporter
         self._gemini_key_mask = ensure_gemini_key_logged(
             config,
@@ -456,6 +459,19 @@ class JobQueue:
         raise RuntimeError(
             "Requested generation provider is not configured and no default provider is available"
         )
+
+    def _debug_event(self, name: str, **details: Any) -> None:
+        try:
+            payload = {
+                key: value
+                for key, value in details.items()
+                if value not in (None, "", [], {}, ())
+            }
+            message = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+        except Exception:
+            message = str(details)
+        logger = log.info if self._debug_enabled else log.debug
+        logger("%s %s", name, message)
 
     def get_provider(self, key: Optional[str]) -> Optional[BaseProviderClient]:
         if not key:
@@ -1222,6 +1238,14 @@ class JobQueue:
         provider_job_id = pending.provider_job_id or pending.job_id
         task_type = pending.task_type or VIDEO_TASK_RETRIEVE
         key_mask = self._gemini_key_mask if provider_hint.startswith(("veo", "gemini")) else ""
+        self._debug_event(
+            "jobs.poll.start",
+            job_id=pending.job_id,
+            corr_id=pending.corr_id,
+            provider=provider_hint,
+            provider_job=provider_job_id,
+            task=task_type,
+        )
         log.info(
             "Processing job %s corr_id=%s provider=%s key_mask=%s env=%s task=%s provider_job=%s",
             pending.job_id,
@@ -1261,6 +1285,19 @@ class JobQueue:
                     pending.corr_id,
                 )
                 result = await client.get_job_status(poll_target)
+                self._debug_event(
+                    "jobs.poll.result",
+                    job_id=pending.job_id,
+                    corr_id=pending.corr_id,
+                    provider=provider_key,
+                    status=result.status,
+                    status_code=result.status_code,
+                    inline_assets=len(
+                        result.data.get("inline_assets", []) if isinstance(result.data, dict) else []
+                    ),
+                    assets=len(result.assets),
+                    error=result.error,
+                )
                 provider_job_id = poll_target
             except ProviderAPIError as exc:
                 log.warning(
@@ -1274,6 +1311,15 @@ class JobQueue:
                     exc,
                 )
                 error_extra = {"provider_message": exc.provider_message, "gemini_key_mask": key_mask or None}
+                self._debug_event(
+                    "jobs.poll.error",
+                    job_id=pending.job_id,
+                    corr_id=pending.corr_id,
+                    provider=provider_key,
+                    status_code=exc.status_code,
+                    error_type=exc.error_type,
+                    error_code=exc.error_code,
+                )
                 log_event(
                     level="ERROR",
                     event="poll",
@@ -1313,6 +1359,14 @@ class JobQueue:
                 return
             except Exception as exc:  # pragma: no cover - defensive network guard
                 log.exception("Unexpected error while polling job %s", pending.job_id)
+                self._debug_event(
+                    "jobs.poll.error",
+                    job_id=pending.job_id,
+                    corr_id=pending.corr_id,
+                    provider=provider_key,
+                    error_type="exception",
+                    error_message=str(exc),
+                )
                 log_event(
                     level="ERROR",
                     event="poll",

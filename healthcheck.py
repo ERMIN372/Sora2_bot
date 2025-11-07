@@ -35,6 +35,19 @@ async def _probe_gemini_models(config: Config) -> Tuple[bool, str]:
     if not config.gemini_api_key:
         return False, "missing api key"
 
+    debug_enabled = bool(getattr(config, "debug_gemini", False))
+    if debug_enabled and log.getEffectiveLevel() > logging.DEBUG:
+        log.setLevel(logging.DEBUG)
+    log_method = log.info if debug_enabled else log.debug
+    log_method(
+        "gemini.health.config env=%s text_model=%s image_model=%s video_model=%s api_mode=%s",
+        config.environment,
+        config.gemini_model_text,
+        config.gemini_model_image,
+        config.gemini_model_video,
+        config.gemini_api_mode,
+    )
+
     clients: Dict[str, Any] = {}
     for scope, factory in (("text", get_text_client), ("media", get_media_client)):
         try:
@@ -210,6 +223,13 @@ async def _probe_gemini_models(config: Config) -> Tuple[bool, str]:
 
         image_found = False
         candidates = payload.get("candidates") or []
+        log_method(
+            "gemini.health.image payload candidates=%s latency_ms=%s",
+            len(candidates) if isinstance(candidates, list) else 0,
+            duration_ms,
+        )
+        http_options = getattr(getattr(image_client, "_client", None), "_http_options", None)
+        api_version = getattr(http_options, "api_version", None)
         for candidate in candidates:
             if not isinstance(candidate, dict):
                 continue
@@ -251,7 +271,23 @@ async def _probe_gemini_models(config: Config) -> Tuple[bool, str]:
                 break
         if not image_found:
             log.warning("Gemini image ping returned no binary data model=%s", image_model)
+            log_method(
+                "gemini.health.image result model=%s scope=%s found=%s latency_ms=%s api_version=%s",
+                image_model,
+                image_scope,
+                False,
+                duration_ms,
+                api_version,
+            )
             return False, "image:no_binary"
+        log_method(
+            "gemini.health.image result model=%s scope=%s found=%s latency_ms=%s api_version=%s",
+            image_model,
+            image_scope,
+            True,
+            duration_ms,
+            api_version,
+        )
         detail.setdefault("image", {})
         detail["image"].update(
             {"model": image_model, "latency_ms": duration_ms, "scope": image_scope}
