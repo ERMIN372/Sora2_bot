@@ -121,7 +121,7 @@ def env_float(key: str, default: float) -> float:
 CREDIT_COST = Decimal("1")
 
 PRODUCT_PRICING: Dict[str, Decimal] = {
-    "sora": Decimal("80"),
+    "sora": Decimal("119"),
     "veo3": Decimal("89"),
     "image": Decimal("5"),
 }
@@ -140,7 +140,7 @@ PRODUCT_PRICE_ALIASES: Dict[str, str] = {
 # ---------------------------------------------------------------------------
 
 PRODUCT_PRICING_UI = {
-    "sora": 80,
+    "sora": 119,
     "veo3": 89,
     "image": 5,
 }

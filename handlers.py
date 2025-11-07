@@ -573,7 +573,10 @@ def _video_model_options(config: Config) -> list[VideoModelOption]:
         if price_key:
             price = PRODUCT_PRICING_UI.get(price_key)
             if price is not None:
-                base_label = f"{base_label} — {price} ₽"
+                price_text = f"{price} ₽"
+                if provider_key == "sora":
+                    price_text = f"от {price_text}"
+                base_label = f"{base_label} — {price_text}"
         return base_label
 
     def _register(model_name: str, provider: str) -> None:
