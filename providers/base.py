@@ -178,6 +178,31 @@ class ProviderAPIError(RuntimeError):
         self.status = status if status is not None else status_code
 
 
+class ModelUnavailable(ProviderAPIError):
+    """Error raised when a requested model is unavailable for the caller."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        provider: str,
+        status_code: int = 404,
+        error_type: Optional[str] = None,
+        error_code: Optional[str] = None,
+        provider_message: Optional[str] = None,
+        request_id: Optional[str] = None,
+    ) -> None:
+        super().__init__(
+            provider=provider,
+            status_code=status_code,
+            message=message,
+            error_type=error_type or "model_unavailable",
+            error_code=error_code or "model_not_found",
+            provider_message=provider_message,
+            request_id=request_id,
+        )
+
+
 class BaseProviderClient:
     """Base HTTP client for generation providers."""
 
@@ -652,6 +677,7 @@ class BaseProviderClient:
 __all__ = [
     "BaseProviderClient",
     "ProviderAPIError",
+    "ModelUnavailable",
     "ProviderJobSubmission",
     "ProviderJobStatus",
 ]

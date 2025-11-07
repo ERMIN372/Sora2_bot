@@ -19,6 +19,7 @@ from config import DEBUG_SORA, Config, SORA_DEFAULT_MODEL, SORA_SUPPORTED_MODELS
 from .api_error_handler import ApiErrorHandler
 from .base import (
     BaseProviderClient,
+    ModelUnavailable,
     ProviderAPIError,
     ProviderJobStatus,
     ProviderJobSubmission,
@@ -39,8 +40,16 @@ from services.rate_limiter import AsyncRateLimiter
 
 log = logging.getLogger(__name__)
 
+BASE_URL = "https://api.openai.com/v1"
+ENDPOINT = f"{BASE_URL}/responses"
+
 _DEBUG_SORA_ENABLED_DEFAULT = bool(DEBUG_SORA)
 _DEBUG_PREVIEW_LIMIT = 3072
+
+
+_MODEL_CACHE_TTL = 600.0
+_MODEL_CACHE: Dict[Tuple[str, str, str], Tuple[float, bool]] = {}
+_MODEL_CACHE_LOCK = asyncio.Lock()
 
 
 _SIZE_PATTERN = re.compile(r"^(\d+)[xX](\d+)$")
@@ -161,6 +170,103 @@ def _parse_error_payload(raw: Any) -> Tuple[Optional[str], Optional[str], Option
     return error_code, error_type, error_message, payload
 
 
+async def _has_model(
+    token: str,
+    org: Optional[str],
+    project: Optional[str],
+    model_id: str,
+    *,
+    headers: Optional[Dict[str, str]] = None,
+    session: Optional[aiohttp.ClientSession] = None,
+    base_url: Optional[str] = None,
+) -> bool:
+    model_name = (model_id or "").strip()
+    if not model_name:
+        return False
+    cache_key = ((org or "").strip(), (project or "").strip(), model_name)
+    now = time.monotonic()
+    async with _MODEL_CACHE_LOCK:
+        cached = _MODEL_CACHE.get(cache_key)
+        if cached and now - cached[0] < _MODEL_CACHE_TTL:
+            return cached[1]
+
+    request_headers = dict(headers or {})
+    if token and not request_headers.get("Authorization"):
+        request_headers["Authorization"] = f"Bearer {token}"
+    if org and "OpenAI-Organization" not in request_headers:
+        request_headers["OpenAI-Organization"] = org
+    if project and "OpenAI-Project" not in request_headers:
+        request_headers["OpenAI-Project"] = project
+    request_headers.setdefault("Content-Type", "application/json")
+
+    base = (base_url or BASE_URL).rstrip("/")
+    models_url = _join_url(base, "v1", "models")
+
+    close_session = False
+    client_session = session
+    if client_session is None:
+        timeout = aiohttp.ClientTimeout(total=10)
+        client_session = aiohttp.ClientSession(timeout=timeout)
+        close_session = True
+
+    payload: Dict[str, Any] = {}
+    request_method_name: Optional[str] = None
+    request_method = getattr(client_session, "request", None)
+    if callable(request_method):
+        request_method_name = "request"
+    else:
+        get_method = getattr(client_session, "get", None)
+        if callable(get_method):
+            request_method_name = "get"
+            request_method = get_method
+    if not request_method_name or request_method is None:
+        log.debug("sora.model_preflight.unsupported_session session=%s", type(client_session))
+        return True
+
+    try:
+        if request_method_name == "request":
+            context_manager = request_method("GET", models_url, headers=request_headers)
+        else:
+            context_manager = request_method(models_url, headers=request_headers)
+        async with context_manager as response:
+            if response.status != 200:
+                body_preview = await response.text()
+                log.warning(
+                    "sora.model_preflight.unexpected_status status=%s body=%s",
+                    response.status,
+                    _truncate(body_preview, limit=256),
+                )
+                return True
+            try:
+                payload = await response.json()
+            except (aiohttp.ContentTypeError, json.JSONDecodeError):
+                log.warning("sora.model_preflight.invalid_json")
+                return True
+    except asyncio.TimeoutError:
+        log.warning("sora.model_preflight.timeout url=%s", models_url)
+        return True
+    except aiohttp.ClientError as exc:
+        log.warning("sora.model_preflight.client_error error=%s", exc)
+        return True
+    finally:
+        if close_session and client_session is not None:
+            await client_session.close()
+
+    result = False
+    data_payload = payload.get("data") if isinstance(payload, dict) else None
+    if isinstance(data_payload, list):
+        for entry in data_payload:
+            if isinstance(entry, dict) and (entry.get("id") or "").strip() == model_name:
+                result = True
+                break
+
+    async with _MODEL_CACHE_LOCK:
+        _MODEL_CACHE[cache_key] = (time.monotonic(), result)
+    if not result:
+        log.info("sora.model_preflight.missing model=%s", model_name)
+    return result
+
+
 class SoraVideoClient(BaseProviderClient):
     """Thin wrapper around OpenAI's Responses API for Sora generation."""
 
@@ -186,6 +292,14 @@ class SoraVideoClient(BaseProviderClient):
             default_headers["OpenAI-Beta"] = beta_header
         if config.openai_org_id:
             default_headers["OpenAI-Organization"] = config.openai_org_id
+        project_header = (
+            getattr(config, "openai_project_id", None)
+            or os.getenv("OPENAI_PROJECT_ID")
+            or os.getenv("OPENAI_PROJECT")
+            or ""
+        ).strip()
+        if project_header:
+            default_headers["OpenAI-Project"] = project_header
         super().__init__(
             config=config,
             base_url=base_url,
@@ -203,6 +317,7 @@ class SoraVideoClient(BaseProviderClient):
         )
         self._beta_header = beta_header
         self._organization_id = (config.openai_org_id or "").strip()
+        self._project_id = project_header
         self._api_version = api_version
         self._debug_enabled = bool(config.debug_sora or _DEBUG_SORA_ENABLED_DEFAULT)
         self._last_download_meta: Dict[str, Any] = {}
@@ -235,6 +350,26 @@ class SoraVideoClient(BaseProviderClient):
     @property
     def supported_models(self) -> Tuple[str, ...]:
         return tuple(sorted(self._supported_models))
+
+    async def _ensure_model_access(self, model_id: str) -> None:
+        if not model_id:
+            return
+        session = await self._ensure_session()
+        headers = self._build_headers()
+        has_access = await _has_model(
+            self._api_key,
+            self._organization_id or None,
+            self._project_id or None,
+            model_id,
+            headers=headers,
+            session=session,
+            base_url=self._base_url,
+        )
+        if not has_access:
+            raise ModelUnavailable(
+                f"Model not found: {model_id}",
+                provider=self.provider_name,
+            )
 
     def _build_endpoint_segments(self, *suffix: str) -> Tuple[str, ...]:
         segments: List[str] = [self._api_version]
@@ -327,6 +462,7 @@ class SoraVideoClient(BaseProviderClient):
         else:
             model_name = requested_model
         settings["model"] = model_name
+        await self._ensure_model_access(model_name)
         request_payload = self._build_request_payload(
             prompt=prompt,
             settings=settings,
@@ -624,6 +760,24 @@ class SoraVideoClient(BaseProviderClient):
                         "body_preview": _truncate(raw_body, limit=_DEBUG_PREVIEW_LIMIT),
                     },
                 )
+
+                error_type_text = (error_type or exc.error_type or "").strip()
+                error_message_text = error_message or str(exc)
+                if (
+                    exc.status_code == 404
+                    and error_type_text == "invalid_request_error"
+                    and isinstance(error_message_text, str)
+                    and "Model not found" in error_message_text
+                ):
+                    raise ModelUnavailable(
+                        error_message_text,
+                        provider=self.provider_name,
+                        status_code=exc.status_code,
+                        error_type=error_type_text,
+                        error_code=error_code or exc.error_code,
+                        provider_message=raw_body or exc.provider_message,
+                        request_id=exc.request_id,
+                    ) from exc
 
                 if exc.status_code == 404 and "/v1/v1beta/" in url:
                     log.critical(

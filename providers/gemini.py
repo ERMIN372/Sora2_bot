@@ -969,6 +969,19 @@ def _prepare_flash_image_assets(
     Optional[str],
 ]:
     images, finish_reason, response_id = _extract_images_from_gemini(response)
+    if not images:
+        try:
+            inline_assets, asset_map, asset_meta = _prepare_images_assets(
+                response,
+                provider_name=provider_name,
+                duration_ms=duration_ms,
+            )
+        except GeminiImageEmptyError:
+            inline_assets = []
+            asset_map = {}
+            asset_meta = {}
+        else:
+            return inline_assets, asset_map, asset_meta, finish_reason, response_id
     inline_assets: List[Dict[str, Any]] = []
     asset_map: Dict[str, str] = {}
     asset_meta: Dict[str, Dict[str, Any]] = {}
@@ -1965,6 +1978,12 @@ class GeminiGenerativeClient(BaseProviderClient):
         method = force_mode or decision.method
         if decision.task == "image":
             method = "generate_content"
+        if DEBUG_GEMINI and self._predict_temporarily_blocked():
+            ttl_seconds = max(0, int(self._predict_block_until - time.time())) if self._predict_block_until else 0
+            log.warning(
+                "gemini.predict.skip %s",
+                kv(task=decision.task, model=decision.model, ttl_sec=ttl_seconds),
+            )
         prompt_text = prompt
         if contents is None:
             contents = self._build_contents(prompt=prompt, settings=settings)
