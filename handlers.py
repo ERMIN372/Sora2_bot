@@ -4221,8 +4221,28 @@ async def diag_admin_command(message: Message, config: Config) -> None:
 async def diag_gemini_command(message: Message, config: Config) -> None:
     if not _is_admin(message.from_user.id if message.from_user else 0, config):
         return
+    text = (message.text or message.caption or "").strip()
+    attempts = 1
+    prompt_override: Optional[str] = None
+    if text:
+        try:
+            _, tail = text.split(maxsplit=1)
+        except ValueError:
+            tail = ""
+        if tail:
+            tail = tail.strip()
+            first, _, rest = tail.partition(" ")
+            try:
+                attempts = max(1, min(10, int(first)))
+                prompt_override = rest.strip() or None
+            except ValueError:
+                prompt_override = tail
     try:
-        report = await services.gemini_router.run_diag()
+        report = await services.gemini_router.run_diag(
+            config,
+            prompt=prompt_override,
+            attempts=attempts,
+        )
     except Exception as exc:  # pragma: no cover - diagnostic guard
         log.warning("Gemini diagnostic failed", exc_info=True)
         await message.answer(f"Ошибка диагностики: {escape_html(str(exc))}")
@@ -4231,8 +4251,9 @@ async def diag_gemini_command(message: Message, config: Config) -> None:
         payload = json.dumps(report, ensure_ascii=False, indent=2)
     except (TypeError, ValueError):  # pragma: no cover - defensive
         payload = str(report)
+    latest_diag = report.get("latest_diag") or "—"
     await message.answer(
-        f"<pre>{html.escape(payload)}</pre>",
+        f"Последний снапшот: {escape_html(str(latest_diag))}\n<pre>{html.escape(payload)}</pre>",
         parse_mode="HTML",
     )
 

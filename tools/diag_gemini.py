@@ -16,6 +16,7 @@ async def _run(args: argparse.Namespace) -> Dict[str, Any]:
         config,
         prompt=args.prompt,
         model=args.model,
+        attempts=args.n,
     )
     return report
 
@@ -29,6 +30,12 @@ def main(argv: Optional[list[str]] = None) -> None:
         type=int,
         default=2,
         help="Indent level for the JSON output (default: 2)",
+    )
+    parser.add_argument(
+        "--n",
+        type=int,
+        default=1,
+        help="Number of diagnostic attempts per method",
     )
     args = parser.parse_args(argv)
     report = asyncio.run(_run(args))

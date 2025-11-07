@@ -20,8 +20,12 @@ log = logging.getLogger(__name__)
 DEBUG_GEMINI = bool(os.getenv("DEBUG_GEMINI", "").strip())
 GEMINI_TRACE_HEADERS = os.getenv(
     "GEMINI_TRACE_HEADERS",
-    "x-generative-ai-finish-reason,x-generative-ai-output-status,x-goog-rai-filtered-reason,x-goog-image-response-status,x-goog-ai-response-code",
+    (
+        "x-generative-ai-finish-reason,x-generative-ai-output-status,x-goog-rai-filtered-reason,"
+        "x-goog-image-response-status,x-goog-ai-response-code,x-request-id,date,server,content-type"
+    ),
 ).split(",")
+GEMINI_PREDICT_DISABLE_TTL_SEC = int(os.getenv("GEMINI_PREDICT_DISABLE_TTL_SEC", "1800"))
 
 # ---------------------------------------------------------------------------
 # Constants

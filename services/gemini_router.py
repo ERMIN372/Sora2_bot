@@ -6,6 +6,7 @@ import asyncio
 import re
 import threading
 import time
+from pathlib import Path
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Set, Tuple
 
@@ -601,6 +602,7 @@ async def run_diag(
     *,
     prompt: Optional[str] = None,
     model: Optional[str] = None,
+    attempts: int = 1,
 ) -> Dict[str, Any]:
     active_config = config or _LAST_CONFIG or load_config()
     if not active_config.gemini_enabled or not active_config.gemini_api_key:
@@ -626,14 +628,86 @@ async def run_diag(
             "enabled": True,
             "error": str(exc),
         }
-    calls = {}
-    for method in ("generate_images", "generate_content"):
-        calls[method] = await _diagnose_call(
-            router=router,
-            model=target_model,
-            prompt=diag_prompt,
-            initial_method=method,
+    attempts = max(1, int(attempts or 1))
+    methods = ("generate_images", "generate_content")
+    calls: Dict[str, List[Dict[str, Any]]] = {method: [] for method in methods}
+    for attempt in range(attempts):
+        for method in methods:
+            result = await _diagnose_call(
+                router=router,
+                model=target_model,
+                prompt=diag_prompt,
+                initial_method=method,
+            )
+            result["attempt"] = attempt + 1
+            calls[method].append(result)
+
+    summary: Dict[str, Any] = {}
+
+    def _summarise(entries: List[Dict[str, Any]]) -> Dict[str, Any]:
+        if not entries:
+            return {"attempts": 0}
+        latencies = [
+            entry.get("duration_ms")
+            for entry in entries
+            if isinstance(entry.get("duration_ms"), (int, float))
+        ]
+        avg_latency = sum(latencies) / len(latencies) if latencies else 0.0
+        images_ok = sum(
+            1
+            for entry in entries
+            if entry.get("images_count", 0)
+            and entry.get("status") == "ok"
         )
+        no_image = sum(1 for entry in entries if entry.get("images_count", 0) == 0)
+        errors = [entry for entry in entries if entry.get("status") == "error"]
+        versions = sorted(
+            {
+                str(entry.get("api_version"))
+                for entry in entries
+                if entry.get("api_version")
+            }
+        )
+        headers = entries[-1].get("headers") if entries else {}
+        finishes = [
+            entry.get("finish_reason")
+            for entry in entries
+            if entry.get("finish_reason")
+        ]
+        safety_flags = [
+            entry.get("safety")
+            for entry in entries
+            if entry.get("safety")
+        ]
+        return {
+            "attempts": len(entries),
+            "ok": images_ok,
+            "no_image": no_image,
+            "errors": errors,
+            "avg_latency_ms": round(avg_latency, 2),
+            "latencies_ms": latencies,
+            "api_versions": versions,
+            "headers": headers,
+            "finish_reasons": finishes,
+            "safety": safety_flags,
+        }
+
+    for method, entries in calls.items():
+        summary[method] = _summarise(entries)
+
+    latest_diag_path: Optional[str] = None
+    diag_dir = Path("tmp") / "gemini_diag"
+    try:
+        if diag_dir.exists():
+            latest = max(
+                (path for path in diag_dir.glob("*.json") if path.is_file()),
+                key=lambda item: item.stat().st_mtime,
+            )
+            latest_diag_path = str(latest)
+    except ValueError:
+        latest_diag_path = None
+    except Exception as exc:  # pragma: no cover - defensive filesystem guard
+        log.debug("gemini.diag.latest_failed %s", kv(error=str(exc)))
     report = {
         "debug": bool(getattr(active_config, "debug_gemini", False)),
         "enabled": True,
@@ -642,6 +716,9 @@ async def run_diag(
         "default_method": base_decision.method,
         "default_version": base_decision.api_version,
         "calls": calls,
+        "summary": summary,
+        "attempts": attempts,
+        "latest_diag": latest_diag_path,
     }
     if DEBUG_GEMINI:
         log.info("gemini.diag.report %s", kv(model=target_model, prompt=diag_prompt))
