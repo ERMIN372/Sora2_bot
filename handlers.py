@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import binascii
+import html
 import fnmatch
 import json
 import logging
@@ -84,6 +85,7 @@ from providers import ProviderAPIError
 from providers.base import BaseProviderClient
 from providers.openai_chat import OpenAIChatClient
 from providers.openai_video import OpenAIVideoClient
+import services
 from services.gemini_catalog import list_veo_video_models
 from services.gemini_client import get_media_client, get_text_client
 from services.gemini_downloader import (
@@ -4216,6 +4218,25 @@ async def diag_admin_command(message: Message, config: Config) -> None:
     await message.answer("\n".join(lines))
 
 
+async def diag_gemini_command(message: Message, config: Config) -> None:
+    if not _is_admin(message.from_user.id if message.from_user else 0, config):
+        return
+    try:
+        report = await services.gemini_router.run_diag()
+    except Exception as exc:  # pragma: no cover - diagnostic guard
+        log.warning("Gemini diagnostic failed", exc_info=True)
+        await message.answer(f"Ошибка диагностики: {escape_html(str(exc))}")
+        return
+    try:
+        payload = json.dumps(report, ensure_ascii=False, indent=2)
+    except (TypeError, ValueError):  # pragma: no cover - defensive
+        payload = str(report)
+    await message.answer(
+        f"<pre>{html.escape(payload)}</pre>",
+        parse_mode="HTML",
+    )
+
+
 async def job_admin_command(message: Message, config: Config) -> None:
     if not _is_admin(message.from_user.id if message.from_user else 0, config):
         return
@@ -5186,6 +5207,11 @@ def register_handlers(
     dp.register_message_handler(
         lambda message: diag_admin_command(message, config),
         Command("diag"),
+        state="*",
+    )
+    dp.register_message_handler(
+        lambda message: diag_gemini_command(message, config),
+        Command("diag_gemini"),
         state="*",
     )
     dp.register_message_handler(
