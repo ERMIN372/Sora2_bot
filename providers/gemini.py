@@ -9,15 +9,21 @@ import logging
 import os
 import re
 import time
-from pathlib import Path
 from fractions import Fraction
+from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple
 from uuid import uuid4
 
 from google import genai  # type: ignore[import-untyped]
 from google.genai import errors as genai_errors, types
 
-from config import Config, SafetyCfg, _mask_secret
+from config import (
+    Config,
+    DEBUG_GEMINI,
+    GEMINI_TRACE_HEADERS,
+    SafetyCfg,
+    _mask_secret,
+)
 from services.gemini_key import ensure_gemini_key_logged
 from services.gemini_client import get_media_client, get_text_client
 from services.gemini_router import (
@@ -44,8 +50,9 @@ from .base import (
     ProviderJobSubmission,
     _sanitize_headers,
 )
+from .logx import get_logger, kv, mask_secret
 
-log = logging.getLogger(__name__)
+log = get_logger("providers.gemini")
 
 
 _IMAGE_RETRYABLE_REASONS = {"IMAGE_OTHER", "NO_IMAGE", "STOP"}
@@ -270,7 +277,16 @@ def _extract_response_headers(response: Any) -> Dict[str, str]:
             raw = {}
     else:
         raw = {}
-    return _sanitize_headers({k: str(v) for k, v in raw.items()})
+    normalised = {k.lower(): str(v) for k, v in raw.items()}
+    keep = {
+        *(h.strip().lower() for h in GEMINI_TRACE_HEADERS if h.strip()),
+        "x-request-id",
+        "date",
+        "server",
+        "content-type",
+    }
+    filtered = {key: normalised[key] for key in normalised if key in keep}
+    return _sanitize_headers(filtered)
 
 
 def _prepare_images_assets(
@@ -518,18 +534,16 @@ def _analyse_empty_image_response(
             if "safety" in lowered or "prohibit" in lowered or "policy" in lowered:
                 safety_trigger = True
                 break
-    debug_headers = {
-        name: header_lookup.get(name)
-        for name in header_candidates
-        if header_lookup.get(name)
-    }
-    log.debug(
-        "gemini.empty_image.analysis finish_code=%s reason=%s safety=%s headers=%s",
-        finish_code or "",
-        merged_reason or "",
-        safety_trigger,
-        debug_headers,
-    )
+    if DEBUG_GEMINI:
+        log.debug(
+            "gemini.empty.analyse %s",
+            kv(
+                headers=header_lookup,
+                merged=merged_reason,
+                finish=finish_code,
+                safety_trigger=safety_trigger,
+            ),
+        )
     return finish_code, merged_reason, safety_trigger
 
 
@@ -651,6 +665,15 @@ class GeminiGenerativeClient(BaseProviderClient):
             process_id=f"pid={os.getpid()}",  # pragma: no cover - runtime value
             logger=log,
         )
+        if DEBUG_GEMINI:
+            log.info(
+                "gemini.init %s",
+                kv(
+                    provider=self.provider_name,
+                    model=self._model,
+                    env=self._environment,
+                ),
+            )
         self._log_debug_event(
             "gemini.config",
             {
@@ -1229,6 +1252,18 @@ class GeminiGenerativeClient(BaseProviderClient):
                 "payload_keys": payload_keys,
             },
         )
+        if DEBUG_GEMINI:
+            log.debug(
+                "gemini.prepare %s",
+                kv(
+                    task=decision.task,
+                    model=decision.model,
+                    api_version=decision.api_version,
+                    mode=method,
+                    has_contents=bool(contents),
+                    prompt_preview=(prompt_text[:120] if prompt_text else ""),
+                ),
+            )
         generator = getattr(decision.client.models, method)
         return generator, request_kwargs, request_meta
 
@@ -1476,15 +1511,22 @@ class GeminiGenerativeClient(BaseProviderClient):
                 request_meta["prompt_notes"] = decision.rewrite_notes
             request_meta.setdefault("prompt", decision.prompt)
             start = time.monotonic()
-            log.info(
-                "gemini.generate start model=%s method=%s version=%s env=%s key_mask=%s corr_id=%s",
-                decision.model,
-                actual_method,
-                decision.api_version,
-                self._environment,
-                self._key_mask or "",
-                idempotency_key or "",
-            )
+            corr_id = idempotency_key or ""
+            if DEBUG_GEMINI:
+                log.info(
+                    "gemini.generate start %s",
+                    kv(
+                        model=decision.model,
+                        method=actual_method,
+                        version=decision.api_version,
+                        env=self._environment,
+                        key_mask=self._key_mask or mask_secret(self._api_key),
+                        corr_id=corr_id,
+                        attempt=attempt + 1,
+                        retry_index=image_retry_count,
+                        force_mode=force_mode or "",
+                    ),
+                )
             self._log_debug_event(
                 "gemini.call.start",
                 {
@@ -1521,6 +1563,123 @@ class GeminiGenerativeClient(BaseProviderClient):
                 else:
                     payload_json = {"response": response}
                 safety_feedback = self._extract_safety_feedback(response, payload_json)
+                headers = _extract_response_headers(response)
+                candidates_len = 0
+                if isinstance(payload_json, Mapping):
+                    candidates_payload = payload_json.get("candidates")
+                    if isinstance(candidates_payload, list):
+                        candidates_len = len(candidates_payload)
+                response_candidates = getattr(response, "candidates", None)
+                if response_candidates and not candidates_len:
+                    try:
+                        candidates_len = len(response_candidates)
+                    except TypeError:
+                        candidates_len = 0
+                response_images = getattr(response, "images", None)
+                images_len = 0
+                if response_images:
+                    try:
+                        images_len = len(response_images)
+                    except TypeError:
+                        images_len = 1
+                elif isinstance(payload_json, Mapping):
+                    for key in ("images", "generated_images", "generatedImages"):
+                        maybe_images = payload_json.get(key)
+                        if isinstance(maybe_images, list):
+                            images_len = len(maybe_images)
+                            if images_len:
+                                break
+                finish_reason = None
+                try:
+                    if getattr(response, "candidates", None):
+                        primary_candidate = response.candidates[0]
+                        finish_reason = getattr(primary_candidate, "finish_reason", None)
+                    elif isinstance(payload_json, dict):
+                        first_candidate = (payload_json.get("candidates") or [{}])[0]
+                        if isinstance(first_candidate, Mapping):
+                            finish_reason = first_candidate.get("finishReason") or first_candidate.get(
+                                "finish_reason"
+                            )
+                except Exception:  # pragma: no cover - defensive parsing
+                    finish_reason = None
+
+                inline_present = False
+                if isinstance(payload_json, Mapping):
+                    inline_present = bool(
+                        payload_json.get("inline_data") or payload_json.get("inlineData")
+                    )
+                    if not inline_present:
+                        candidates_payload = payload_json.get("candidates")
+                        if isinstance(candidates_payload, list):
+                            for candidate in candidates_payload:
+                                if not isinstance(candidate, Mapping):
+                                    continue
+                                content_json = candidate.get("content")
+                                parts_json = None
+                                if isinstance(content_json, Mapping):
+                                    parts_json = content_json.get("parts")
+                                elif isinstance(content_json, list):
+                                    parts_json = content_json
+                                if isinstance(parts_json, list):
+                                    for part in parts_json:
+                                        if isinstance(part, Mapping) and (
+                                            part.get("inline_data") or part.get("inlineData")
+                                        ):
+                                            inline_present = True
+                                            break
+                                    if inline_present:
+                                        break
+                if not inline_present and getattr(response, "candidates", None):
+                    for candidate in response.candidates or []:
+                        content_obj = getattr(candidate, "content", None)
+                        parts = getattr(content_obj, "parts", None)
+                        if not parts:
+                            continue
+                        for part in parts:
+                            data_obj = getattr(part, "inline_data", None) or getattr(
+                                part, "inlineData", None
+                            )
+                            if data_obj:
+                                inline_present = True
+                                break
+                        if inline_present:
+                            break
+
+                safety_summary = None
+                if isinstance(safety_feedback, Mapping):
+                    ratings = safety_feedback.get("safety_ratings") or safety_feedback.get("safetyRatings")
+                    if isinstance(ratings, list):
+                        categories: List[str] = []
+                        for rating in ratings:
+                            if isinstance(rating, Mapping):
+                                category = rating.get("category") or rating.get("category_name")
+                                if isinstance(category, Mapping):
+                                    category = category.get("name") or category.get("value")
+                                if category:
+                                    categories.append(str(category))
+                        if categories:
+                            unique_categories = sorted({entry for entry in categories if entry})
+                            safety_summary = ",".join(unique_categories[:6])
+                        else:
+                            safety_summary = f"len={len(ratings)}"
+                    elif ratings is not None:
+                        safety_summary = str(ratings)
+                elif safety_feedback:
+                    safety_summary = str(type(safety_feedback).__name__)
+
+                if DEBUG_GEMINI:
+                    log.info(
+                        "gemini.sync.result.meta %s",
+                        kv(
+                            headers=headers,
+                            candidates=candidates_len,
+                            images=images_len,
+                            finish=finish_reason,
+                            inline=inline_present,
+                            safety=safety_summary,
+                            response_id=getattr(response, "response_id", None),
+                        ),
+                    )
                 self._log_debug_event(
                     "gemini.call.result",
                     {
@@ -1604,6 +1763,17 @@ class GeminiGenerativeClient(BaseProviderClient):
                                 ),
                             },
                         )
+                        if DEBUG_GEMINI:
+                            log.warning(
+                                "gemini.sync.result.empty %s",
+                                kv(
+                                    finish=finish_code,
+                                    safety=safety_block,
+                                    provider_message=provider_message,
+                                    response_id=image_error.response_id
+                                    or getattr(response, "response_id", None),
+                                ),
+                            )
                         finish_code_upper = (finish_code or "").upper()
                         log.warning(
                             "gemini.sync.result.empty finish_reason=%s response_id=%s",
@@ -1717,6 +1887,25 @@ class GeminiGenerativeClient(BaseProviderClient):
                             (finish_reason or "") or "",
                             response_id or "",
                         )
+                        if DEBUG_GEMINI:
+                            total_bytes = sum(
+                                int(asset.get("bytes") or 0) for asset in inline_assets
+                            )
+                            mimes = sorted(
+                                {
+                                    str(asset.get("mime"))
+                                    for asset in inline_assets
+                                    if asset.get("mime")
+                                }
+                            )
+                            log.info(
+                                "gemini.image.assets %s",
+                                kv(
+                                    count=len(inline_assets),
+                                    total_bytes=total_bytes,
+                                    mimes=";".join(mimes),
+                                ),
+                            )
                         size = request_settings.get("size")
                         corr_id = idempotency_key or response_id or "inline"
                         self._log_generation_feedback(
@@ -1932,6 +2121,17 @@ class GeminiGenerativeClient(BaseProviderClient):
                             decision.api_version,
                             alt_version,
                         )
+                        if DEBUG_GEMINI:
+                            log.warning(
+                                "gemini.api.version_switch %s",
+                                kv(
+                                    task=self._task,
+                                    model=decision.model,
+                                    from_version=decision.api_version,
+                                    to_version=alt_version,
+                                    status=provider_error.status_code,
+                                ),
+                            )
                         self._log_debug_event(
                             "gemini.api.version_switch",
                             {
@@ -1959,8 +2159,13 @@ class GeminiGenerativeClient(BaseProviderClient):
                     and not fallback_to_content
                 ):
                     log.warning(
-                        "gemini.image.fallback method=generate_images status=%s switching_to=generate_content",
-                        provider_error.status_code,
+                        "gemini.image.fallback %s",
+                        kv(
+                            method=actual_method,
+                            status=provider_error.status_code,
+                            switching_to="generate_content",
+                            attempt=f"{image_retry_count + 1}",
+                        ),
                     )
                     self._log_debug_event(
                         "gemini.fallback",

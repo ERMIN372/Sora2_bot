@@ -12,10 +12,11 @@ from typing import Any, Dict, List, Optional, Tuple
 import gsheets_db
 from google.genai import errors as _genai_errors, types as _genai_types
 
-from config import Config
+from config import Config, DEBUG_GEMINI
 from observability import HealthCheckResult, record_healthcheck
 from services.gemini_client import get_media_client, get_text_client
 from providers.gemini import _has_generate_content_flag
+from providers.logx import kv
 
 log = logging.getLogger(__name__)
 
@@ -230,6 +231,7 @@ async def _probe_gemini_models(config: Config) -> Tuple[bool, str]:
         )
         http_options = getattr(getattr(image_client, "_client", None), "_http_options", None)
         api_version = getattr(http_options, "api_version", None)
+        endpoint_url = "models.generateContent"
         for candidate in candidates:
             if not isinstance(candidate, dict):
                 continue
@@ -269,8 +271,25 @@ async def _probe_gemini_models(config: Config) -> Tuple[bool, str]:
                     break
             if image_found:
                 break
+        if not image_found and DEBUG_GEMINI:
+            log.info(
+                "health.gemini.ping %s",
+                kv(
+                    model=image_model,
+                    method="generate_content",
+                    endpoint=endpoint_url,
+                    version=api_version,
+                    status="no_image",
+                    got_bytes=False,
+                    latency_ms=duration_ms,
+                ),
+            )
         if not image_found:
             log.warning("Gemini image ping returned no binary data model=%s", image_model)
+            log.warning(
+                "health.gemini.no_image %s",
+                kv(model=image_model, version=api_version, reason="NO_IMAGE"),
+            )
             log_method(
                 "gemini.health.image result model=%s scope=%s found=%s latency_ms=%s api_version=%s",
                 image_model,
@@ -280,6 +299,19 @@ async def _probe_gemini_models(config: Config) -> Tuple[bool, str]:
                 api_version,
             )
             return False, "image:no_binary"
+        if DEBUG_GEMINI:
+            log.info(
+                "health.gemini.ping %s",
+                kv(
+                    model=image_model,
+                    method="generate_content",
+                    endpoint=endpoint_url,
+                    version=api_version,
+                    status="ok",
+                    got_bytes=True,
+                    latency_ms=duration_ms,
+                ),
+            )
         log_method(
             "gemini.health.image result model=%s scope=%s found=%s latency_ms=%s api_version=%s",
             image_model,

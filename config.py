@@ -14,6 +14,16 @@ load_dotenv()
 log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
+# Debug / tracing flags
+# ---------------------------------------------------------------------------
+
+DEBUG_GEMINI = bool(os.getenv("DEBUG_GEMINI", "").strip())
+GEMINI_TRACE_HEADERS = os.getenv(
+    "GEMINI_TRACE_HEADERS",
+    "x-generative-ai-finish-reason,x-generative-ai-output-status,x-goog-rai-filtered-reason,x-goog-image-response-status,x-goog-ai-response-code",
+).split(",")
+
+# ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
 
@@ -624,7 +634,7 @@ def load_config() -> Config:
         openai_beta_header or "default",
         provider_timeout_s,
     )
-    debug_gemini = bool(os.getenv("DEBUG_GEMINI"))
+    debug_gemini = DEBUG_GEMINI
     raw_sora_model = os.getenv("SORA_MODEL_VIDEO", Config.sora_model_video).strip()
     sora_model_video = raw_sora_model or Config.sora_model_video
     if sora_model_video not in SORA_SUPPORTED_MODELS:

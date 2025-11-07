@@ -54,6 +54,7 @@ def test_gemini_debug_config_log(caplog: pytest.LogCaptureFixture) -> None:
 
 def test_empty_image_analysis_debug_log(caplog: pytest.LogCaptureFixture) -> None:
     caplog.set_level(logging.DEBUG, logger="providers.gemini")
+    gemini.DEBUG_GEMINI = True
     error = gemini.GeminiImageEmptyError(
         provider="gemini-image",
         finish_reason="NO_IMAGE",
@@ -62,4 +63,4 @@ def test_empty_image_analysis_debug_log(caplog: pytest.LogCaptureFixture) -> Non
     )
     payload = {"generated_images": [{"rai_filtered_reason": "POLICY"}]}
     gemini._analyse_empty_image_response(payload, response=SimpleNamespace(), error=error)
-    assert any("gemini.empty_image.analysis" in record.message for record in caplog.records)
+    assert any("gemini.empty.analyse" in record.message for record in caplog.records)

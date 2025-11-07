@@ -2,15 +2,19 @@
 from __future__ import annotations
 
 import logging
+import asyncio
 import re
 import threading
+import time
 from dataclasses import dataclass
-from typing import Dict, Iterable, List, Mapping, Optional, Set, Tuple
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Set, Tuple
 
 from google.genai import Client as _GenAIClient
+from google.genai import errors as genai_errors
 
-from config import Config, RoutingCfg
+from config import Config, DEBUG_GEMINI, GEMINI_TRACE_HEADERS, RoutingCfg, load_config
 from services.gemini_client import get_gemini_client
+from providers.logx import kv
 
 log = logging.getLogger(__name__)
 
@@ -291,6 +295,7 @@ class GeminiRouter:
 
 _ROUTER_CACHE: Dict[int, GeminiRouter] = {}
 _CACHE_LOCK = threading.Lock()
+_LAST_CONFIG: Optional[Config] = None
 
 
 def get_gemini_router(config: Config) -> GeminiRouter:
@@ -302,7 +307,345 @@ def get_gemini_router(config: Config) -> GeminiRouter:
         if router is None:
             router = GeminiRouter(config)
             _ROUTER_CACHE[key] = router
+        global _LAST_CONFIG
+        _LAST_CONFIG = config
     return router
+
+
+def _diag_extract_headers(response: Any) -> Dict[str, str]:
+    sdk_response = getattr(response, "sdk_http_response", None)
+    headers = getattr(sdk_response, "headers", None)
+    if headers is None:
+        return {}
+    if isinstance(headers, Mapping):
+        raw = {str(key): headers[key] for key in headers}
+    elif hasattr(headers, "items"):
+        try:
+            raw = {str(key): value for key, value in headers.items()}
+        except Exception:  # pragma: no cover - defensive
+            raw = {}
+    else:
+        raw = {}
+    normalised = {str(key).lower(): str(value) for key, value in raw.items()}
+    keep = {
+        *(h.strip().lower() for h in GEMINI_TRACE_HEADERS if h.strip()),
+        "x-request-id",
+        "date",
+        "server",
+        "content-type",
+    }
+    return {key: normalised[key] for key in normalised if key in keep}
+
+
+def _count_inline_parts(payload: Mapping[str, Any]) -> int:
+    count = 0
+    candidates = payload.get("candidates")
+    if isinstance(candidates, list):
+        for candidate in candidates:
+            if not isinstance(candidate, Mapping):
+                continue
+            content = candidate.get("content")
+            parts: List[Any] = []
+            if isinstance(content, Mapping):
+                raw_parts = content.get("parts")
+                if isinstance(raw_parts, list):
+                    parts = raw_parts
+            elif isinstance(content, list):
+                parts = content
+            for part in parts:
+                if not isinstance(part, Mapping):
+                    continue
+                inline_data = part.get("inline_data") or part.get("inlineData")
+                file_data = part.get("file_data") or part.get("fileData")
+                if isinstance(inline_data, Mapping):
+                    if any(
+                        inline_data.get(key)
+                        for key in ("data", "data_base64", "dataBase64", "uri", "download_uri")
+                    ):
+                        count += 1
+                        continue
+                elif inline_data:
+                    count += 1
+                    continue
+                if isinstance(file_data, Mapping) and (
+                    file_data.get("file_uri") or file_data.get("fileUri")
+                ):
+                    count += 1
+    return count
+
+
+def _extract_finish_reason(payload: Mapping[str, Any], response: Any) -> Optional[str]:
+    finish_reason = payload.get("finish_reason") or payload.get("finishReason")
+    if finish_reason:
+        return str(finish_reason)
+    candidates = payload.get("candidates")
+    if isinstance(candidates, list) and candidates:
+        first = candidates[0]
+        if isinstance(first, Mapping):
+            finish = first.get("finishReason") or first.get("finish_reason")
+            if finish:
+                return str(finish)
+    if getattr(response, "candidates", None):
+        primary = response.candidates[0]
+        finish = getattr(primary, "finish_reason", None)
+        if finish:
+            return str(finish)
+    return None
+
+
+def _extract_safety_summary(payload: Mapping[str, Any]) -> Optional[str]:
+    feedback = payload.get("prompt_feedback") or payload.get("promptFeedback")
+    if not isinstance(feedback, Mapping):
+        return None
+    ratings = feedback.get("safety_ratings") or feedback.get("safetyRatings")
+    if isinstance(ratings, list):
+        categories: List[str] = []
+        for rating in ratings:
+            if not isinstance(rating, Mapping):
+                continue
+            category = rating.get("category") or rating.get("category_name")
+            if isinstance(category, Mapping):
+                category = category.get("name") or category.get("value")
+            if category:
+                categories.append(str(category))
+        if categories:
+            return ",".join(sorted({entry for entry in categories if entry}))
+        return f"len={len(ratings)}"
+    if ratings is not None:
+        return str(ratings)
+    return None
+
+
+def _count_images(method: str, response: Any, payload: Mapping[str, Any]) -> int:
+    if method == "generate_images":
+        images = getattr(response, "images", None)
+        if isinstance(images, list):
+            return len(images)
+        generated = payload.get("generated_images") or payload.get("generatedImages")
+        if isinstance(generated, list):
+            return len(generated)
+        payload_images = payload.get("images")
+        if isinstance(payload_images, list):
+            return len(payload_images)
+        return 0
+    return _count_inline_parts(payload)
+
+
+def _extract_response_id(response: Any, payload: Mapping[str, Any]) -> Optional[str]:
+    response_id = getattr(response, "response_id", None)
+    if response_id:
+        return str(response_id)
+    rid = payload.get("response_id") or payload.get("responseId")
+    return str(rid) if rid else None
+
+
+async def _diagnose_call(
+    *,
+    router: GeminiRouter,
+    model: str,
+    prompt: str,
+    initial_method: str,
+) -> Dict[str, Any]:
+    attempt_method = initial_method
+    forced_version: Optional[str] = None
+    version_switch = False
+    fallback_used = False
+    attempted: Set[Tuple[str, str]] = set()
+    max_attempts = 5
+    while max_attempts > 0:
+        max_attempts -= 1
+        decision = router.route(
+            task="image",
+            model=model,
+            prompt=prompt,
+            assets={},
+            forced_api_version=forced_version,
+        )
+        version_label = (decision.api_version or "").lower()
+        key = (attempt_method, version_label)
+        if key in attempted and not fallback_used:
+            break
+        attempted.add(key)
+        generator = getattr(decision.client.models, attempt_method, None)
+        if generator is None:
+            return {
+                "status": "error",
+                "method_requested": initial_method,
+                "method_used": attempt_method,
+                "api_version": decision.api_version,
+                "error": f"method {attempt_method} unavailable",
+                "version_switch": version_switch,
+                "fallback_used": fallback_used,
+            }
+        if attempt_method == "generate_images":
+            request_kwargs: Dict[str, Any] = {
+                "model": decision.model,
+                "prompt": prompt,
+            }
+        else:
+            request_kwargs = {
+                "model": decision.model,
+                "contents": [
+                    {
+                        "role": "user",
+                        "parts": [
+                            {
+                                "text": prompt,
+                            }
+                        ],
+                    }
+                ],
+            }
+        start = time.perf_counter()
+        try:
+            response = await asyncio.to_thread(generator, **request_kwargs)
+        except genai_errors.APIError as exc:
+            status_code = int(getattr(exc, "code", 0) or getattr(exc, "status", 0) or 0)
+            message = getattr(exc, "message", "") or str(exc)
+            alt_version = None
+            if status_code in {400, 404}:
+                alt_version = "v1beta" if version_label == "v1" else "v1"
+            if alt_version and not version_switch and (attempt_method, alt_version) not in attempted:
+                version_switch = True
+                forced_version = alt_version
+                continue
+            if (
+                attempt_method == "generate_images"
+                and not fallback_used
+                and status_code in {400, 404}
+            ):
+                fallback_used = True
+                attempt_method = "generate_content"
+                forced_version = None
+                attempted.clear()
+                continue
+            duration_ms = int((time.perf_counter() - start) * 1000)
+            return {
+                "status": "error",
+                "method_requested": initial_method,
+                "method_used": attempt_method,
+                "api_version": decision.api_version,
+                "status_code": status_code,
+                "error": message,
+                "duration_ms": duration_ms,
+                "version_switch": version_switch,
+                "fallback_used": fallback_used,
+            }
+        except Exception as exc:  # pragma: no cover - defensive
+            duration_ms = int((time.perf_counter() - start) * 1000)
+            return {
+                "status": "error",
+                "method_requested": initial_method,
+                "method_used": attempt_method,
+                "api_version": decision.api_version,
+                "error": str(exc),
+                "duration_ms": duration_ms,
+                "version_switch": version_switch,
+                "fallback_used": fallback_used,
+            }
+        duration_ms = int((time.perf_counter() - start) * 1000)
+        if hasattr(response, "model_dump"):
+            try:
+                payload: Mapping[str, Any] = response.model_dump(mode="json")  # type: ignore[assignment]
+            except Exception:  # pragma: no cover - defensive serialisation
+                payload = {}
+        elif isinstance(response, Mapping):
+            payload = response
+        else:
+            payload = {}
+        headers = _diag_extract_headers(response)
+        finish_reason = _extract_finish_reason(payload, response)
+        images_count = _count_images(attempt_method, response, payload)
+        inline_parts = _count_inline_parts(payload)
+        safety_summary = _extract_safety_summary(payload)
+        response_id = _extract_response_id(response, payload)
+        candidates = payload.get("candidates")
+        candidates_count = len(candidates) if isinstance(candidates, list) else 0
+        if attempt_method == "generate_images" and images_count == 0 and not fallback_used:
+            fallback_used = True
+            attempt_method = "generate_content"
+            forced_version = None
+            attempted.clear()
+            continue
+        status = "ok" if images_count or attempt_method == "generate_content" else "empty"
+        summary = {
+            "status": status,
+            "method_requested": initial_method,
+            "method_used": attempt_method,
+            "api_version": decision.api_version,
+            "duration_ms": duration_ms,
+            "finish_reason": finish_reason,
+            "images_count": images_count,
+            "inline_parts": inline_parts,
+            "candidates": candidates_count,
+            "safety": safety_summary,
+            "version_switch": version_switch,
+            "fallback_used": fallback_used,
+            "response_id": response_id,
+            "headers": headers,
+        }
+        return summary
+    return {
+        "status": "error",
+        "method_requested": initial_method,
+        "method_used": attempt_method,
+        "api_version": forced_version,
+        "error": "diagnostic attempts exhausted",
+        "version_switch": version_switch,
+        "fallback_used": fallback_used,
+    }
+
+
+async def run_diag(
+    config: Optional[Config] = None,
+    *,
+    prompt: Optional[str] = None,
+    model: Optional[str] = None,
+) -> Dict[str, Any]:
+    active_config = config or _LAST_CONFIG or load_config()
+    if not active_config.gemini_enabled or not active_config.gemini_api_key:
+        return {
+            "debug": bool(getattr(active_config, "debug_gemini", False)),
+            "enabled": False,
+            "reason": "gemini_disabled",
+        }
+    router = get_gemini_router(active_config)
+    target_model = (model or active_config.gemini_model_image or "").strip()
+    diag_prompt = prompt or "Gemini diagnostic ping"
+    try:
+        base_decision = router.route(
+            task="image",
+            model=target_model,
+            prompt=diag_prompt,
+            assets={},
+        )
+    except GeminiRoutingError as exc:
+        log.warning("gemini.diag.route_failed %s", kv(error=str(exc), model=target_model))
+        return {
+            "debug": bool(getattr(active_config, "debug_gemini", False)),
+            "enabled": True,
+            "error": str(exc),
+        }
+    calls = {}
+    for method in ("generate_images", "generate_content"):
+        calls[method] = await _diagnose_call(
+            router=router,
+            model=target_model,
+            prompt=diag_prompt,
+            initial_method=method,
+        )
+    report = {
+        "debug": bool(getattr(active_config, "debug_gemini", False)),
+        "enabled": True,
+        "model": target_model,
+        "prompt": diag_prompt,
+        "default_method": base_decision.method,
+        "default_version": base_decision.api_version,
+        "calls": calls,
+    }
+    if DEBUG_GEMINI:
+        log.info("gemini.diag.report %s", kv(model=target_model, prompt=diag_prompt))
+    return report
 
 
 __all__ = [
@@ -310,4 +653,5 @@ __all__ = [
     "GeminiRoutingError",
     "RouteDecision",
     "get_gemini_router",
+    "run_diag",
 ]
