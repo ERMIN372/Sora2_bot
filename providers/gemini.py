@@ -1434,6 +1434,19 @@ class GeminiGenerativeClient(BaseProviderClient):
                             corr_id=idempotency_key,
                             payload=payload_json if isinstance(payload_json, Mapping) else None,
                         )
+                        if (
+                            actual_method == "generate_images"
+                            and not safety_block
+                            and not fallback_to_content
+                        ):
+                            log.warning(
+                                "gemini.image.empty -> fallback: switching method generate_images -> generate_content; reason=%s",
+                                finish_code_upper or "NO_IMAGE",
+                            )
+                            force_mode = "generate_content"
+                            fallback_to_content = True
+                            image_retry_count = 0
+                            continue
                         if safety_block or finish_code_upper in _IMAGE_BLOCK_REASONS:
                             raise ProviderAPIError(
                                 provider=self.provider_name,
