@@ -45,6 +45,11 @@ else:
     ]
 
 GEMINI_PREDICT_DISABLE_TTL_SEC = int(os.getenv("GEMINI_PREDICT_DISABLE_TTL_SEC", "1800"))
+GEMINI_IMAGE_API_VERSION = os.getenv("GEMINI_IMAGE_API_VERSION", "v1beta").strip() or "v1beta"
+GEMINI_IMAGE_DISABLE_PREDICT = _env_flag("GEMINI_IMAGE_DISABLE_PREDICT")
+GEMINI_IMAGE_MAX_RETRIES = max(1, int(os.getenv("GEMINI_IMAGE_MAX_RETRIES", "4") or 4))
+GEMINI_IMAGE_BACKOFF_BASE_MS = max(1, int(os.getenv("GEMINI_IMAGE_BACKOFF_BASE_MS", "600") or 600))
+GEMINI_IMAGE_STRICT_INLINE_ONLY = _env_flag("GEMINI_IMAGE_STRICT_INLINE_ONLY")
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -870,4 +875,9 @@ class Models:
     TEXT_MODEL = "gemini-2.5-flash"
     IMAGE_MODEL = "gemini-2.5-flash-image"
     VIDEO_MODEL = "veo-3.0-generate-001"
+
+
+# Apply runtime overrides derived from environment variables.
+if GEMINI_IMAGE_API_VERSION:
+    RoutingCfg.MEDIA_API_VERSION = GEMINI_IMAGE_API_VERSION
 

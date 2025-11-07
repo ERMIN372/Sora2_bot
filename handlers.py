@@ -69,7 +69,6 @@ from jobs import (
     VIDEO_TASK_CREATE,
     VIDEO_TASK_DOWNLOAD,
     VIDEO_TASK_REMIX,
-    VIDEO_TASK_RETRIEVE,
 )
 from observability import (
     get_job_history,

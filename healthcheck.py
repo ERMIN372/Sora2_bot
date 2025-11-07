@@ -12,30 +12,19 @@ from typing import Any, Dict, List, Optional, Tuple
 import gsheets_db
 from google.genai import errors as _genai_errors, types as _genai_types
 
-from config import Config, DEBUG_GEMINI, GEMINI_PREDICT_DISABLE_TTL_SEC
+from config import (
+    Config,
+    DEBUG_GEMINI,
+    GEMINI_IMAGE_API_VERSION,
+    GEMINI_IMAGE_STRICT_INLINE_ONLY,
+)
 from observability import HealthCheckResult, record_healthcheck
 from services.gemini_client import get_media_client, get_text_client
 from providers.gemini import (
     _has_generate_content_flag,
     _extract_response_headers,
-    get_predict_capability,
-    mark_predict_capability,
-    should_probe_predict,
 )
 from providers.logx import kv
-
-_PREDICT_BLOCK_UNTIL: float = 0.0
-
-
-def _predict_temporarily_blocked() -> bool:
-    return _PREDICT_BLOCK_UNTIL > time.time()
-
-
-def _block_predict_now(ttl: int) -> None:
-    global _PREDICT_BLOCK_UNTIL
-    _PREDICT_BLOCK_UNTIL = time.time() + max(60, int(ttl or 0))
-    if DEBUG_GEMINI:
-        log.warning("gemini.predict.disabled %s", kv(ttl_sec=ttl, source="healthcheck"))
 
 log = logging.getLogger(__name__)
 
@@ -213,99 +202,10 @@ async def _probe_gemini_models(config: Config) -> Tuple[bool, str]:
         image_detail = detail.setdefault(
             "image", {"model": image_model, "scope": image_scope}
         )
-        image_ping_mode = "generate_content"
-        predict_supported = _supports_method(supported, image_model, "generate_images")
-        capability_state = get_predict_capability(image_model)
-        can_try_predict = (
-            predict_supported
-            and capability_state is not False
-            and not _predict_temporarily_blocked()
+        image_detail["api_version"] = (
+            getattr(http_options, "api_version", None) or GEMINI_IMAGE_API_VERSION
         )
-        if can_try_predict:
-            log.info(
-                "health.gemini.start %s",
-                kv(model=image_model, version=api_version, method="generate_images"),
-            )
-            try:
-                predict_start = time.perf_counter()
-                predict_response = await asyncio.wait_for(
-                    asyncio.to_thread(
-                        image_client.models.generate_images,
-                        model=image_model,
-                        prompt="ping",
-                        config=_genai_types.GenerateImagesConfig(number_of_images=1, aspect_ratio="1:1"),
-                    ),
-                    timeout=60.0,
-                )
-                predict_latency = int((time.perf_counter() - predict_start) * 1000)
-                predict_headers = _extract_response_headers(predict_response)
-                predict_finish = None
-                if getattr(predict_response, "candidates", None):
-                    try:
-                        predict_finish = getattr(
-                            predict_response.candidates[0], "finish_reason", None
-                        )
-                    except Exception:  # pragma: no cover - defensive
-                        predict_finish = None
-                predict_images = getattr(predict_response, "images", None) or []
-                status_text = "ok" if predict_images else "no_image"
-                log.info(
-                    "health.gemini.ok %s",
-                    kv(
-                        model=image_model,
-                        version=api_version,
-                        method="generate_images",
-                        status=status_text,
-                        finish=predict_finish or "",
-                        headers=predict_headers,
-                        latency_ms=predict_latency,
-                    ),
-                )
-                image_detail["predict_status"] = status_text
-                if predict_images:
-                    mark_predict_capability(image_model, True)
-                    image_ping_mode = "generate_images"
-                else:
-                    log.warning(
-                        "health.gemini.no_image %s",
-                        kv(method="generate_images", finish=predict_finish or ""),
-                    )
-            except _genai_errors.APIError as exc:
-                status_code = int(getattr(exc, "code", 0) or 0)
-                log.warning(
-                    "Gemini image predict failed model=%s", image_model, exc_info=True
-                )
-                if status_code == 404:
-                    _block_predict_now(GEMINI_PREDICT_DISABLE_TTL_SEC)
-                    mark_predict_capability(image_model, False)
-                    log.warning(
-                        "health.gemini.predict_404 %s",
-                        kv(model=image_model, version=api_version),
-                    )
-                    image_detail["predict_status"] = "404"
-                else:
-                    return False, f"image.predict:{status_code or 'error'}"
-            except Exception as exc:  # pragma: no cover - defensive
-                log.warning(
-                    "Gemini image predict crashed model=%s", image_model, exc_info=True
-                )
-                return False, f"image.predict:{exc}"
-        elif predict_supported and capability_state is False:
-            log.debug(
-                "health.gemini.predict.skip %s",
-                kv(model=image_model, reason="capability_cache"),
-            )
-        else:
-            if predict_supported and _predict_temporarily_blocked():
-                log.debug(
-                    "health.gemini.start %s",
-                    kv(
-                        model=image_model,
-                        version=api_version,
-                        method="generate_images",
-                        skipped=True,
-                    ),
-                )
+        image_detail["ping_mode"] = "generate_content"
         log.info(
             "health.gemini.start %s",
             kv(model=image_model, version=api_version, method="generate_content"),
@@ -344,6 +244,7 @@ async def _probe_gemini_models(config: Config) -> Tuple[bool, str]:
             payload = {}
 
         image_found = False
+        inline_count = 0
         response_id = getattr(response, "response_id", None)
         candidates = payload.get("candidates") or []
         log_method(
@@ -381,20 +282,24 @@ async def _probe_gemini_models(config: Config) -> Tuple[bool, str]:
                             decoded = b""
                         if decoded:
                             image_found = True
+                            inline_count = max(inline_count, 1)
                             break
                     elif isinstance(inline_data.get("data"), (bytes, bytearray, memoryview)):
                         if inline_data.get("data"):
                             image_found = True
+                            inline_count = max(inline_count, 1)
                             break
                 uri = part.get("file_data") or part.get("fileData")
                 if isinstance(uri, dict):
                     file_uri = uri.get("file_uri") or uri.get("fileUri")
                     if file_uri:
                         image_found = True
+                        inline_count = max(inline_count, 1)
                         break
                 uri_value = part.get("inline_data", {}).get("uri") if isinstance(part.get("inline_data"), dict) else None
                 if uri_value:
                     image_found = True
+                    inline_count = max(inline_count, 1)
                     break
             if image_found:
                 break
@@ -427,7 +332,7 @@ async def _probe_gemini_models(config: Config) -> Tuple[bool, str]:
             "gemini.health.image result model=%s scope=%s found=%s latency_ms=%s api_version=%s",
             image_model,
             image_scope,
-            True,
+            image_found,
             duration_ms,
             api_version,
         )
@@ -436,12 +341,14 @@ async def _probe_gemini_models(config: Config) -> Tuple[bool, str]:
                 "latency_ms": duration_ms,
                 "finish_reason": finish_reason or "",
                 "inline_found": image_found,
-                "ping_mode": image_ping_mode,
+                "inline_count": inline_count,
                 "response_id": response_id or "",
+                "status": status_text,
             }
         )
         if not image_found:
             image_detail["warning"] = "NO_IMAGE_NON_CRITICAL"
+            return False, "image.no_inline"
 
     video_model = (config.gemini_model_video or "").strip()
     if video_model:
