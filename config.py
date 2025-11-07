@@ -18,13 +18,32 @@ log = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 DEBUG_GEMINI = bool(os.getenv("DEBUG_GEMINI", "").strip())
-GEMINI_TRACE_HEADERS = os.getenv(
-    "GEMINI_TRACE_HEADERS",
-    (
-        "x-generative-ai-finish-reason,x-generative-ai-output-status,x-goog-rai-filtered-reason,"
-        "x-goog-image-response-status,x-goog-ai-response-code,x-request-id,date,server,content-type"
-    ),
-).split(",")
+
+
+def _env_flag(name: str) -> bool:
+    value = os.getenv(name, "").strip().lower()
+    return value in {"1", "true", "yes", "on"}
+
+
+GEMINI_TRACE = _env_flag("GEMINI_TRACE")
+GEMINI_TRACE_SAVE_JSON = _env_flag("GEMINI_TRACE_SAVE_JSON")
+GEMINI_TRACE_SAVE_B64 = _env_flag("GEMINI_TRACE_SAVE_B64")
+GEMINI_TRACE_CURL = _env_flag("GEMINI_TRACE_CURL")
+
+_TRACE_HEADERS_DEFAULT = (
+    "x-generative-ai-finish-reason,x-generative-ai-output-status,x-goog-rai-filtered-reason,"
+    "x-goog-image-response-status,x-goog-ai-response-code,x-request-id,date,server,content-type"
+)
+_trace_headers_raw = os.getenv("GEMINI_TRACE_HEADERS", _TRACE_HEADERS_DEFAULT)
+if _trace_headers_raw.strip().lower() in {"1", "true", "all", "*"}:
+    GEMINI_TRACE_HEADERS = ["*"]
+else:
+    GEMINI_TRACE_HEADERS = [
+        header.strip()
+        for header in _trace_headers_raw.split(",")
+        if header.strip()
+    ]
+
 GEMINI_PREDICT_DISABLE_TTL_SEC = int(os.getenv("GEMINI_PREDICT_DISABLE_TTL_SEC", "1800"))
 
 # ---------------------------------------------------------------------------

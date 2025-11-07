@@ -83,6 +83,7 @@ from observability import (
 from moderation import policy_message, run_preflight
 from providers import ProviderAPIError
 from providers.base import BaseProviderClient
+from providers.gemini import dump_gemini_case
 from providers.openai_chat import OpenAIChatClient
 from providers.openai_video import OpenAIVideoClient
 import services
@@ -2131,7 +2132,21 @@ async def _launch_order(
                 error_type=exc.error_type,
                 hint=hint,
             )
-        await callback.message.answer(message)
+        reply_markup = None
+        finish_reason = getattr(exc, "finish_reason", "")
+        if isinstance(finish_reason, str) and finish_reason.upper() == "NO_IMAGE":
+            message = (
+                "🔥 Сервер генерации изображений перегружен, попробуй повторить через пару минут.\n"
+                f"ID запроса: {corr_id}"
+            )
+            if _is_admin(user_id, config):
+                reply_markup = InlineKeyboardMarkup().add(
+                    InlineKeyboardButton(
+                        text=f"/gemini_debug {corr_id}",
+                        switch_inline_query_current_chat=f"/gemini_debug {corr_id}",
+                    )
+                )
+        await callback.message.answer(message, reply_markup=reply_markup)
         return
     except Exception as exc:  # pragma: no cover - API interaction
         log.exception("Failed to submit job")
@@ -4258,6 +4273,35 @@ async def diag_gemini_command(message: Message, config: Config) -> None:
     )
 
 
+async def gemini_debug_command(message: Message, config: Config) -> None:
+    user_id = message.from_user.id if message.from_user else 0
+    if not _is_admin(user_id, config):
+        return
+    text = (message.text or message.caption or "").strip()
+    try:
+        _, corr_tail = text.split(maxsplit=1)
+    except ValueError:
+        corr_tail = ""
+    corr_id = corr_tail.strip()
+    if not corr_id:
+        await message.answer("Укажи corr_id: /gemini_debug <corr_id>")
+        return
+    try:
+        archive_path = dump_gemini_case(corr_id)
+    except Exception as exc:  # pragma: no cover - defensive
+        log.warning("Gemini debug export failed corr_id=%s", corr_id, exc_info=True)
+        await message.answer(f"Не удалось собрать артефакты: {escape_html(str(exc))}")
+        return
+    if not archive_path or not archive_path.exists():
+        await message.answer("Артефакты для указанного corr_id не найдены.")
+        return
+    data = archive_path.read_bytes()
+    await message.answer_document(
+        BufferedInputFile(data, filename=archive_path.name),
+        caption=f"Gemini trace для {corr_id}",
+    )
+
+
 async def job_admin_command(message: Message, config: Config) -> None:
     if not _is_admin(message.from_user.id if message.from_user else 0, config):
         return
@@ -5233,6 +5277,11 @@ def register_handlers(
     dp.register_message_handler(
         lambda message: diag_gemini_command(message, config),
         Command("diag_gemini"),
+        state="*",
+    )
+    dp.register_message_handler(
+        lambda message: gemini_debug_command(message, config),
+        Command("gemini_debug"),
         state="*",
     )
     dp.register_message_handler(
