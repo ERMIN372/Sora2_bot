@@ -105,15 +105,21 @@ def increment_metric(
     _METRICS[metric_key] = current + increment
 
 
-def record_timing_metric(name: str, value: float) -> None:
+def record_timing_metric(
+    name: str,
+    value: float,
+    *,
+    tags: Optional[Dict[str, Any]] = None,
+) -> None:
     if not name:
         return
     try:
         timing = float(value)
     except (TypeError, ValueError):  # pragma: no cover - defensive conversion
         return
-    total, count = _METRIC_TIMINGS.get(name, (0.0, 0))
-    _METRIC_TIMINGS[name] = (total + timing, count + 1)
+    metric_key = _tagged_metric_name(name, tags)
+    total, count = _METRIC_TIMINGS.get(metric_key, (0.0, 0))
+    _METRIC_TIMINGS[metric_key] = (total + timing, count + 1)
 
 
 def metrics_snapshot() -> Dict[str, float]:

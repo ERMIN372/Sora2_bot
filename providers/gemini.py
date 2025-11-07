@@ -4,24 +4,36 @@ from __future__ import annotations
 import asyncio
 import base64
 import binascii
+import io
 import json
 import logging
 import os
+import random
 import re
 import time
+import zipfile
+from collections import defaultdict
+from datetime import datetime
 from fractions import Fraction
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple
+from typing import Any, DefaultDict, Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple
 from uuid import uuid4
 
 from google import genai  # type: ignore[import-untyped]
 from google.genai import errors as genai_errors, types
 
+if not hasattr(types, "GenerateContentConfig"):
+    types.GenerateContentConfig = types.GenerateImagesConfig  # type: ignore[attr-defined]
+
 from config import (
     Config,
     DEBUG_GEMINI,
     GEMINI_PREDICT_DISABLE_TTL_SEC,
+    GEMINI_TRACE,
+    GEMINI_TRACE_CURL,
     GEMINI_TRACE_HEADERS,
+    GEMINI_TRACE_SAVE_B64,
+    GEMINI_TRACE_SAVE_JSON,
     SafetyCfg,
 )
 from services.gemini_key import ensure_gemini_key_logged
@@ -41,6 +53,7 @@ from services.prompt_filters import (
 )
 from services.retry_policy import RetryDecision, next_attempt
 from services.rate_limiter import AsyncRateLimiter
+from observability import increment_metric, record_timing_metric
 
 from .api_error_handler import ApiErrorHandler
 from .base import (
@@ -53,6 +66,23 @@ from .base import (
 from .logx import get_logger, kv, mask
 
 log = get_logger("providers.gemini")
+
+
+_TRACE_DIR = Path("logs") / "gemini"
+_TRACE_CASES_DIR = _TRACE_DIR / "cases"
+_TRACE_INLINE_DIR = _TRACE_DIR / "inline"
+
+_TRACE_HEADERS_ALL = any(header == "*" for header in GEMINI_TRACE_HEADERS)
+_TRACE_HEADER_WHITELIST = {
+    header.strip().lower() for header in GEMINI_TRACE_HEADERS if header and header != "*"
+}
+
+
+_MODEL_CAPABILITY_TTL = 3600.0
+_MODEL_CAPABILITIES: Dict[str, Dict[str, Any]] = {}
+
+
+_TRACE_HISTORY: DefaultDict[str, List[Dict[str, Any]]] = defaultdict(list)
 
 
 _IMAGE_RETRYABLE_REASONS = {"IMAGE_OTHER", "NO_IMAGE", "STOP"}
@@ -278,9 +308,484 @@ def _extract_response_headers(response: Any) -> Dict[str, str]:
             raw = {str(k).lower(): str(headers[k]) for k in headers}
         except Exception:  # pragma: no cover - defensive
             raw = {}
-    keep = {h.strip().lower() for h in GEMINI_TRACE_HEADERS if h.strip()}
-    filtered = {key: raw[key] for key in raw if key in keep}
+    if _TRACE_HEADERS_ALL:
+        filtered = raw
+    else:
+        filtered = {key: raw[key] for key in raw if key in _TRACE_HEADER_WHITELIST}
     return _sanitize_headers(filtered)
+
+
+def _ensure_trace_dir(path: Path) -> Optional[Path]:
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+    except Exception:  # pragma: no cover - filesystem guard
+        log.warning("Failed to initialise trace directory path=%s", path, exc_info=True)
+        return None
+    return path
+
+
+def _trace_key(prefix: str, corr_id: Optional[str]) -> str:
+    timestamp = datetime.utcnow().strftime("%Y%m%dT%H%M%S%f")
+    safe_corr = (corr_id or "no_corr").replace(os.sep, "_")[:64]
+    return f"{timestamp}_{prefix}_{safe_corr}"
+
+
+def _coerce_json(value: Any, depth: int = 0) -> Any:
+    if depth > 5:  # pragma: no cover - defensive recursion guard
+        return str(value)
+    if value is None:
+        return None
+    if isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, bytes):
+        return base64.b64encode(value).decode("ascii")
+    if isinstance(value, Mapping):
+        return {str(k): _coerce_json(v, depth + 1) for k, v in value.items()}
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return [_coerce_json(item, depth + 1) for item in value]
+    dump = getattr(value, "model_dump", None)
+    if callable(dump):
+        try:
+            return dump(mode="json")  # type: ignore[call-arg]
+        except TypeError:
+            return dump()  # type: ignore[misc]
+        except Exception:  # pragma: no cover - defensive serialisation
+            return str(value)
+    dict_method = getattr(value, "dict", None)
+    if callable(dict_method):
+        try:
+            return dict_method()  # type: ignore[call-arg]
+        except Exception:  # pragma: no cover - defensive serialisation
+            return str(value)
+    return str(value)
+
+
+def _register_trace_event(corr_id: Optional[str], payload: Dict[str, Any]) -> None:
+    if not corr_id:
+        corr_id = "no_corr"
+    history = _TRACE_HISTORY[corr_id]
+    history.append(payload)
+    if len(history) > 20:
+        del history[:-20]
+
+
+def _trace_log(level: int, message: str, **kwargs: Any) -> None:
+    # DEBUG: structured tracing helper
+    if not GEMINI_TRACE:
+        return
+    log.log(level, "gemini.trace %s %s", message, kv(**kwargs))
+
+
+def _normalise_model_name(model: Optional[str]) -> str:
+    return (model or "").strip().lower()
+
+
+def _get_capability_entry(model: Optional[str]) -> Optional[Dict[str, Any]]:
+    key = _normalise_model_name(model)
+    if not key:
+        return None
+    entry = _MODEL_CAPABILITIES.get(key)
+    if not entry:
+        return None
+    if time.time() - entry.get("last_checked", 0.0) > _MODEL_CAPABILITY_TTL:
+        return None
+    return entry
+
+
+def get_predict_capability(model: Optional[str]) -> Optional[bool]:
+    entry = _get_capability_entry(model)
+    if not entry:
+        return None
+    return entry.get("predict_works")
+
+
+def mark_predict_capability(model: Optional[str], works: bool) -> None:
+    key = _normalise_model_name(model)
+    if not key:
+        return
+    _MODEL_CAPABILITIES[key] = {
+        "predict_works": bool(works),
+        "last_checked": time.time(),
+    }
+
+
+def capability_snapshot() -> Dict[str, Dict[str, Any]]:
+    snapshot: Dict[str, Dict[str, Any]] = {}
+    now = time.time()
+    for key, value in list(_MODEL_CAPABILITIES.items()):
+        if now - value.get("last_checked", 0.0) > _MODEL_CAPABILITY_TTL:
+            continue
+        snapshot[key] = dict(value)
+    return snapshot
+
+
+def should_probe_predict(model: Optional[str]) -> bool:
+    return get_predict_capability(model) is None
+
+
+def _method_operation(method: str) -> str:
+    if method == "generate_images":
+        return "generateImages"
+    if method == "generate_content":
+        return "generateContent"
+    return method
+
+
+def _summarise_prompt_payload(
+    request_kwargs: Mapping[str, Any],
+    payload: Mapping[str, Any],
+) -> Dict[str, Any]:
+    prompt_text = ""
+    if isinstance(request_kwargs.get("prompt"), str):
+        prompt_text = request_kwargs.get("prompt") or ""
+    elif isinstance(request_kwargs.get("contents"), list):
+        for item in request_kwargs["contents"]:
+            if not isinstance(item, Mapping):
+                continue
+            parts = item.get("parts")
+            if not isinstance(parts, list):
+                continue
+            for part in parts:
+                if isinstance(part, Mapping) and isinstance(part.get("text"), str):
+                    prompt_text += part["text"]
+    elif isinstance(payload.get("contents"), list):
+        for item in payload["contents"]:
+            if not isinstance(item, Mapping):
+                continue
+            parts = item.get("parts")
+            if not isinstance(parts, list):
+                continue
+            for part in parts:
+                if isinstance(part, Mapping) and isinstance(part.get("text"), str):
+                    prompt_text += part["text"]
+    elif isinstance(payload.get("prompt"), str):
+        prompt_text = payload.get("prompt", "") or ""
+
+    assets = payload.get("assets")
+    asset_count = len(assets) if isinstance(assets, list) else 0
+    inline_refs = payload.get("reference_inline_data")
+    inline_count = len(inline_refs) if isinstance(inline_refs, list) else 0
+    return {
+        "prompt_chars": len(prompt_text or ""),
+        "asset_count": asset_count,
+        "inline_refs": inline_count,
+    }
+
+
+def _trace_request(
+    *,
+    client: "GeminiGenerativeClient",
+    decision: "RouteDecision",
+    method: str,
+    api_version: Optional[str],
+    attempt: int,
+    corr_id: Optional[str],
+    request_kwargs: Mapping[str, Any],
+    payload: Mapping[str, Any],
+    force_mode: Optional[str],
+    payload_path: Optional[Path] = None,
+) -> Dict[str, Any]:
+    if not GEMINI_TRACE:
+        return {}
+    _ensure_trace_dir(_TRACE_DIR)
+    summary = _summarise_prompt_payload(request_kwargs, payload)
+    operation = _method_operation(method)
+    version = (api_version or client._api_version or "").strip("/") or "v1beta"
+    endpoint = f"{client._base_url}/{version}/models/{decision.model}:{operation}"
+    event = {
+        "ts": time.time(),
+        "phase": "request",
+        "model": decision.model,
+        "method": method,
+        "operation": operation,
+        "api_version": version,
+        "attempt": attempt,
+        "corr_id": corr_id or "",
+        "url": endpoint,
+        "force_mode": force_mode or "",
+        "saved_request": str(payload_path) if payload_path else "",
+    }
+    event.update(summary)
+    _trace_log(
+        logging.INFO,
+        "request",
+        model=decision.model,
+        method=method,
+        version=version,
+        attempt=attempt,
+        corr_id=corr_id or "",
+        url=endpoint,
+        prompt_chars=summary["prompt_chars"],
+        asset_count=summary["asset_count"],
+        inline_refs=summary["inline_refs"],
+        force_mode=force_mode or "",
+        saved_request=str(payload_path) if payload_path else "",
+    )
+    _register_trace_event(corr_id, event)
+    return event
+
+
+def _trace_save_request_payload(
+    *,
+    corr_id: Optional[str],
+    method: str,
+    payload: Mapping[str, Any],
+) -> Optional[Path]:
+    if not GEMINI_TRACE_CURL:
+        return None
+    trace_dir = _ensure_trace_dir(_TRACE_DIR)
+    if trace_dir is None:
+        return None
+    key = _trace_key(f"request_{method}", corr_id)
+    path = trace_dir / f"{key}.payload.json"
+    try:
+        with path.open("w", encoding="utf-8") as handle:
+            json.dump(_coerce_json(payload), handle, ensure_ascii=False, indent=2)
+    except Exception:  # pragma: no cover - filesystem guard
+        log.warning("Failed to persist Gemini request payload path=%s", path, exc_info=True)
+        return None
+    return path
+
+
+def _trace_log_curl(
+    *,
+    client: "GeminiGenerativeClient",
+    decision: "RouteDecision",
+    method: str,
+    api_version: Optional[str],
+    payload_path: Optional[Path],
+    corr_id: Optional[str],
+) -> None:
+    if not GEMINI_TRACE_CURL or payload_path is None:
+        return
+    operation = _method_operation(method)
+    version = (api_version or client._api_version or "").strip("/") or "v1beta"
+    endpoint = f"{client._base_url}/{version}/models/{decision.model}:{operation}"
+    curl = (
+        f"curl -X POST '{endpoint}' -H 'Content-Type: application/json' "
+        f"-H 'x-goog-api-key:***' --data @{payload_path.name}"
+    )
+    _trace_log(
+        logging.INFO,
+        "curl",
+        corr_id=corr_id or "",
+        model=decision.model,
+        method=method,
+        version=version,
+        payload_file=str(payload_path),
+        command=curl,
+    )
+
+
+def _collect_inline_blobs(payload_json: Mapping[str, Any]) -> List[Tuple[str, str]]:
+    blobs: List[Tuple[str, str]] = []
+
+    def _consume_inline(data: Mapping[str, Any]) -> None:
+        inline = data.get("inline_data") or data.get("inlineData")
+        if isinstance(inline, Mapping):
+            data_field = inline.get("data") or inline.get("data_base64")
+            if isinstance(data_field, str) and data_field.strip():
+                mime = (
+                    inline.get("mime_type")
+                    or inline.get("mimeType")
+                    or inline.get("mime")
+                    or "image/png"
+                )
+                blobs.append((str(mime), data_field))
+
+    candidates = payload_json.get("candidates") if isinstance(payload_json, Mapping) else None
+    if isinstance(candidates, list):
+        for candidate in candidates:
+            if not isinstance(candidate, Mapping):
+                continue
+            content = candidate.get("content")
+            if isinstance(content, Mapping):
+                parts = content.get("parts")
+            elif isinstance(content, list):
+                parts = content
+            else:
+                parts = None
+            if isinstance(parts, list):
+                for part in parts:
+                    if isinstance(part, Mapping):
+                        _consume_inline(part)
+    inline_direct = payload_json.get("inline_data") or payload_json.get("inlineData")
+    if isinstance(inline_direct, Mapping):
+        data_field = inline_direct.get("data") or inline_direct.get("data_base64")
+        if isinstance(data_field, str) and data_field.strip():
+            mime = (
+                inline_direct.get("mime_type")
+                or inline_direct.get("mimeType")
+                or inline_direct.get("mime")
+                or "image/png"
+            )
+            blobs.append((str(mime), data_field))
+    return blobs
+
+
+def _trace_save_inline_blobs(
+    *,
+    payload_json: Mapping[str, Any],
+    response_id: Optional[str],
+) -> List[Path]:
+    if not GEMINI_TRACE_SAVE_B64:
+        return []
+    trace_dir = _ensure_trace_dir(_TRACE_INLINE_DIR)
+    if trace_dir is None:
+        return []
+    saved: List[Path] = []
+    for index, (mime, blob) in enumerate(_collect_inline_blobs(payload_json)):
+        filename = _trace_key(response_id or "resp", f"inline{index}")
+        extension = {
+            "image/png": ".png",
+            "image/jpeg": ".jpg",
+            "image/webp": ".webp",
+        }.get(mime.lower(), ".bin")
+        path = trace_dir / f"{filename}{extension}"
+        try:
+            binary = base64.b64decode(blob, validate=False)
+        except (binascii.Error, ValueError):  # pragma: no cover - defensive
+            binary = blob.encode("utf-8")
+        try:
+            with path.open("wb") as handle:
+                handle.write(binary)
+        except Exception:  # pragma: no cover - filesystem guard
+            log.warning("Failed to persist inline blob path=%s", path, exc_info=True)
+            continue
+        saved.append(path)
+    return saved
+
+
+def _trace_save_response_json(
+    *,
+    payload_json: Mapping[str, Any],
+    corr_id: Optional[str],
+    method: str,
+    version: Optional[str],
+    status: int,
+) -> Optional[Path]:
+    if not GEMINI_TRACE_SAVE_JSON:
+        return None
+    trace_dir = _ensure_trace_dir(_TRACE_DIR)
+    if trace_dir is None:
+        return None
+    key = _trace_key(f"response_{method}_{status}", corr_id)
+    path = trace_dir / f"{key}.json"
+    try:
+        with path.open("w", encoding="utf-8") as handle:
+            json.dump(_coerce_json(payload_json), handle, ensure_ascii=False, indent=2)
+    except Exception:  # pragma: no cover - filesystem guard
+        log.warning("Failed to persist Gemini response payload path=%s", path, exc_info=True)
+        return None
+    return path
+
+
+def _trace_response(
+    *,
+    client: "GeminiGenerativeClient",
+    decision: "RouteDecision",
+    method: str,
+    api_version: Optional[str],
+    corr_id: Optional[str],
+    status: int,
+    headers: Mapping[str, Any],
+    duration_ms: int,
+    payload_json: Mapping[str, Any],
+    request_event: Mapping[str, Any],
+    response_id: Optional[str],
+) -> None:
+    if not GEMINI_TRACE:
+        return
+    version = (api_version or client._api_version or "").strip("/") or "v1beta"
+    inline_paths = _trace_save_inline_blobs(
+        payload_json=payload_json,
+        response_id=response_id,
+    )
+    response_path = _trace_save_response_json(
+        payload_json=payload_json,
+        corr_id=corr_id,
+        method=method,
+        version=version,
+        status=status,
+    )
+    event = {
+        "ts": time.time(),
+        "phase": "response",
+        "model": decision.model,
+        "method": method,
+        "api_version": version,
+        "status": status,
+        "corr_id": corr_id or "",
+        "duration_ms": duration_ms,
+        "response_id": response_id or "",
+        "headers": dict(headers),
+        "saved_json": str(response_path) if response_path else "",
+        "saved_inline": [str(path) for path in inline_paths],
+    }
+    event.update({
+        "prompt_chars": request_event.get("prompt_chars"),
+        "asset_count": request_event.get("asset_count"),
+        "inline_refs": request_event.get("inline_refs"),
+    })
+    _trace_log(
+        logging.INFO,
+        "response",
+        model=decision.model,
+        method=method,
+        version=version,
+        status=status,
+        corr_id=corr_id or "",
+        duration_ms=duration_ms,
+        response_id=response_id or "",
+        headers=headers,
+        saved_json=str(response_path) if response_path else "",
+        saved_inline=[str(path) for path in inline_paths],
+    )
+    _register_trace_event(corr_id, event)
+
+
+def dump_gemini_case(corr_id: str) -> Optional[Path]:
+    """Bundle the trace artefacts for *corr_id* into a ZIP archive."""
+
+    if not corr_id:
+        return None
+    case_dir = _ensure_trace_dir(_TRACE_CASES_DIR)
+    if case_dir is None:
+        return None
+    events = list(_TRACE_HISTORY.get(corr_id, []))
+    if not events:
+        return None
+    archive_name = _trace_key("case", corr_id) + ".zip"
+    archive_path = case_dir / archive_name
+    try:
+        with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+            summary = {
+                "corr_id": corr_id,
+                "events": events,
+            }
+            archive.writestr(
+                "summary.json",
+                json.dumps(summary, ensure_ascii=False, indent=2),
+            )
+            for event in events:
+                saved_request = event.get("saved_request")
+                if saved_request:
+                    path = Path(saved_request)
+                    if path.exists():
+                        archive.write(path, arcname=path.name)
+                saved_json = event.get("saved_json")
+                if saved_json:
+                    path = Path(saved_json)
+                    if path.exists():
+                        archive.write(path, arcname=path.name)
+                for inline_path in event.get("saved_inline", []):
+                    path = Path(inline_path)
+                    if path.exists():
+                        archive.write(path, arcname=path.name)
+    except Exception:  # pragma: no cover - filesystem guard
+        log.warning("Failed to create Gemini debug archive corr_id=%s", corr_id, exc_info=True)
+        return None
+    return archive_path
 
 
 def _prepare_images_assets(
@@ -449,6 +954,25 @@ def _prepare_flash_image_assets(
             "data_uri": data_uri,
             "data_url": data_uri,
         }
+        if GEMINI_TRACE_SAVE_B64:
+            trace_dir = _ensure_trace_dir(_TRACE_INLINE_DIR)
+            if trace_dir is not None:
+                filename = _trace_key(response_id or "resp", f"inline{index}")
+                extension = {
+                    "image/png": ".png",
+                    "image/jpeg": ".jpg",
+                    "image/webp": ".webp",
+                }.get(str(mime).lower(), ".bin")
+                trace_path = trace_dir / f"{filename}{extension}"
+                try:
+                    with trace_path.open("wb") as handle:
+                        handle.write(binary)
+                except Exception:  # pragma: no cover - filesystem guard
+                    log.warning(
+                        "Failed to persist inline asset trace path=%s", trace_path, exc_info=True
+                    )
+                else:
+                    entry.setdefault("trace_path", str(trace_path))
         inline_assets.append(entry)
         asset_map[key] = data_uri
         asset_meta[key] = {
@@ -499,11 +1023,17 @@ def _analyse_empty_image_response(
             finish_code = str(header_value).upper()
             break
     provider_reasons: List[str] = []
+    candidate: Optional[Mapping[str, Any]] = None
     if isinstance(payload_json, Mapping):
         for key in ("status", "finish_reason", "finishReason"):
             value = payload_json.get(key)
             if value and not finish_code:
                 finish_code = str(value).upper()
+        candidates_payload = payload_json.get("candidates")
+        if isinstance(candidates_payload, list) and candidates_payload:
+            first_candidate = candidates_payload[0]
+            if isinstance(first_candidate, Mapping):
+                candidate = first_candidate
         generated_images = payload_json.get("generated_images") or payload_json.get("generatedImages")
         if isinstance(generated_images, list):
             for item in generated_images:
@@ -528,6 +1058,56 @@ def _analyse_empty_image_response(
             if "safety" in lowered or "prohibit" in lowered or "policy" in lowered:
                 safety_trigger = True
                 break
+    if reason_upper == "STOP":
+        safety_trigger = False
+
+    candidate_dump: Optional[Dict[str, Any]] = None
+    if isinstance(candidate, Mapping):
+        candidate_dump = _coerce_json(candidate)
+        if isinstance(candidate_dump, dict):
+            content = candidate_dump.get("content")
+            parts = None
+            if isinstance(content, dict):
+                parts = content.get("parts")
+            elif isinstance(content, list):
+                parts = content
+            if isinstance(parts, list):
+                for part in parts:
+                    if not isinstance(part, dict):
+                        continue
+                    inline_data = part.get("inline_data") or part.get("inlineData")
+                    if isinstance(inline_data, dict):
+                        data_value = inline_data.get("data") or inline_data.get("data_base64")
+                        if isinstance(data_value, str):
+                            inline_data["data"] = f"<len={len(data_value)}>"
+                            inline_data.pop("data_base64", None)
+
+    prompt_feedback = payload_json.get("prompt_feedback") or payload_json.get("promptFeedback")
+    safety_ratings = _extract_safety_ratings(prompt_feedback)
+    assets_payload = payload_json.get("generated_images") or payload_json.get("generatedImages")
+    assets_count = len(assets_payload) if isinstance(assets_payload, list) else 0
+    block_reason = payload_json.get("block_reason") or payload_json.get("blockReason")
+    context = {
+        "finish": reason_upper or "",
+        "response_id": error.response_id or getattr(response, "response_id", ""),
+        "headers": header_lookup,
+        "candidate": candidate_dump,
+        "prompt_feedback": _coerce_json(prompt_feedback)
+        if isinstance(prompt_feedback, Mapping)
+        else None,
+        "safety_ratings": _coerce_json(safety_ratings) if safety_ratings is not None else None,
+        "assets_count": assets_count,
+        "block_reason": block_reason,
+    }
+    setattr(error, "analysis_context", context)
+    _trace_log(
+        logging.WARNING,
+        "empty_image.analysis",
+        finish=reason_upper or "",
+        response_id=context["response_id"],
+        assets=assets_count,
+        block_reason=block_reason or "",
+    )
     if DEBUG_GEMINI:
         log.debug(
             "gemini.empty.analyse %s",
@@ -598,6 +1178,10 @@ def _truncate_preview(text: Optional[str], limit: int = 160) -> Optional[str]:
 
 class GeminiGenerativeClient(BaseProviderClient):
     """Base client for synchronous Gemini API calls."""
+
+    # Ensure debug flag exists even for instances created via ``object.__new__``
+    # in unit-tests that bypass ``__init__``.
+    _debug_enabled: bool = False
 
     def __init__(
         self,
@@ -857,7 +1441,8 @@ class GeminiGenerativeClient(BaseProviderClient):
         if not payload:
             payload = {}
         message = f"{name} {json.dumps(payload, ensure_ascii=False, sort_keys=True)}"
-        target_level = level or (logging.INFO if self._debug_enabled else logging.DEBUG)
+        debug_enabled = getattr(self, "_debug_enabled", False)
+        target_level = level or (logging.INFO if debug_enabled else logging.DEBUG)
         log.log(target_level, message)
 
     @staticmethod
@@ -1267,6 +1852,7 @@ class GeminiGenerativeClient(BaseProviderClient):
             and isinstance(decision.model, str)
             and decision.model.lower() == "gemini-2.5-flash-image"
         )
+        capability = get_predict_capability(decision.model)
         if predict_target and self._predict_temporarily_blocked():
             ttl_left = max(0, int((self._predict_block_until or 0) - time.time()))
             method = "generate_content"
@@ -1279,6 +1865,8 @@ class GeminiGenerativeClient(BaseProviderClient):
                         ttl_left=ttl_left,
                     ),
                 )
+        elif predict_target and capability is False:
+            method = "generate_content"
         elif predict_target and not force_mode:
             method = "generate_images"
         prompt_text = prompt
@@ -1372,7 +1960,16 @@ class GeminiGenerativeClient(BaseProviderClient):
                     prompt_preview=(prompt_text[:140] if prompt_text else ""),
                 ),
             )
-        generator = getattr(decision.client.models, method)
+        generator = getattr(decision.client.models, method, None)
+        if generator is None:
+            # Some unit tests stub only the router-selected method. If the
+            # capability cache forces a fallback method that the stub does not
+            # implement we try the router suggestion before erroring out.
+            generator = getattr(decision.client.models, decision.method, None)
+        if generator is None:
+            raise AttributeError(
+                f"Gemini client has no generator for method={method}"
+            )
         return generator, request_kwargs, request_meta
 
     def _map_error(
@@ -1564,8 +2161,34 @@ class GeminiGenerativeClient(BaseProviderClient):
         forced_api_version: Optional[str] = None
         fallback_to_content = False
         attempted_api_versions: Set[str] = set()
+        capability_forced = False
+        capability_hint: Optional[bool] = None
+        no_image_streak = 0
         while attempt <= self._config.request_retries:
             model_override = request_settings.get("model") or self._model
+            if (
+                self._task == "image"
+                and isinstance(model_override, str)
+                and model_override.lower() == "gemini-2.5-flash-image"
+            ):
+                capability_hint = get_predict_capability(model_override)
+                if capability_hint is False:
+                    if force_mode != "generate_content":
+                        force_mode = "generate_content"
+                        capability_forced = True
+                        if not forced_api_version:
+                            forced_api_version = "v1beta"
+                        _trace_log(
+                            logging.INFO,
+                            "capability.predict_disabled",
+                            model=model_override,
+                            corr_id=idempotency_key or "",
+                            source="cache",
+                        )
+                elif capability_hint is True and capability_forced:
+                    capability_forced = False
+            else:
+                capability_hint = None
             try:
                 decision = self._router.route(
                     task=self._task,
@@ -1647,6 +2270,36 @@ class GeminiGenerativeClient(BaseProviderClient):
                     "request_meta": request_meta,
                 },
             )
+            trace_payload_path: Optional[Path] = None
+            trace_event: Dict[str, Any] = {}
+            if GEMINI_TRACE or GEMINI_TRACE_CURL:
+                trace_payload_path = _trace_save_request_payload(
+                    corr_id=corr_id or idempotency_key,
+                    method=actual_method,
+                    payload=request_kwargs,
+                )
+            if GEMINI_TRACE:
+                trace_event = _trace_request(
+                    client=self,
+                    decision=decision,
+                    method=actual_method,
+                    api_version=decision.api_version,
+                    attempt=attempt + 1,
+                    corr_id=corr_id,
+                    request_kwargs=request_kwargs,
+                    payload=payload_dict,
+                    force_mode=force_mode,
+                    payload_path=trace_payload_path,
+                )
+            if GEMINI_TRACE_CURL and trace_payload_path is not None:
+                _trace_log_curl(
+                    client=self,
+                    decision=decision,
+                    method=actual_method,
+                    api_version=decision.api_version,
+                    payload_path=trace_payload_path,
+                    corr_id=corr_id,
+                )
             try:
                 await self._rate_limiter.acquire()
                 if (
@@ -1673,6 +2326,7 @@ class GeminiGenerativeClient(BaseProviderClient):
                     payload_json = {"response": response}
                 safety_feedback = self._extract_safety_feedback(response, payload_json)
                 headers = _extract_response_headers(response)
+                response_id = getattr(response, "response_id", None)
                 candidates_len = 0
                 if isinstance(payload_json, Mapping):
                     candidates_payload = payload_json.get("candidates")
@@ -1711,6 +2365,28 @@ class GeminiGenerativeClient(BaseProviderClient):
                             )
                 except Exception:  # pragma: no cover - defensive parsing
                     finish_reason = None
+
+                finish_code_upper = (
+                    str(finish_reason).upper() if finish_reason else ""
+                )
+
+                if GEMINI_TRACE:
+                    trace_payload = (
+                        payload_json if isinstance(payload_json, Mapping) else {}
+                    )
+                    _trace_response(
+                        client=self,
+                        decision=decision,
+                        method=actual_method,
+                        api_version=decision.api_version,
+                        corr_id=corr_id,
+                        status=200,
+                        headers=headers,
+                        duration_ms=duration_ms,
+                        payload_json=trace_payload,
+                        request_event=trace_event,
+                        response_id=response_id,
+                    )
 
                 inline_present = False
                 parts_count = 0
@@ -1851,6 +2527,12 @@ class GeminiGenerativeClient(BaseProviderClient):
                                 provider_name=self.provider_name,
                                 duration_ms=duration_ms,
                             )
+                        finish_code_upper = (
+                            finish_reason or finish_code_upper or ""
+                        ).upper()
+                        no_image_streak = 0
+                        if actual_method == "generate_images":
+                            mark_predict_capability(decision.model, True)
                         self._log_debug_event(
                             "gemini.inline_assets",
                             {
@@ -1927,6 +2609,44 @@ class GeminiGenerativeClient(BaseProviderClient):
                             payload=payload_json if isinstance(payload_json, Mapping) else None,
                         )
                         if finish_code_upper == "NO_IMAGE":
+                            no_image_streak += 1
+                            increment_metric(
+                                "gemini_no_image_total",
+                                tags={"model": str(decision.model)},
+                            )
+                            summary = _summarise_prompt_payload(
+                                request_kwargs,
+                                payload_dict,
+                            )
+                            _trace_log(
+                                logging.WARNING,
+                                "no_image",
+                                corr_id=corr_id,
+                                model=decision.model,
+                                method=actual_method,
+                                version=decision.api_version or "",
+                                latency_ms=duration_ms,
+                                attempt=attempt + 1,
+                                retry=image_retry_count,
+                                prompt_chars=summary["prompt_chars"],
+                                assets=summary["asset_count"],
+                                inline_refs=summary["inline_refs"],
+                            )
+                            log.warning(
+                                "NO_IMAGE with 200 OK %s",
+                                kv(
+                                    corr_id=corr_id,
+                                    model=decision.model,
+                                    method=actual_method,
+                                    version=decision.api_version or "",
+                                    latency_ms=duration_ms,
+                                    attempt=attempt + 1,
+                                    retry=image_retry_count,
+                                    prompt_chars=summary["prompt_chars"],
+                                    assets=summary["asset_count"],
+                                    inline_refs=summary["inline_refs"],
+                                ),
+                            )
                             self._save_no_image_diag(
                                 decision=decision,
                                 method=actual_method,
@@ -1940,6 +2660,30 @@ class GeminiGenerativeClient(BaseProviderClient):
                                 duration_ms=duration_ms,
                                 corr_id=corr_id,
                             )
+                            if not safety_block:
+                                if no_image_streak == 1:
+                                    image_retry_count = 0
+                                    continue
+                                if no_image_streak == 2:
+                                    jitter = random.uniform(0.3, 0.8)
+                                    await asyncio.sleep(jitter)
+                                    image_retry_count = 0
+                                    continue
+                                provider_text = provider_message or image_error.message
+                                no_image_error = ProviderAPIError(
+                                    provider=self.provider_name,
+                                    status_code=503,
+                                    message="Изображение не готово, попробуй ещё раз чуть позже.",
+                                    error_type="provider_unavailable",
+                                    provider_message=provider_text,
+                                    retryable=False,
+                                    duration_ms=duration_ms,
+                                )
+                                setattr(no_image_error, "finish_reason", finish_code_upper or "NO_IMAGE")
+                                setattr(no_image_error, "corr_id", corr_id)
+                                raise no_image_error from image_error
+                        else:
+                            no_image_streak = 0
                         if (
                             actual_method == "generate_images"
                             and not safety_block
@@ -1961,8 +2705,16 @@ class GeminiGenerativeClient(BaseProviderClient):
                             force_mode = "generate_content"
                             fallback_to_content = True
                             image_retry_count = 0
+                            no_image_streak = 0
                             continue
                         if safety_block or finish_code_upper in _IMAGE_BLOCK_REASONS:
+                            increment_metric(
+                                "gemini_safety_blocks_total",
+                                tags={
+                                    "model": str(decision.model),
+                                    "category": finish_code_upper or "unknown",
+                                },
+                            )
                             raise ProviderAPIError(
                                 provider=self.provider_name,
                                 status_code=400,
@@ -2113,6 +2865,32 @@ class GeminiGenerativeClient(BaseProviderClient):
                             corr_id=corr_id,
                             payload=payload_json,
                         )
+                        metric_tags = {
+                            "model": str(decision.model),
+                            "method": actual_method,
+                            "version": decision.api_version or "",
+                            "status": "200",
+                        }
+                        increment_metric("gemini_calls_total", tags=metric_tags)
+                        record_timing_metric(
+                            "gemini_latency_ms",
+                            duration_ms,
+                            tags={
+                                "model": metric_tags["model"],
+                                "method": metric_tags["method"],
+                                "version": metric_tags["version"],
+                            },
+                        )
+                        if finish_code_upper:
+                            increment_metric(
+                                "metric_gemini_finish_reason",
+                                tags={"reason": finish_code_upper},
+                            )
+                            if finish_code_upper == "STOP":
+                                increment_metric(
+                                    "gemini_stop_total",
+                                    tags={"model": metric_tags["model"]},
+                                )
                         log.info(
                             "gemini.call corr_id=%s provider=%s model=%s method=%s version=%s size=%s status=%s latency_ms=%s",
                             corr_id or "",
@@ -2202,6 +2980,33 @@ class GeminiGenerativeClient(BaseProviderClient):
                     corr_id=idempotency_key or job_id,
                     payload=payload_json,
                 )
+                no_image_streak = 0
+                metric_tags = {
+                    "model": str(decision.model),
+                    "method": actual_method,
+                    "version": decision.api_version or "",
+                    "status": "200",
+                }
+                increment_metric("gemini_calls_total", tags=metric_tags)
+                record_timing_metric(
+                    "gemini_latency_ms",
+                    duration_ms,
+                    tags={
+                        "model": metric_tags["model"],
+                        "method": metric_tags["method"],
+                        "version": metric_tags["version"],
+                    },
+                )
+                if finish_code_upper:
+                    increment_metric(
+                        "metric_gemini_finish_reason",
+                        tags={"reason": finish_code_upper},
+                    )
+                    if finish_code_upper == "STOP":
+                        increment_metric(
+                            "gemini_stop_total",
+                            tags={"model": metric_tags["model"]},
+                        )
                 log.info(
                     "gemini.call corr_id=%s provider=%s model=%s method=%s version=%s size=%s status=%s latency_ms=%s",
                     idempotency_key or job_id,
@@ -2261,11 +3066,34 @@ class GeminiGenerativeClient(BaseProviderClient):
                     duration_ms=duration_ms,
                     decision=decision,
                 )
+                error_metric_tags = {
+                    "model": str(decision.model),
+                    "method": actual_method,
+                    "version": decision.api_version or "",
+                    "status": str(provider_error.status_code or 0),
+                }
+                increment_metric("gemini_calls_total", tags=error_metric_tags)
+                record_timing_metric(
+                    "gemini_latency_ms",
+                    duration_ms,
+                    tags={
+                        "model": error_metric_tags["model"],
+                        "method": error_metric_tags["method"],
+                        "version": error_metric_tags["version"],
+                    },
+                )
                 if (
                     actual_method == "generate_images"
                     and provider_error.status_code in {401, 403, 404}
                 ):
                     self._block_predict_now(GEMINI_PREDICT_DISABLE_TTL_SEC)
+                    if provider_error.status_code == 404:
+                        mark_predict_capability(decision.model, False)
+                        capability_forced = True
+                        increment_metric(
+                            "gemini_predict_404_total",
+                            tags={"model": str(decision.model)},
+                        )
                     force_mode = "generate_content"
                     fallback_to_content = True
                     image_retry_count = 0
@@ -2457,11 +3285,34 @@ class GeminiGenerativeClient(BaseProviderClient):
                     duration_ms=duration_ms,
                     decision=decision,
                 )
+                error_metric_tags = {
+                    "model": str(decision.model),
+                    "method": actual_method,
+                    "version": decision.api_version or "",
+                    "status": str(provider_error.status_code or 0),
+                }
+                increment_metric("gemini_calls_total", tags=error_metric_tags)
+                record_timing_metric(
+                    "gemini_latency_ms",
+                    duration_ms,
+                    tags={
+                        "model": error_metric_tags["model"],
+                        "method": error_metric_tags["method"],
+                        "version": error_metric_tags["version"],
+                    },
+                )
                 if (
                     actual_method == "generate_images"
                     and provider_error.status_code in {401, 403, 404}
                 ):
                     self._block_predict_now(GEMINI_PREDICT_DISABLE_TTL_SEC)
+                    if provider_error.status_code == 404:
+                        mark_predict_capability(decision.model, False)
+                        capability_forced = True
+                        increment_metric(
+                            "gemini_predict_404_total",
+                            tags={"model": str(decision.model)},
+                        )
                     force_mode = "generate_content"
                     fallback_to_content = True
                     image_retry_count = 0
