@@ -2,6 +2,7 @@
 
 from .base import (
     BaseProviderClient,
+    ModelUnavailable,
     ProviderAPIError,
     ProviderJobStatus,
     ProviderJobSubmission,
@@ -15,6 +16,7 @@ from .veo_video import VeoVideoClient
 
 __all__ = [
     "BaseProviderClient",
+    "ModelUnavailable",
     "ProviderAPIError",
     "ProviderJobStatus",
     "ProviderJobSubmission",

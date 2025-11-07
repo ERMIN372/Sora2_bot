@@ -9,6 +9,7 @@ import fnmatch
 import json
 import logging
 import mimetypes
+import os
 import time
 from dataclasses import dataclass, field
 from decimal import Decimal
@@ -80,7 +81,7 @@ from observability import (
     should_notify_support,
 )
 from moderation import policy_message, run_preflight
-from providers import ProviderAPIError
+from providers import ModelUnavailable, ProviderAPIError
 from providers.base import BaseProviderClient
 from providers.gemini import dump_gemini_case
 from providers.openai_chat import OpenAIChatClient
@@ -2042,6 +2043,126 @@ async def _launch_order(
             credits_cost=credits_cost,
             refund_done=refunded,
         )
+        return
+    except ModelUnavailable as exc:
+        log.warning(
+            "Sora model unavailable corr_id=%s provider=%s status=%s request_id=%s message=%s",
+            corr_id,
+            provider_key,
+            exc.status_code,
+            getattr(exc, "request_id", None),
+            exc,
+        )
+        refunded = False
+        try:
+            await db.add_credits(user_id, credits_cost)
+            refunded = True
+        except Exception:  # pragma: no cover - external dependency
+            log.exception("Failed to refund credits after Sora model unavailable")
+        await _release_lock("submit_failed", "model_unavailable")
+        error_record = ErrorLogRecord(
+            ts=datetime.utcnow(),
+            user_id=user_id,
+            username=user.username,
+            corr_id=corr_id,
+            job_id="",
+            model=order.model,
+            size=order.size,
+            status_code=exc.status_code,
+            error_type="model_unavailable",
+            error_msg_short=_shorten(str(exc)),
+            refunded=refunded,
+            preflight_blocked=False,
+            preflight_reason=preflight.reason or "",
+            auto_sanitized=preflight.auto_sanitized,
+            sanitized_prompt=order.prompt,
+            error_scope=preflight.scope or "model_unavailable",
+            error_json=(exc.provider_message or ""),
+            stage="submit",
+        )
+        sheet_ok = await db.log_error_record(error_record)
+        await error_reporter.report(
+            error_record,
+            context="model_unavailable",
+            extra={
+                "gsheets_ok": sheet_ok,
+                "provider": provider_key,
+                "refunded": refunded,
+            },
+        )
+        message_text = (
+            f"Sora недоступна для вашего ключа/проекта (“{str(exc)}”). "
+            "Проверьте доступ к модели в OpenAI Models или используйте другой провайдер. "
+            "Кредиты возвращены."
+        )
+        await callback.message.answer(message_text)
+        log_event(
+            level="ERROR",
+            event="error",
+            corr_id=corr_id,
+            user_id=user_id,
+            username=user.username,
+            model=order.model,
+            provider=provider_key,
+            size=order.size,
+            credits_cost=credits_cost,
+            error_type="model_unavailable",
+            error_msg_short=_shorten(str(exc)),
+            prompt=order.prompt,
+            gsheets_ok=sheet_ok,
+            refund_done=refunded,
+        )
+        log_event(
+            level="INFO",
+            event="refund",
+            corr_id=corr_id,
+            user_id=user_id,
+            username=user.username,
+            model=order.model,
+            provider=provider_key,
+            size=order.size,
+            credits_cost=credits_cost,
+            refund_done=refunded,
+        )
+
+        fallback_mode = os.getenv("SORA_FALLBACK", "").strip().lower()
+        if fallback_mode == "veo":
+            fallback_model = config.gemini_model_video or config.default_video_model
+            fallback_settings = dict(provider_settings or {})
+            fallback_settings["model"] = fallback_model
+            try:
+                await job_queue.submit(
+                    user_id=user_id,
+                    prompt=order.prompt,
+                    size=order.size,
+                    model=fallback_model,
+                    corr_id=corr_id,
+                    image_file_id=order.image_file_id,
+                    username=user.username,
+                    provider="veo",
+                    settings=fallback_settings or None,
+                    credits_cost=0,
+                    original_prompt=original_prompt,
+                    sanitized_prompt=order.prompt,
+                    auto_sanitized=preflight.auto_sanitized,
+                    preflight_reason=preflight.reason,
+                    preflight_scope=preflight.scope,
+                    idempotency_key=idempotency_key,
+                    content_type=order.category,
+                )
+                await callback.message.answer(
+                    "Автоматически запускаем Veo в качестве фоллбека."
+                )
+            except ProviderAPIError as fallback_error:
+                log.warning(
+                    "Veo fallback failed corr_id=%s status=%s error_type=%s message=%s",
+                    corr_id,
+                    fallback_error.status_code,
+                    fallback_error.error_type,
+                    fallback_error,
+                )
+            except Exception:  # pragma: no cover - defensive
+                log.exception("Unexpected error during Veo fallback submission")
         return
     except ProviderAPIError as exc:
         log.warning(
