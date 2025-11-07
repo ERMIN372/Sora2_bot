@@ -65,6 +65,10 @@ VIDEO_TASK_CREATE = "video_create"
 VIDEO_TASK_REMIX = "video_remix"
 VIDEO_TASK_RETRIEVE = "video_retrieve"
 VIDEO_TASK_DOWNLOAD = "video_download"
+ASSET_TASK_RETRIEVE = "asset_retrieve"
+IMAGE_TASK_RETRIEVE = "image_retrieve"
+ASSET_KIND_VIDEO = "video"
+ASSET_KIND_IMAGE = "image"
 
 _DOWNLOAD_MAX_ATTEMPTS = 3
 
@@ -390,7 +394,8 @@ class PendingJob:
     auto_sanitized: bool = False
     preflight_reason: Optional[str] = None
     preflight_scope: Optional[str] = None
-    task_type: str = VIDEO_TASK_RETRIEVE
+    task_type: str = ASSET_TASK_RETRIEVE
+    asset_kind: str = ASSET_KIND_VIDEO
     provider_job_id: Optional[str] = None
     video_id: Optional[str] = None
     asset_id: Optional[str] = None
@@ -940,6 +945,7 @@ class JobQueue:
             operation_name=operation_name,
         )
         await self._db.create_job(record)
+        asset_kind = ASSET_KIND_IMAGE if content_type_value == "image" else ASSET_KIND_VIDEO
         await self.enqueue(
             job_id=job_id,
             user_id=user_id,
@@ -954,7 +960,8 @@ class JobQueue:
             auto_sanitized=auto_sanitized,
             preflight_reason=preflight_reason,
             preflight_scope=preflight_scope,
-            task_type=VIDEO_TASK_RETRIEVE,
+            task_type=ASSET_TASK_RETRIEVE,
+            asset_kind=asset_kind,
             provider_job_id=submission.job_id,
             video_id=video_id,
         )
@@ -1007,7 +1014,7 @@ class JobQueue:
         video_id: Optional[str] = None,
         idempotency_key: Optional[str] = None,
         content_type: str = "video",
-        task_type: str = VIDEO_TASK_RETRIEVE,
+        task_type: str = ASSET_TASK_RETRIEVE,
         sanitized_prompt: Optional[str] = None,
         original_prompt: Optional[str] = None,
         auto_sanitized: bool = False,
@@ -1023,6 +1030,9 @@ class JobQueue:
         original = original_prompt or prompt
         extras_payload = dict(extra or {})
         existing = await self._db.get_job(job_id)
+        asset_kind = (
+            ASSET_KIND_IMAGE if (content_type or "video").strip().lower() == "image" else ASSET_KIND_VIDEO
+        )
         if existing is not None:
             if extras_payload:
                 existing.extra.update(extras_payload)
@@ -1054,6 +1064,7 @@ class JobQueue:
                 preflight_reason=preflight_reason,
                 preflight_scope=preflight_scope,
                 task_type=task_type,
+                asset_kind=asset_kind,
                 provider_job_id=existing.id,
                 video_id=video_id or existing.video_id,
             )
@@ -1101,6 +1112,7 @@ class JobQueue:
             preflight_reason=preflight_reason,
             preflight_scope=preflight_scope,
             task_type=task_type,
+            asset_kind=asset_kind,
             provider_job_id=job_id,
             video_id=video_id,
         )
@@ -1154,7 +1166,8 @@ class JobQueue:
         auto_sanitized: bool = False,
         preflight_reason: Optional[str] = None,
         preflight_scope: Optional[str] = None,
-        task_type: str = "video_retrieve",
+        task_type: str = ASSET_TASK_RETRIEVE,
+        asset_kind: str = ASSET_KIND_VIDEO,
         provider_job_id: Optional[str] = None,
         video_id: Optional[str] = None,
         asset_id: Optional[str] = None,
@@ -1185,6 +1198,7 @@ class JobQueue:
                 preflight_reason=preflight_reason,
                 preflight_scope=preflight_scope,
                 task_type=task_type,
+                asset_kind=asset_kind,
                 provider_job_id=provider_job_id,
                 video_id=video_id,
                 asset_id=asset_id,
@@ -1196,6 +1210,11 @@ class JobQueue:
     async def _recover_pending_jobs(self) -> None:
         pending = await self._db.list_pending_jobs(limit=100)
         for job in pending:
+            asset_kind = (
+                ASSET_KIND_IMAGE
+                if (job.content_type or "").strip().lower() == "image"
+                else ASSET_KIND_VIDEO
+            )
             await self.enqueue(
                 job_id=job.id,
                 user_id=job.user_id,
@@ -1207,6 +1226,7 @@ class JobQueue:
                 username=job.username,
                 original_prompt=job.prompt,
                 sanitized_prompt=job.prompt,
+                asset_kind=asset_kind,
                 provider_job_id=job.id,
                 video_id=job.video_id,
             )
@@ -1233,10 +1253,13 @@ class JobQueue:
             finally:
                 self._queue.task_done()
 
-    async def _handle_video_retrieve(self, pending: PendingJob) -> None:
+    async def _handle_asset_retrieve(self, pending: PendingJob) -> None:
         provider_hint = pending.provider or ""
         provider_job_id = pending.provider_job_id or pending.job_id
-        task_type = pending.task_type or VIDEO_TASK_RETRIEVE
+        task_type = pending.task_type or ASSET_TASK_RETRIEVE
+        asset_kind = (pending.asset_kind or ASSET_KIND_VIDEO).strip().lower()
+        if asset_kind not in {ASSET_KIND_VIDEO, ASSET_KIND_IMAGE}:
+            asset_kind = ASSET_KIND_VIDEO
         key_mask = self._gemini_key_mask if provider_hint.startswith(("veo", "gemini")) else ""
         self._debug_event(
             "jobs.poll.start",
@@ -1245,15 +1268,17 @@ class JobQueue:
             provider=provider_hint,
             provider_job=provider_job_id,
             task=task_type,
+            asset_kind=asset_kind,
         )
         log.info(
-            "Processing job %s corr_id=%s provider=%s key_mask=%s env=%s task=%s provider_job=%s",
+            "Processing job %s corr_id=%s provider=%s key_mask=%s env=%s task=%s asset_kind=%s provider_job=%s",
             pending.job_id,
             pending.corr_id,
             provider_hint,
             key_mask or "",
             self._environment,
             task_type,
+            asset_kind,
             provider_job_id,
         )
         await self._db.update_job(pending.job_id, "running", video_id=pending.video_id)
@@ -1263,6 +1288,7 @@ class JobQueue:
         job_extra: Dict[str, Any] = {}
         if pending.video_id:
             job_extra["video_id"] = pending.video_id
+        job_extra["asset_kind"] = asset_kind
         asset_label: Optional[str] = None
         tracker: Optional[_OperationTracker] = None
         try:
@@ -1310,7 +1336,11 @@ class JobQueue:
                     exc.error_code,
                     exc,
                 )
-                error_extra = {"provider_message": exc.provider_message, "gemini_key_mask": key_mask or None}
+                error_extra = {
+                    "provider_message": exc.provider_message,
+                    "gemini_key_mask": key_mask or None,
+                    "asset_kind": asset_kind,
+                }
                 self._debug_event(
                     "jobs.poll.error",
                     job_id=pending.job_id,
@@ -1352,7 +1382,8 @@ class JobQueue:
                     auto_sanitized=pending.auto_sanitized,
                     preflight_reason=pending.preflight_reason,
                     preflight_scope=pending.preflight_scope,
-                    task_type=VIDEO_TASK_RETRIEVE,
+                    task_type=pending.task_type or ASSET_TASK_RETRIEVE,
+                    asset_kind=asset_kind,
                     provider_job_id=provider_job_id,
                     video_id=pending.video_id,
                 )
@@ -1396,7 +1427,8 @@ class JobQueue:
                     auto_sanitized=pending.auto_sanitized,
                     preflight_reason=pending.preflight_reason,
                     preflight_scope=pending.preflight_scope,
-                    task_type=VIDEO_TASK_RETRIEVE,
+                    task_type=pending.task_type or ASSET_TASK_RETRIEVE,
+                    asset_kind=asset_kind,
                     provider_job_id=provider_job_id,
                     video_id=pending.video_id,
                 )
@@ -1582,7 +1614,11 @@ class JobQueue:
                         timeout_kind="idle",
                     )
                     return
-            poll_extra: Dict[str, Any] = {"status": result.status, "gemini_key_mask": key_mask or None}
+            poll_extra: Dict[str, Any] = {
+                "status": result.status,
+                "gemini_key_mask": key_mask or None,
+                "asset_kind": asset_kind,
+            }
             if pending.video_id:
                 poll_extra["video_id"] = pending.video_id
             if progress_value is not None:
@@ -1626,7 +1662,10 @@ class JobQueue:
                 )
                 if primary_asset:
                     job_extra.setdefault("primary_asset", primary_asset)
-                done_extra: Dict[str, Any] = {"assets": list(result.assets.keys())}
+                done_extra: Dict[str, Any] = {
+                    "assets": list(result.assets.keys()),
+                    "asset_kind": asset_kind,
+                }
                 if assets_meta:
                     done_extra["assets_meta"] = assets_meta
                 if primary_asset:
@@ -1688,14 +1727,15 @@ class JobQueue:
                     gsheets_ok=gsheets_ok,
                     extra=done_extra,
                 )
-                await self._schedule_video_download(
-                    pending,
-                    provider_key=provider_key,
-                    client=client,
-                    primary_asset=primary_asset,
-                    assets_meta=assets_meta,
-                    result=result,
-                )
+                if asset_kind == ASSET_KIND_VIDEO:
+                    await self._schedule_video_download(
+                        pending,
+                        provider_key=provider_key,
+                        client=client,
+                        primary_asset=primary_asset,
+                        assets_meta=assets_meta,
+                        result=result,
+                    )
                 await self._release_gate(pending, reason="success", status="completed")
             elif result.status in {"failed", "errored", "stopped"}:
                 self._reset_operation_tracker(pending.job_id)
@@ -1893,7 +1933,8 @@ class JobQueue:
                     auto_sanitized=pending.auto_sanitized,
                     preflight_reason=pending.preflight_reason,
                     preflight_scope=pending.preflight_scope,
-                    task_type=VIDEO_TASK_RETRIEVE,
+                    task_type=ASSET_TASK_RETRIEVE,
+                    asset_kind=ASSET_KIND_VIDEO,
                     provider_job_id=provider_job_id,
                     video_id=pending.video_id,
                 )
@@ -2549,7 +2590,7 @@ class JobQueue:
         await self._release_gate(pending, reason="no_media", status="failed")
 
     async def _process_job(self, pending: PendingJob) -> None:
-        task_type = pending.task_type or VIDEO_TASK_RETRIEVE
+        task_type = pending.task_type or ASSET_TASK_RETRIEVE
         if task_type == VIDEO_TASK_DOWNLOAD:
             await self._handle_video_download(pending)
             return
@@ -2571,7 +2612,7 @@ class JobQueue:
                     "video_id": pending.video_id,
                 },
             )
-        await self._handle_video_retrieve(pending)
+        await self._handle_asset_retrieve(pending)
 
 
 __all__ = ["JobQueue"]

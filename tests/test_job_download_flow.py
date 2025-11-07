@@ -7,7 +7,7 @@ from typing import Any, Dict, List, Optional
 import pytest
 
 from db import GenerationJobRecord
-from jobs import JobQueue, PendingJob
+from jobs import ASSET_KIND_VIDEO, ASSET_TASK_RETRIEVE, JobQueue, PendingJob
 from providers.base import ProviderAPIError, ProviderJobStatus
 
 
@@ -163,12 +163,13 @@ def test_inline_download_marks_job_completed(make_openai_video_config) -> None:
         username="tester",
         original_prompt="make video",
         sanitized_prompt="make video",
-        task_type="video_retrieve",
+        task_type=ASSET_TASK_RETRIEVE,
+        asset_kind=ASSET_KIND_VIDEO,
         provider_job_id="job-1",
         video_id="vid-1",
     )
 
-    _run(job_queue._handle_video_retrieve(pending))
+    _run(job_queue._handle_asset_retrieve(pending))
 
     assert provider.download_calls == ["vid-1"]
     assert db.update_calls[-1][1] == "completed"
@@ -232,12 +233,13 @@ def test_inline_download_failure_refunds(make_openai_video_config) -> None:
         username="tester",
         original_prompt="make video",
         sanitized_prompt="make video",
-        task_type="video_retrieve",
+        task_type=ASSET_TASK_RETRIEVE,
+        asset_kind=ASSET_KIND_VIDEO,
         provider_job_id="job-2",
         video_id="vid-2",
     )
 
-    _run(job_queue._handle_video_retrieve(pending))
+    _run(job_queue._handle_asset_retrieve(pending))
 
     assert provider.download_calls == ["vid-2"]
     assert any(call[1] == "failed_to_download" for call in db.update_calls)

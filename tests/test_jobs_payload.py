@@ -13,7 +13,7 @@ from config import (
     DEFAULT_MARKUP_PCT,
     PricingConfig,
 )
-from jobs import JobQueue, PendingJob
+from jobs import ASSET_KIND_VIDEO, ASSET_TASK_RETRIEVE, JobQueue, PendingJob
 from generation_gate import compute_generation_idempotency_key
 from providers.base import ProviderJobStatus, ProviderJobSubmission
 from services.gemini_key import mask_gemini_key
@@ -361,6 +361,8 @@ def test_process_job_records_inline_payload(monkeypatch, config: Config, fake_db
             model=config.gemini_model_video,
             provider="veo",
             username="tester",
+            task_type=ASSET_TASK_RETRIEVE,
+            asset_kind=ASSET_KIND_VIDEO,
         )
 
         events: list[dict] = []
@@ -414,6 +416,8 @@ def test_process_job_requeues_running_status(monkeypatch, config: Config, fake_d
             model=config.gemini_model_video,
             provider="veo",
             username="tester",
+            task_type=ASSET_TASK_RETRIEVE,
+            asset_kind=ASSET_KIND_VIDEO,
         )
 
         monkeypatch.setattr("jobs.asyncio.sleep", _immediate_sleep)

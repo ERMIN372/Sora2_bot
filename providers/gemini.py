@@ -8,7 +8,6 @@ import io
 import json
 import logging
 import os
-import random
 import re
 import time
 import zipfile
@@ -16,6 +15,7 @@ from collections import defaultdict
 from datetime import datetime
 from fractions import Fraction
 from pathlib import Path
+from hashlib import sha256
 from typing import Any, DefaultDict, Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple
 from uuid import uuid4
 
@@ -28,6 +28,11 @@ if not hasattr(types, "GenerateContentConfig"):
 from config import (
     Config,
     DEBUG_GEMINI,
+    GEMINI_IMAGE_API_VERSION,
+    GEMINI_IMAGE_BACKOFF_BASE_MS,
+    GEMINI_IMAGE_DISABLE_PREDICT,
+    GEMINI_IMAGE_MAX_RETRIES,
+    GEMINI_IMAGE_STRICT_INLINE_ONLY,
     GEMINI_PREDICT_DISABLE_TTL_SEC,
     GEMINI_TRACE,
     GEMINI_TRACE_CURL,
@@ -87,7 +92,40 @@ _TRACE_HISTORY: DefaultDict[str, List[Dict[str, Any]]] = defaultdict(list)
 
 _IMAGE_RETRYABLE_REASONS = {"IMAGE_OTHER", "NO_IMAGE", "STOP"}
 _IMAGE_BLOCK_REASONS = {"IMAGE_SAFETY", "IMAGE_PROHIBITED_CONTENT"}
-_IMAGE_RETRY_DELAYS = (1.5, 3.0)
+_IMAGE_BACKOFF_BASE_SECONDS = max(0.001, GEMINI_IMAGE_BACKOFF_BASE_MS / 1000.0)
+_IMAGE_RETRY_SCHEDULE = tuple(
+    _IMAGE_BACKOFF_BASE_SECONDS * (2 ** index)
+    for index in range(max(0, GEMINI_IMAGE_MAX_RETRIES - 1))
+)
+
+
+_METHOD_ENDPOINT_SUFFIX = {
+    "generate_content": ":generateContent",
+    "generate_images": ":generateImages",
+    "generate_videos": ":generateVideos",
+}
+
+
+def _truncate_text(value: Optional[str], limit: int = 3072) -> Optional[str]:
+    if not value:
+        return value
+    if len(value) <= limit:
+        return value
+    return f"{value[:limit]}…(+{len(value) - limit} chars)"
+
+
+def _extract_safety_categories_list(feedback: Any) -> List[str]:
+    categories: List[str] = []
+    if isinstance(feedback, Mapping):
+        ratings = feedback.get("safety_ratings") or feedback.get("safetyRatings")
+        if isinstance(ratings, list):
+            for entry in ratings:
+                if not isinstance(entry, Mapping):
+                    continue
+                category = entry.get("category") or entry.get("categoryName")
+                if category:
+                    categories.append(str(category))
+    return categories
 
 
 class GeminiImageEmptyError(ProviderAPIError):
@@ -1445,6 +1483,79 @@ class GeminiGenerativeClient(BaseProviderClient):
         target_level = level or (logging.INFO if debug_enabled else logging.DEBUG)
         log.log(target_level, message)
 
+    def _emit_supertrace(
+        self,
+        *,
+        event: str,
+        corr_id: Optional[str],
+        attempt: Optional[int],
+        model: Optional[str],
+        api_version: Optional[str],
+        method: Optional[str],
+        prompt: Optional[str],
+        endpoint: Optional[str] = None,
+        response_id: Optional[str] = None,
+        status_code: Optional[int] = None,
+        duration_ms: Optional[int] = None,
+        finish_reason: Optional[str] = None,
+        safety_categories: Optional[Sequence[str]] = None,
+        inline_count: Optional[int] = None,
+        assets_count: Optional[int] = None,
+        asset_mime: Optional[str] = None,
+        asset_bytes_len: Optional[int] = None,
+        error_type: Optional[str] = None,
+        error_code: Optional[str] = None,
+        provider_message: Optional[str] = None,
+        retry_scheduled_ms: Optional[int] = None,
+        extra: Optional[Mapping[str, Any]] = None,
+    ) -> None:
+        endpoint_label = endpoint or _METHOD_ENDPOINT_SUFFIX.get(
+            (method or "").strip().lower(),
+            f":{method}" if method else None,
+        )
+        payload: Dict[str, Any] = {
+            "ts": datetime.utcnow().isoformat(timespec="milliseconds") + "Z",
+            "event": event,
+            "provider": self.provider_name,
+            "environment": getattr(self, "_environment", ""),
+            "corr_id": corr_id,
+            "model": model,
+            "api_version": api_version,
+            "endpoint": endpoint_label,
+            "method": method,
+            "attempt": attempt,
+            "prompt_hash": sha256(prompt.encode("utf-8")).hexdigest() if prompt else None,
+            "response_id": response_id,
+            "status_code": status_code,
+            "duration_ms": duration_ms,
+            "finish_reason": finish_reason,
+            "safety_categories": list(safety_categories)
+            if safety_categories
+            else None,
+            "inline_count": inline_count,
+            "assets_count": assets_count,
+            "asset_mime": asset_mime,
+            "asset_bytes_len": asset_bytes_len,
+            "error_type": error_type,
+            "error_code": error_code,
+            "provider_message": _truncate_text(provider_message),
+            "retry_scheduled_ms": retry_scheduled_ms,
+        }
+        if extra:
+            for key, value in extra.items():
+                if value not in (None, "", [], {}, ()):  # pragma: no cover - defensive guard
+                    payload[key] = value
+        cleaned = {
+            key: value
+            for key, value in payload.items()
+            if value not in (None, "", [], {}, ())
+        }
+        try:
+            serialised = json.dumps(cleaned, ensure_ascii=False, sort_keys=True)
+        except Exception:  # pragma: no cover - defensive serialisation
+            serialised = str(cleaned)
+        log.info("gemini.supertrace %s", serialised)
+
     @staticmethod
     def _resolve_api_version(
         *, task: str, model: str, api_version: str | None
@@ -1459,7 +1570,12 @@ class GeminiGenerativeClient(BaseProviderClient):
         if requested in {"auto", "default"}:
             requested = ""
 
-        default_version = "v1beta" if task in {"image", "video"} else "v1"
+        if task == "image":
+            default_version = (GEMINI_IMAGE_API_VERSION or "v1beta").strip() or "v1beta"
+        elif task == "video":
+            default_version = "v1beta"
+        else:
+            default_version = "v1"
         if requested:
             # Unknown explicit value – fall back to default to stay operational.
             return default_version
@@ -1847,28 +1963,8 @@ class GeminiGenerativeClient(BaseProviderClient):
         contents = payload.get("contents")
         config = payload.get("config")
         method = force_mode or decision.method
-        predict_target = (
-            decision.task == "image"
-            and isinstance(decision.model, str)
-            and decision.model.lower() == "gemini-2.5-flash-image"
-        )
-        capability = get_predict_capability(decision.model)
-        if predict_target and self._predict_temporarily_blocked():
-            ttl_left = max(0, int((self._predict_block_until or 0) - time.time()))
+        if decision.task == "image":
             method = "generate_content"
-            if DEBUG_GEMINI:
-                log.warning(
-                    "gemini.predict.skip %s",
-                    kv(
-                        model=decision.model,
-                        task=decision.task,
-                        ttl_left=ttl_left,
-                    ),
-                )
-        elif predict_target and capability is False:
-            method = "generate_content"
-        elif predict_target and not force_mode:
-            method = "generate_images"
         prompt_text = prompt
         if contents is None:
             contents = self._build_contents(prompt=prompt, settings=settings)
@@ -2158,37 +2254,27 @@ class GeminiGenerativeClient(BaseProviderClient):
         server_retry_index = 0
         image_retry_count = 0
         force_mode: Optional[str] = None
-        forced_api_version: Optional[str] = None
+        forced_api_version: Optional[str] = (
+            GEMINI_IMAGE_API_VERSION if self._task == "image" else None
+        )
         fallback_to_content = False
         attempted_api_versions: Set[str] = set()
         capability_forced = False
         capability_hint: Optional[bool] = None
-        no_image_streak = 0
+        inline_retry_count = 0
         while attempt <= self._config.request_retries:
             model_override = request_settings.get("model") or self._model
             if (
                 self._task == "image"
                 and isinstance(model_override, str)
-                and model_override.lower() == "gemini-2.5-flash-image"
+                and model_override
             ):
-                capability_hint = get_predict_capability(model_override)
-                if capability_hint is False:
-                    if force_mode != "generate_content":
-                        force_mode = "generate_content"
-                        capability_forced = True
-                        if not forced_api_version:
-                            forced_api_version = "v1beta"
-                        _trace_log(
-                            logging.INFO,
-                            "capability.predict_disabled",
-                            model=model_override,
-                            corr_id=idempotency_key or "",
-                            source="cache",
-                        )
-                elif capability_hint is True and capability_forced:
-                    capability_forced = False
-            else:
-                capability_hint = None
+                capability_forced = True
+                if force_mode != "generate_content":
+                    force_mode = "generate_content"
+                if not forced_api_version:
+                    forced_api_version = GEMINI_IMAGE_API_VERSION
+            capability_hint = None
             try:
                 decision = self._router.route(
                     task=self._task,
@@ -2243,6 +2329,17 @@ class GeminiGenerativeClient(BaseProviderClient):
             request_meta.setdefault("prompt", decision.prompt)
             start = time.monotonic()
             corr_id = idempotency_key or ""
+            self._emit_supertrace(
+                event="gemini_call_start",
+                corr_id=idempotency_key,
+                attempt=attempt + 1,
+                model=decision.model,
+                api_version=decision.api_version
+                or forced_api_version
+                or GEMINI_IMAGE_API_VERSION,
+                method=actual_method,
+                prompt=decision.prompt,
+            )
             if DEBUG_GEMINI:
                 log.info(
                     "gemini.generate start %s",
@@ -2530,7 +2627,6 @@ class GeminiGenerativeClient(BaseProviderClient):
                         finish_code_upper = (
                             finish_reason or finish_code_upper or ""
                         ).upper()
-                        no_image_streak = 0
                         if actual_method == "generate_images":
                             mark_predict_capability(decision.model, True)
                         self._log_debug_event(
@@ -2608,8 +2704,36 @@ class GeminiGenerativeClient(BaseProviderClient):
                             corr_id=idempotency_key,
                             payload=payload_json if isinstance(payload_json, Mapping) else None,
                         )
-                        if finish_code_upper == "NO_IMAGE":
-                            no_image_streak += 1
+                        inline_count = 0
+                        assets_count = 0
+                        safety_categories = _extract_safety_categories_list(safety_feedback)
+                        response_identifier = (
+                            image_error.response_id
+                            or getattr(response, "response_id", None)
+                            or ""
+                        )
+                        finish_label = finish_code_upper or "NO_IMAGE"
+                        self._emit_supertrace(
+                            event="gemini_call",
+                            corr_id=corr_id or idempotency_key,
+                            attempt=attempt + 1,
+                            model=decision.model,
+                            api_version=decision.api_version
+                            or forced_api_version
+                            or GEMINI_IMAGE_API_VERSION,
+                            method=actual_method,
+                            prompt=decision.prompt,
+                            response_id=response_identifier,
+                            status_code=200,
+                            duration_ms=duration_ms,
+                            finish_reason=finish_label,
+                            safety_categories=safety_categories,
+                            inline_count=inline_count,
+                            assets_count=assets_count,
+                        )
+                        treat_as_empty = (finish_label == "NO_IMAGE") or GEMINI_IMAGE_STRICT_INLINE_ONLY
+                        if treat_as_empty and not safety_block:
+                            inline_retry_count += 1
                             increment_metric(
                                 "gemini_no_image_total",
                                 tags={"model": str(decision.model)},
@@ -2627,7 +2751,7 @@ class GeminiGenerativeClient(BaseProviderClient):
                                 version=decision.api_version or "",
                                 latency_ms=duration_ms,
                                 attempt=attempt + 1,
-                                retry=image_retry_count,
+                                retry=inline_retry_count,
                                 prompt_chars=summary["prompt_chars"],
                                 assets=summary["asset_count"],
                                 inline_refs=summary["inline_refs"],
@@ -2641,7 +2765,7 @@ class GeminiGenerativeClient(BaseProviderClient):
                                     version=decision.api_version or "",
                                     latency_ms=duration_ms,
                                     attempt=attempt + 1,
-                                    retry=image_retry_count,
+                                    retry=inline_retry_count,
                                     prompt_chars=summary["prompt_chars"],
                                     assets=summary["asset_count"],
                                     inline_refs=summary["inline_refs"],
@@ -2654,59 +2778,83 @@ class GeminiGenerativeClient(BaseProviderClient):
                                 payload_json if isinstance(payload_json, Mapping) else {},
                                 headers=headers,
                                 response=response,
-                                finish=finish_code_upper,
+                                finish=finish_label,
                                 safety_feedback=safety_feedback,
                                 error=image_error,
                                 duration_ms=duration_ms,
                                 corr_id=corr_id,
                             )
-                            if not safety_block:
-                                if no_image_streak == 1:
-                                    image_retry_count = 0
-                                    continue
-                                if no_image_streak == 2:
-                                    jitter = random.uniform(0.3, 0.8)
-                                    await asyncio.sleep(jitter)
-                                    image_retry_count = 0
-                                    continue
-                                provider_text = provider_message or image_error.message
-                                no_image_error = ProviderAPIError(
-                                    provider=self.provider_name,
-                                    status_code=503,
-                                    message="Изображение не готово, попробуй ещё раз чуть позже.",
-                                    error_type="provider_unavailable",
-                                    provider_message=provider_text,
-                                    retryable=False,
-                                    duration_ms=duration_ms,
+                            max_inline_attempts = max(1, GEMINI_IMAGE_MAX_RETRIES)
+                            if inline_retry_count < max_inline_attempts:
+                                schedule_index = inline_retry_count - 1
+                                if schedule_index < len(_IMAGE_RETRY_SCHEDULE):
+                                    delay_seconds = _IMAGE_RETRY_SCHEDULE[schedule_index]
+                                else:
+                                    delay_seconds = _IMAGE_BACKOFF_BASE_SECONDS * (
+                                        2 ** schedule_index
+                                    )
+                                delay_ms = int(delay_seconds * 1000)
+                                self._emit_supertrace(
+                                    event="gemini_retry",
+                                    corr_id=corr_id or idempotency_key,
+                                    attempt=attempt + 1,
+                                    model=decision.model,
+                                    api_version=decision.api_version
+                                    or forced_api_version
+                                    or GEMINI_IMAGE_API_VERSION,
+                                    method=actual_method,
+                                    prompt=decision.prompt,
+                                    response_id=response_identifier,
+                                    status_code=200,
+                                    finish_reason=finish_label,
+                                    safety_categories=safety_categories,
+                                    inline_count=inline_count,
+                                    assets_count=assets_count,
+                                    retry_scheduled_ms=delay_ms,
                                 )
-                                setattr(no_image_error, "finish_reason", finish_code_upper or "NO_IMAGE")
-                                setattr(no_image_error, "corr_id", corr_id)
-                                raise no_image_error from image_error
-                        else:
-                            no_image_streak = 0
-                        if (
-                            actual_method == "generate_images"
-                            and not safety_block
-                            and not fallback_to_content
-                        ):
-                            log.warning(
-                                "gemini.image.empty -> fallback: switching method generate_images -> generate_content; reason=%s",
-                                finish_code_upper or "NO_IMAGE",
+                                await asyncio.sleep(delay_seconds)
+                                image_retry_count = 0
+                                continue
+                            provider_text = provider_message or image_error.message
+                            no_image_error = ProviderAPIError(
+                                provider=self.provider_name,
+                                status_code=503,
+                                message=
+                                "Модель не вернула изображение. Такое бывает при перегрузке. "
+                                "Попробуй ещё раз или переформулируй запрос.",
+                                error_type="provider_unavailable",
+                                provider_message=provider_text,
+                                retryable=False,
+                                duration_ms=duration_ms,
                             )
-                            self._log_debug_event(
-                                "gemini.fallback",
-                                {
-                                    "from": "generate_images",
-                                    "to": "generate_content",
-                                    "finish_code": finish_code_upper or "",
-                                    "reason": "empty_image",
-                                },
+                            setattr(
+                                no_image_error,
+                                "finish_reason",
+                                finish_label or "NO_IMAGE",
                             )
-                            force_mode = "generate_content"
-                            fallback_to_content = True
-                            image_retry_count = 0
-                            no_image_streak = 0
-                            continue
+                            setattr(no_image_error, "corr_id", corr_id)
+                            self._emit_supertrace(
+                                event="gemini_call_error",
+                                corr_id=corr_id or idempotency_key,
+                                attempt=attempt + 1,
+                                model=decision.model,
+                                api_version=decision.api_version
+                                or forced_api_version
+                                or GEMINI_IMAGE_API_VERSION,
+                                method=actual_method,
+                                prompt=decision.prompt,
+                                response_id=response_identifier,
+                                status_code=503,
+                                duration_ms=duration_ms,
+                                finish_reason=finish_label,
+                                safety_categories=safety_categories,
+                                inline_count=inline_count,
+                                assets_count=assets_count,
+                                error_type="provider_unavailable",
+                                provider_message=provider_text,
+                            )
+                            raise no_image_error from image_error
+                        inline_retry_count = 0
                         if safety_block or finish_code_upper in _IMAGE_BLOCK_REASONS:
                             increment_metric(
                                 "gemini_safety_blocks_total",
@@ -2727,34 +2875,27 @@ class GeminiGenerativeClient(BaseProviderClient):
                                 provider_message=provider_message or image_error.message,
                                 retryable=False,
                             ) from image_error
-                        retriable = (
-                            finish_code_upper in _IMAGE_RETRYABLE_REASONS or not finish_code_upper
+                        provider_text = provider_message or image_error.message
+                        self._emit_supertrace(
+                            event="gemini_call_error",
+                            corr_id=corr_id or idempotency_key,
+                            attempt=attempt + 1,
+                            model=decision.model,
+                            api_version=decision.api_version
+                            or forced_api_version
+                            or GEMINI_IMAGE_API_VERSION,
+                            method=actual_method,
+                            prompt=decision.prompt,
+                            response_id=response_identifier,
+                            status_code=503,
+                            duration_ms=duration_ms,
+                            finish_reason=finish_code_upper or "",
+                            safety_categories=safety_categories,
+                            inline_count=inline_count,
+                            assets_count=assets_count,
+                            error_type="provider_unavailable",
+                            provider_message=provider_text,
                         )
-                        if (
-                            actual_method == "generate_images"
-                            and retriable
-                            and image_retry_count < len(_IMAGE_RETRY_DELAYS)
-                        ):
-                            retry_delay = _IMAGE_RETRY_DELAYS[image_retry_count]
-                            image_retry_count += 1
-                            log.warning(
-                                "Retrying Gemini image request finish_reason=%s delay_ms=%s attempt=%s/%s",
-                                finish_code_upper or "",
-                                int(retry_delay * 1000),
-                                image_retry_count,
-                                len(_IMAGE_RETRY_DELAYS),
-                            )
-                            self._log_debug_event(
-                                "gemini.retry",
-                                {
-                                    "reason": finish_code_upper or "",
-                                    "delay_ms": int(retry_delay * 1000),
-                                    "attempt": image_retry_count,
-                                    "max_attempts": len(_IMAGE_RETRY_DELAYS),
-                                },
-                            )
-                            await asyncio.sleep(retry_delay)
-                            continue
                         raise ProviderAPIError(
                             provider=self.provider_name,
                             status_code=503,
@@ -2763,7 +2904,7 @@ class GeminiGenerativeClient(BaseProviderClient):
                                 "Попробуй ещё раз или переформулируй запрос."
                             ),
                             error_type="provider_unavailable",
-                            provider_message=provider_message or image_error.message,
+                            provider_message=provider_text,
                             retryable=False,
                         ) from image_error
                     else:
@@ -2789,6 +2930,47 @@ class GeminiGenerativeClient(BaseProviderClient):
                             len(inline_assets),
                             (finish_reason or "") or "",
                             response_id or "",
+                        )
+                        first_inline_asset = (
+                            inline_assets[0] if inline_assets else {}
+                        )
+                        inline_bytes_value = (
+                            first_inline_asset.get("bytes")
+                            if isinstance(first_inline_asset, Mapping)
+                            else None
+                        )
+                        asset_bytes_len: Optional[int]
+                        try:
+                            asset_bytes_len = int(inline_bytes_value) if inline_bytes_value is not None else None
+                        except (TypeError, ValueError):
+                            asset_bytes_len = None
+                        asset_mime = (
+                            first_inline_asset.get("mime")
+                            if isinstance(first_inline_asset, Mapping)
+                            else None
+                        )
+                        safety_categories = _extract_safety_categories_list(
+                            safety_feedback
+                        )
+                        self._emit_supertrace(
+                            event="gemini_call",
+                            corr_id=idempotency_key or response_id,
+                            attempt=attempt + 1,
+                            model=decision.model,
+                            api_version=decision.api_version
+                            or forced_api_version
+                            or GEMINI_IMAGE_API_VERSION,
+                            method=actual_method,
+                            prompt=decision.prompt,
+                            response_id=response_id,
+                            status_code=200,
+                            duration_ms=duration_ms,
+                            finish_reason=(finish_reason or "") or finish_code_upper or "",
+                            safety_categories=safety_categories,
+                            inline_count=len(inline_assets),
+                            assets_count=len(asset_map),
+                            asset_mime=str(asset_mime) if asset_mime else None,
+                            asset_bytes_len=asset_bytes_len,
                         )
                         if DEBUG_GEMINI:
                             total_bytes = sum(
@@ -2980,7 +3162,6 @@ class GeminiGenerativeClient(BaseProviderClient):
                     corr_id=idempotency_key or job_id,
                     payload=payload_json,
                 )
-                no_image_streak = 0
                 metric_tags = {
                     "model": str(decision.model),
                     "method": actual_method,
@@ -3065,6 +3246,22 @@ class GeminiGenerativeClient(BaseProviderClient):
                     exc,
                     duration_ms=duration_ms,
                     decision=decision,
+                )
+                self._emit_supertrace(
+                    event="gemini_call_error",
+                    corr_id=idempotency_key,
+                    attempt=attempt + 1,
+                    model=decision.model,
+                    api_version=decision.api_version
+                    or forced_api_version
+                    or GEMINI_IMAGE_API_VERSION,
+                    method=actual_method,
+                    prompt=decision.prompt,
+                    status_code=provider_error.status_code,
+                    duration_ms=duration_ms,
+                    error_type=provider_error.error_type,
+                    error_code=error_code or provider_error.error_code,
+                    provider_message=provider_error.provider_message,
                 )
                 error_metric_tags = {
                     "model": str(decision.model),
@@ -3284,6 +3481,22 @@ class GeminiGenerativeClient(BaseProviderClient):
                     exc,
                     duration_ms=duration_ms,
                     decision=decision,
+                )
+                self._emit_supertrace(
+                    event="gemini_call_error",
+                    corr_id=idempotency_key,
+                    attempt=attempt + 1,
+                    model=decision.model,
+                    api_version=decision.api_version
+                    or forced_api_version
+                    or GEMINI_IMAGE_API_VERSION,
+                    method=actual_method,
+                    prompt=decision.prompt,
+                    status_code=provider_error.status_code,
+                    duration_ms=duration_ms,
+                    error_type=provider_error.error_type,
+                    error_code=error_code or provider_error.error_code,
+                    provider_message=provider_error.provider_message,
                 )
                 error_metric_tags = {
                     "model": str(decision.model),
