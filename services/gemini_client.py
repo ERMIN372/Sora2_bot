@@ -6,7 +6,7 @@ import os
 import threading
 from typing import Dict, Tuple
 
-from google import genai
+from google import genai  # type: ignore[import-untyped]
 from google.genai import types
 
 from config import Config, RoutingCfg

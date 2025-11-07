@@ -3,9 +3,54 @@
 ## Обзор проекта
 Телеграм-бот для генерации видео с использованием Gemini API, Sora и других AI провайдеров.
 
-## Последние изменения (01.11.2025)
+## Последние изменения
 
-### Настройка окружения
+### Критическое исправление загрузки моделей Gemini (07.11.2025)
+**Проблема**: Бот не запускался - модель `gemini-2.5-flash-image` не обнаруживалась. Загружалось только 20 моделей из `/v1/models` вместо 132 из `/v1beta/models`.
+
+**Корневая причина**: В `providers/gemini.py` метод `_resolve_api_version()` содержал логику:
+```python
+if task == "image" and model_name.endswith("-image"):
+    return "v1"  # ❌ НЕПРАВИЛЬНО! Модели -image находятся в v1beta
+```
+
+**Решение**:
+1. Удалена ошибочная проверка `model_name.endswith("-image")`
+2. Для `task="image"` теперь всегда используется `v1beta`
+3. Исправлены LSP ошибки (type: ignore комментарии)
+
+**Результат**:
+- ✅ 132 модели загружено (было 20)
+- ✅ `gemini-2.5-flash-image` доступна
+- ✅ Бот успешно запускается
+- ✅ Webhook работает
+
+**Местоположение**: `providers/gemini.py` строки 654-675
+
+### Расширенное детальное логирование Gemini API (06.11.2025)
+**Цель**: Отладка 404 "Result not found" и 200 "Модель не вернула результат"
+
+**Добавлено логирование Submit (создание задачи)**:
+1. `gemini.submit.response` - тип response, ключи payload, размер, latency
+2. `gemini.submit.payload` - полный JSON payload от Gemini API (до 5000 символов, DEBUG level)
+3. `gemini.submit.saved_record` - подтверждение сохранения pending record в памяти
+
+**Добавлено логирование Poll (получение результата)**:
+4. `gemini.poll.start` - начало poll, проверка наличия record в памяти
+5. `gemini.poll.memory_miss` - если record не найден в памяти, загрузка из файла
+6. `gemini.poll.not_found` - когда pending record не найден (404 ошибка)
+7. `gemini.poll.record_found` - успешное получение record с status_code и duration
+
+**Как использовать**: 
+При следующей ошибке проверьте логи на наличие:
+- `gemini.submit.response` - что Gemini вернул при создании
+- `gemini.submit.saved_record` - был ли record сохранён
+- `gemini.poll.start` - был ли record в памяти при poll
+- `gemini.poll.not_found` - почему record не найден
+
+**Местоположение**: `providers/gemini.py` строки 1019-1073, 1427-1464
+
+### Настройка окружения (01.11.2025)
 - **Python версия**: 3.11
 - **Режим работы**: polling (по умолчанию)
 - **Workflow**: `telegram-bot` - запускает `python main.py --mode polling`

@@ -14,7 +14,7 @@ from fractions import Fraction
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple
 from uuid import uuid4
 
-from google import genai
+from google import genai  # type: ignore[import-untyped]
 from google.genai import errors as genai_errors, types
 
 from config import Config, SafetyCfg
@@ -669,9 +669,6 @@ class GeminiGenerativeClient(BaseProviderClient):
             # Unknown explicit value – fall back to default to stay operational.
             return default_version
 
-        model_name = (model or "").strip().lower()
-        if task == "image" and model_name.endswith("-image"):
-            return "v1"
         return default_version
 
     def _resolve_base_url(self, config: Config) -> str:
@@ -1885,7 +1882,7 @@ class GeminiGenerativeClient(BaseProviderClient):
             payload_json: Dict[str, Any] = {}
             meta: Dict[str, Any] = {}
             if pending_record:
-                stored_payload, _, _, stored_meta = pending_record
+                stored_payload, status_code, duration_ms, stored_meta = pending_record  # type: ignore[misc]
                 if isinstance(stored_payload, dict):
                     payload_json = stored_payload
                 if isinstance(stored_meta, dict):
