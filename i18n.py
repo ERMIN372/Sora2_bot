@@ -111,7 +111,7 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
             "💳 Оплата и кредиты  \n"
             "• OpenAI Sora 2 — 80 ₽ за видео  \n"
             "• veo3 — 89 ₽ за видео  \n"
-            "• Фото: Nano Banana (Gemini 2.5 Flash Image) или DALL·E 3 — 5 ₽ за 1 изображение  \n"
+            "• Фото: Nano Banana или DALL·E 3 — 5 ₽ за 1 изображение  \n"
             "• Пополнение: 100₽ (0%), 300₽ (+5%), 700₽ (+8%), 1500₽ (+12%), 3000₽ (+15%) — YooKassa, бонус начисляется автоматически.\n\n"
             "🔁 Статусы  \n"
             "После запуска увидите: «заказ принят», затем «генерирую…», по готовности пришлём ролик.  \n"
@@ -225,7 +225,7 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "image.mode.text": "По тексту",
         "image.mode.photo": "По фото",
         "image.models.prompt": "Выберите модель генерации фото:",
-        "image.model.gemini": "Nano Banana (gemini-2.5-flash-image) — 5 ₽ за 1 изображение",
+        "image.model.gemini": "Nano Banana — 5 ₽ за 1 изображение",
         "image.model.dalle3": "DALL·E 3 — 5 ₽ за 1 изображение",
         "image.model.unavailable": "недоступно",
         "video.prompt.text": (
