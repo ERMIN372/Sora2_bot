@@ -41,7 +41,7 @@ from services.rate_limiter import AsyncRateLimiter
 log = logging.getLogger(__name__)
 
 BASE_URL = "https://api.openai.com/v1"
-ENDPOINT = f"{BASE_URL}/responses"
+ENDPOINT = f"{BASE_URL}/videos"
 
 _DEBUG_SORA_ENABLED_DEFAULT = bool(DEBUG_SORA)
 _DEBUG_PREVIEW_LIMIT = 3072
@@ -268,24 +268,23 @@ async def _has_model(
 
 
 class SoraVideoClient(BaseProviderClient):
-    """Thin wrapper around OpenAI's Responses API for Sora generation."""
+    """Thin wrapper around OpenAI's Videos API for Sora generation."""
 
     def __init__(self, *, config: Config) -> None:
         api_key = config.openai_key
         if not api_key:
             raise RuntimeError("Sora API key is not configured; set SORA_API_KEY or OPENAI_API_KEY")
         base_url = (config.openai_api_base or "https://api.openai.com").rstrip("/")
-        raw_version = (config.openai_api_version_video or "v1beta").strip().strip("/")
+        raw_version = (config.openai_api_version_video or "v1").strip().strip("/")
         if not raw_version:
-            raw_version = "v1beta"
+            raw_version = "v1"
         normalised_version = raw_version.lower()
-        if normalised_version not in {"v1", "v1beta"}:
+        if normalised_version != "v1":
             log.warning(
-                "Unsupported Sora API version requested=%s; falling back to v1beta",
+                "Unsupported Sora API version requested=%s; forcing v1 for videos endpoint",
                 raw_version,
             )
-            normalised_version = "v1beta"
-        api_version = "v1beta" if normalised_version == "v1beta" else "v1"
+        api_version = "v1"
         beta_header = (config.openai_beta_header or "video=1").strip()
         default_headers: Dict[str, str] = {}
         if beta_header:
@@ -410,15 +409,15 @@ class SoraVideoClient(BaseProviderClient):
         return segments, endpoint, url
 
     def responses_url(self) -> str:
-        """Return the fully-qualified Responses API URL used for Sora."""
+        """Return the fully-qualified Videos API URL used for Sora."""
 
-        _, _, url = self._resolve_target(self._build_endpoint_segments("responses"))
+        _, _, url = self._resolve_target(self._build_endpoint_segments("videos"))
         return url
 
     def responses_path(self) -> str:
-        """Return the relative Responses API path used for Sora."""
+        """Return the relative Videos API path used for Sora."""
 
-        return self._endpoint_path("responses")
+        return self._endpoint_path("videos")
 
     def _log_debug(self, event: str, payload: Dict[str, Any]) -> None:
         if not self._debug_enabled:
@@ -468,7 +467,7 @@ class SoraVideoClient(BaseProviderClient):
             settings=settings,
             payload=payload or {},
         )
-        endpoint_segments = self._build_endpoint_segments("responses")
+        endpoint_segments = self._build_endpoint_segments("videos")
         endpoint = "/" + "/".join(endpoint_segments)
         url = _join_url(self._base_url, *endpoint_segments)
         serialised_payload = _serialise_for_log(request_payload, limit=2048)
@@ -535,7 +534,7 @@ class SoraVideoClient(BaseProviderClient):
             status_code = 200
             duration_ms = 0
         else:
-            endpoint_segments = self._build_endpoint_segments("responses", job_id)
+            endpoint_segments = self._build_endpoint_segments("videos", job_id)
             endpoint = "/" + "/".join(endpoint_segments)
             url = _join_url(self._base_url, *endpoint_segments)
             log.debug("Sora request: url=%s, payload=%s", url, "")
@@ -607,71 +606,29 @@ class SoraVideoClient(BaseProviderClient):
         else:
             prompt_text = prompt
         model_name = (settings.get("model") or self._default_model or "sora").strip()
-        content: list[Dict[str, Any]] = [
-            {"type": "input_text", "text": prompt_text},
-        ]
-        reference_url = settings.get("reference_image_url") or settings.get("reference_url")
-        if isinstance(reference_url, str) and reference_url.strip():
-            content.append(
-                {
-                    "type": "input_image",
-                    "image_url": {"url": reference_url.strip()},
-                }
-            )
-        reference_file = settings.get("reference_file_id") or settings.get("image_file_id")
-        if isinstance(reference_file, str) and reference_file.strip():
-            content.append(
-                {
-                    "type": "input_image",
-                    "image_file": {"file_id": reference_file.strip()},
-                }
-            )
-        inline_data = settings.get("reference_inline_data")
-        if isinstance(inline_data, dict):
-            encoded = inline_data.get("data") or inline_data.get("base64")
-            if isinstance(encoded, str) and encoded.strip():
-                entry: Dict[str, Any] = {"type": "input_image", "image_base64": encoded.strip()}
-                mime = inline_data.get("mime_type") or inline_data.get("mime")
-                if isinstance(mime, str) and mime:
-                    entry["mime_type"] = mime
-                content.append(entry)
-        if payload.get("content") and isinstance(payload["content"], list):
-            for item in payload["content"]:
-                if isinstance(item, dict):
-                    content.append(item)
         request: Dict[str, Any] = {
             "model": model_name,
-            "input": [
-                {
-                    "role": "user",
-                    "content": content,
-                }
-            ],
+            "prompt": prompt_text,
         }
-        metadata: Dict[str, Any] = {}
-        aspect_ratio = (
-            settings.get("aspect_ratio")
-            or cleaned_payload.get("aspect_ratio")
-            or _infer_aspect_ratio(str(settings.get("size") or ""))
-        )
-        if aspect_ratio:
-            metadata["aspect_ratio"] = aspect_ratio
+        size_value = settings.get("size") or cleaned_payload.get("size")
+        if isinstance(size_value, str) and size_value.strip():
+            request["size"] = size_value.strip()
         duration = (
-            settings.get("duration")
+            settings.get("seconds")
+            or cleaned_payload.get("seconds")
+            or settings.get("duration")
             or settings.get("duration_sec")
             or settings.get("duration_seconds")
             or cleaned_payload.get("duration_sec")
+            or cleaned_payload.get("duration_seconds")
         )
+        seconds_text: Optional[str] = None
         if isinstance(duration, (int, float)) and duration > 0:
-            metadata["duration_sec"] = str(int(duration))
-        elif isinstance(duration, str) and duration.isdigit():
-            metadata["duration_sec"] = str(int(duration))
-        if cleaned_payload.get("format"):
-            metadata["format"] = cleaned_payload["format"]
-        if cleaned_payload.get("seed") is not None:
-            metadata["seed"] = cleaned_payload["seed"]
-        if metadata:
-            request["metadata"] = metadata
+            seconds_text = str(int(duration))
+        elif isinstance(duration, str) and duration.strip():
+            seconds_text = duration.strip()
+        if seconds_text:
+            request["seconds"] = seconds_text
         return request
 
     async def _request(
@@ -693,9 +650,13 @@ class SoraVideoClient(BaseProviderClient):
         log.debug("Sora request: url=%s, payload=%s", url, payload_preview)
 
         headers = self._build_headers()
+        headers.pop("OpenAI-Version", None)
+        headers.pop("openai-version", None)
         if idempotency_key:
             headers.setdefault("Idempotency-Key", idempotency_key)
         headers.update(extra_headers)
+        headers.pop("OpenAI-Version", None)
+        headers.pop("openai-version", None)
         safe_headers = _sanitize_headers(dict(headers))
 
         attempt = 0
@@ -769,6 +730,11 @@ class SoraVideoClient(BaseProviderClient):
                     and isinstance(error_message_text, str)
                     and "Model not found" in error_message_text
                 ):
+                    log.warning(
+                        "sora.enqueue failure reason=no_access_or_wrong_endpoint status=%s message=%s",
+                        exc.status_code,
+                        error_message_text,
+                    )
                     raise ModelUnavailable(
                         error_message_text,
                         provider=self.provider_name,
@@ -1207,7 +1173,7 @@ class SoraVideoClient(BaseProviderClient):
 
 
 async def sora_self_test(config: Config) -> Tuple[str, Dict[str, Any]]:
-    """Execute a minimal self-test request against the Sora Responses API."""
+    """Execute a minimal self-test request against the Sora Videos API."""
 
     client = SoraVideoClient(config=config)
     payload = client._build_request_payload(  # type: ignore[attr-defined]
@@ -1215,11 +1181,7 @@ async def sora_self_test(config: Config) -> Tuple[str, Dict[str, Any]]:
         settings={"model": client._default_model, "duration": 1},
         payload={},
     )
-    metadata = payload.setdefault("metadata", {})
-    if isinstance(metadata, dict):
-        metadata.setdefault("max_output_tokens", "1")
-        metadata.setdefault("test_prompt", "ping")
-    target_segments = client._build_endpoint_segments("responses")
+    target_segments = client._build_endpoint_segments("videos")
     url = _join_url(client._base_url, *target_segments)
     log.info("sora.self_test.start url=%s", url)
     try:

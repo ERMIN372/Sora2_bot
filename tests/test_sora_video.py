@@ -1,4 +1,5 @@
 import asyncio
+import logging
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -37,16 +38,33 @@ def test_enqueue_job_builds_payload(sora_config: Config) -> None:
             mock_request.assert_awaited_once()
             call_args = mock_request.await_args
             assert call_args.args[0] == "POST"
-            assert call_args.args[1] == ("v1", "responses")
+            assert call_args.args[1] == ("v1", "videos")
             payload = call_args.kwargs["json"]
             assert payload["model"] == "sora-2"
-            assert payload["input"][0]["content"][0]["text"] == "Make a cool video"
-            assert "modalities" not in payload
-            assert "tools" not in payload
-            assert "tool_choice" not in payload
-            assert "response_format" not in payload
-            assert payload["metadata"]["aspect_ratio"] == "16:9"
-            assert payload["metadata"]["duration_sec"] == "6"
+            assert payload["prompt"] == "Make a cool video"
+            assert payload["size"] == "1280x720"
+            assert payload["seconds"] == "6"
+            assert "input" not in payload
+
+    asyncio.run(scenario())
+
+
+def test_enqueue_job_logs_endpoint(sora_config: Config, caplog: pytest.LogCaptureFixture) -> None:
+    client = SoraVideoClient(config=sora_config)
+
+    async def scenario() -> None:
+        with patch.object(
+            client,
+            "_request",
+            new=AsyncMock(return_value=({"id": "vid_123", "status": "queued"}, 200, 30)),
+        ):
+            with caplog.at_level(logging.INFO):
+                submission = await client.enqueue_job(
+                    prompt="Render a scene",
+                    settings={},
+                )
+        assert submission.job_id == "vid_123"
+        assert any("endpoint=/v1/videos" in message for message in caplog.messages)
 
     asyncio.run(scenario())
 
@@ -120,7 +138,7 @@ def test_get_job_status_fetches_remote(sora_config: Config) -> None:
             assert status.status == "failed"
             assert status.error == "bad"
             assert status.status_code == 500
-            mock_request.assert_awaited_once_with("GET", ("v1", "responses", "resp-3"))
+            mock_request.assert_awaited_once_with("GET", ("v1", "videos", "resp-3"))
 
     asyncio.run(scenario())
 
@@ -144,7 +162,7 @@ def test_request_network_error_raises_friendly_message(sora_config: Config) -> N
             new=AsyncMock(side_effect=network_error),
         ):
             with pytest.raises(ProviderAPIError) as exc_info:
-                await client._request("POST", "/v1/responses", json={})
+                await client._request("POST", "/v1/videos", json={})
 
         error = exc_info.value
         assert error.message == "Sora API временно недоступен, попробуйте позже"

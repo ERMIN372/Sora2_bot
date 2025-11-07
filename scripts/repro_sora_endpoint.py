@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""CLI helper to inspect the configured Sora Responses endpoint."""
+"""CLI helper to inspect the configured Sora Videos endpoint."""
 from __future__ import annotations
 
 import argparse
@@ -25,8 +25,8 @@ async def _compute_endpoint(config) -> Tuple[str, str]:
 async def _run(args: argparse.Namespace) -> int:
     config = load_config()
     url, path = await _compute_endpoint(config)
-    print(f"Responses path: {path}")
-    print(f"Responses URL:  {url}")
+    print(f"Videos path: {path}")
+    print(f"Videos URL:  {url}")
     if "/v1/v1beta/" in url:
         print("\033[91mWARNING:\033[0m suspect misconfigured endpoint (contains /v1/v1beta/)", file=sys.stderr)
         return 2
@@ -38,7 +38,7 @@ async def _run(args: argparse.Namespace) -> int:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Inspect the Sora Responses endpoint configuration.")
+    parser = argparse.ArgumentParser(description="Inspect the Sora Videos endpoint configuration.")
     parser.add_argument(
         "--self-test",
         action="store_true",
