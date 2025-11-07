@@ -4,6 +4,7 @@ from typing import List, Optional
 import pytest
 
 from providers.gemini import (
+    _analyse_empty_image_response,
     _prepare_flash_image_assets,
     _prepare_images_assets,
     GeminiImageEmptyError,
@@ -80,8 +81,30 @@ def test_prepare_images_assets_returns_inline_entries() -> None:
     asset = inline_assets[0]
     assert asset["mime"] == "image/jpeg"
     assert asset["bytes"] == len(image_bytes)
+    assert asset["data_uri"].startswith("data:image/jpeg;base64,")
+    assert asset["data_url"] == asset["data_uri"]
     key = asset["key"]
     assert key in asset_map
     assert key in asset_meta
-    encoded = asset_map[key].split(",", 1)[1]
+    data_uri = asset_map[key]
+    assert data_uri == asset["data_uri"]
+    encoded = data_uri.split(",", 1)[1]
     assert base64.b64decode(encoded) == image_bytes
+
+
+def test_analyse_empty_image_response_without_safety_block() -> None:
+    error = GeminiImageEmptyError(
+        provider="gemini-image",
+        finish_reason="NO_IMAGE",
+        response_id="resp-456",
+        headers=None,
+    )
+    finish_code, provider_message, safety_block = _analyse_empty_image_response(
+        {},
+        response=_DummyResponse("NO_IMAGE"),
+        error=error,
+    )
+
+    assert finish_code == "NO_IMAGE"
+    assert provider_message is None
+    assert safety_block is False
