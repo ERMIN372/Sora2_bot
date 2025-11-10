@@ -968,6 +968,10 @@ def _map_provider_error(error: ProviderAPIError) -> tuple[str, str, bool, str]:
         hint = "rate_limit"
         message = "Превышен лимит. Подождите и повторите."
         short = "Лимит запросов"
+    elif error_type == "timeout_local":
+        message = "Не удалось дождаться ответа от OpenAI, попробуйте ещё раз."
+        short = "Локальный таймаут ожидания"
+        hint = "timeout_local"
     elif status == 400 or "validation" in error_type:
         detail = escape_html(provider_message or (error.args[0] if error.args else ""))
         message = f"Неверные параметры запроса: {detail or 'проверьте входные данные.'}"
