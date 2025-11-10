@@ -27,6 +27,7 @@ from aiogram.types import (
     CallbackQuery,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
+    InputMediaPhoto,
     KeyboardButton,
     Message,
     ReplyKeyboardMarkup,
@@ -70,6 +71,8 @@ from jobs import (
     VIDEO_TASK_CREATE,
     VIDEO_TASK_DOWNLOAD,
     VIDEO_TASK_REMIX,
+    hydrate_image_artifacts,
+    IMAGE_TASK_GENERATE,
 )
 from observability import (
     get_job_history,
@@ -1815,6 +1818,7 @@ async def _launch_order(
         last_name=user.last_name,
     )
     provider_key = order.provider or order.model
+    task_label = "image_generate" if provider_key in {"gemini-image", "dall-e-3"} else "video_generate"
     credits_cost = order.credits_cost or config.generation_cost_credits
 
     normalized = normalize_prompt(order.prompt)
@@ -1829,6 +1833,7 @@ async def _launch_order(
         "product": order.product,
         "duration_seconds": order.duration_seconds,
         "hd": order.hd,
+        "task": task_label,
     }
 
     gate_result = await gate.evaluate(
@@ -1885,6 +1890,7 @@ async def _launch_order(
             "preflight_auto_sanitized": preflight.auto_sanitized,
             "duration_seconds": order.duration_seconds,
             "hd": order.hd,
+            "task": task_label,
         },
     )
 
@@ -1918,6 +1924,7 @@ async def _launch_order(
         provider=provider_key,
         size=order.size,
         credits_cost=credits_cost,
+        extra={"task": task_label},
     )
 
     balance_after = await db.get_user_credits(user_id)
@@ -1962,6 +1969,45 @@ async def _launch_order(
             idempotency_key=idempotency_key,
             content_type=order.category,
         )
+        if (job_record.status or "").lower() == "completed" and task_label == "image_generate":
+            hydrated_assets = hydrate_image_artifacts(job_record.id)
+            if hydrated_assets:
+                try:
+                    await db.add_credits(user_id, credits_cost)
+                except Exception:
+                    log.exception("Failed to refund credits for deduplicated image job")
+                await _release_lock("dedup_reused", "completed")
+                try:
+                    await _send_hydrated_images(
+                        bot=callback.message.bot, user_id=user_id, artifacts=hydrated_assets
+                    )
+                except Exception:
+                    log.exception("Failed to deliver hydrated image artifacts", exc_info=True)
+                    await callback.message.answer(i18n.t("status.delivery_generic"))
+                else:
+                    await callback.message.answer(i18n.t("status.completed_photo"))
+                return
+            else:
+                idempotency_key = f"{idempotency_key}:{uuid.uuid4().hex}"
+                job_record = await job_queue.submit(
+                    user_id=user_id,
+                    prompt=order.prompt,
+                    size=order.size,
+                    model=order.model,
+                    corr_id=corr_id,
+                    image_file_id=order.image_file_id,
+                    username=user.username,
+                    provider=provider_key,
+                    settings=provider_settings or None,
+                    credits_cost=credits_cost,
+                    original_prompt=original_prompt,
+                    sanitized_prompt=order.prompt,
+                    auto_sanitized=preflight.auto_sanitized,
+                    preflight_reason=preflight.reason,
+                    preflight_scope=preflight.scope,
+                    idempotency_key=idempotency_key,
+                    content_type=order.category,
+                )
     except RuntimeError as exc:
         log.warning(
             "Job submission failed corr_id=%s provider=%s error=%s",
@@ -2360,7 +2406,8 @@ async def _launch_order(
     session.pending_order = None
 
     queue_pos = await db.count_active_jobs(user_id)
-    await callback.message.answer(i18n.t("flow.order_submitted", queue_pos=queue_pos))
+    confirmation_key = "flow.order_submitted_image" if task_label == "image_generate" else "flow.order_submitted"
+    await callback.message.answer(i18n.t(confirmation_key, queue_pos=queue_pos))
     await STATUS_MESSAGES.ensure_started(
         bot=callback.message.bot,
         db=db,
@@ -2812,6 +2859,41 @@ async def _send_inline_assets(
             filename=filename,
         )
     return None
+
+
+async def _send_hydrated_images(
+    *,
+    bot: Bot,
+    user_id: int,
+    artifacts: List[Dict[str, Any]],
+) -> List[Message]:
+    if not artifacts:
+        return []
+    decoded: List[tuple[str, bytes]] = []
+    for artifact in artifacts:
+        data_uri = artifact.get("data_uri")
+        decoded_asset = _decode_data_uri(data_uri) if isinstance(data_uri, str) else None
+        if not decoded_asset:
+            continue
+        decoded.append(decoded_asset)
+    if not decoded:
+        return []
+    if len(decoded) == 1:
+        mime, payload = decoded[0]
+        filename = "image.png"
+        message = await bot.send_photo(
+            user_id,
+            BufferedInputFile(payload, filename=filename, mime_type=mime),
+        )
+        return [message]
+    media: List[InputMediaPhoto] = []
+    for mime, payload in decoded:
+        media.append(
+            InputMediaPhoto(
+                media=BufferedInputFile(payload, filename="image.png", mime_type=mime)
+            )
+        )
+    return await bot.send_media_group(user_id, media)
 
 
 async def _deliver_remote_media(

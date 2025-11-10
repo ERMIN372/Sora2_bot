@@ -2939,9 +2939,28 @@ class GeminiGenerativeClient(BaseProviderClient):
                             payload_json.setdefault("finish_reason", finish_reason)
                         if response_id:
                             payload_json.setdefault("response_id", response_id)
+                        total_inline_bytes = 0
+                        mime_summary: List[str] = []
+                        for asset in inline_assets:
+                            if isinstance(asset, Mapping):
+                                try:
+                                    total_inline_bytes += int(asset.get("bytes") or 0)
+                                except Exception:
+                                    pass
+                                mime_value = asset.get("mime")
+                                if isinstance(mime_value, str) and mime_value:
+                                    mime_summary.append(mime_value)
+                        mime_ordered = ";".join(dict.fromkeys(mime_summary)) if mime_summary else ""
                         log.info(
                             "gemini.sync.result.ok",
-                            extra={"assets": len(asset_map), "response_id": response_id or ""},
+                            extra={
+                                "assets": len(asset_map),
+                                "response_id": response_id or "",
+                                "image_parts_count": len(inline_assets),
+                                "sum_image_bytes": total_inline_bytes,
+                                "mime_types": mime_ordered,
+                                "finish_reason": finish_reason or "",
+                            },
                         )
                         log.info(
                             "gemini.image.inline assets_count=%s inline_count=%s finish_reason=%s response_id=%s",

@@ -2,11 +2,15 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import hashlib
 import json
 import logging
+import mimetypes
 import os
 import random
+import re
 import time
 import uuid
 from dataclasses import dataclass
@@ -67,10 +71,13 @@ VIDEO_TASK_RETRIEVE = "video_retrieve"
 VIDEO_TASK_DOWNLOAD = "video_download"
 ASSET_TASK_RETRIEVE = "asset_retrieve"
 IMAGE_TASK_RETRIEVE = "image_retrieve"
+IMAGE_TASK_GENERATE = "image_generate"
 ASSET_KIND_VIDEO = "video"
 ASSET_KIND_IMAGE = "image"
 
 _DOWNLOAD_MAX_ATTEMPTS = 3
+
+_IMAGE_ARTIFACTS_DIR = Path("attached_assets") / "images"
 
 
 @dataclass(slots=True)
@@ -137,6 +144,93 @@ class _FallbackSubmissionResult:
     model: str
     idempotency_key: str
     settings: Dict[str, Any]
+
+
+def _artifact_directory(job_id: str) -> Path:
+    safe_id = re.sub(r"[^a-zA-Z0-9_.-]", "_", job_id or "job") or "job"
+    return _IMAGE_ARTIFACTS_DIR / safe_id
+
+
+def _decode_data_uri(data_uri: Optional[str]) -> Optional[tuple[str, bytes]]:
+    if not data_uri:
+        return None
+    text = data_uri.strip()
+    if not text.lower().startswith("data:"):
+        return None
+    try:
+        header, encoded = text.split(",", 1)
+    except ValueError:
+        return None
+    if ";base64" not in header.lower():
+        return None
+    mime = header[5:].split(";", 1)[0] or "application/octet-stream"
+    normalised = "".join(encoded.split())
+    try:
+        payload = base64.b64decode(normalised)
+    except (binascii.Error, ValueError):
+        return None
+    return mime, payload
+
+
+def _store_image_artifacts(job_id: str, assets: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    if not assets:
+        return []
+    directory = _artifact_directory(job_id)
+    try:
+        directory.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        log.warning("Failed to create artifact directory path=%s", directory, exc_info=True)
+        return []
+    stored: List[Dict[str, Any]] = []
+    for index, asset in enumerate(assets):
+        data_uri = asset.get("data_uri") or asset.get("data_url")
+        decoded = _decode_data_uri(data_uri if isinstance(data_uri, str) else None)
+        if not decoded:
+            continue
+        mime, payload = decoded
+        extension = mimetypes.guess_extension(mime) or ".bin"
+        filename = f"image_{index}{extension}"
+        path = directory / filename
+        try:
+            with path.open("wb") as handle:
+                handle.write(payload)
+        except Exception:
+            log.warning("Failed to persist image artifact job_id=%s path=%s", job_id, path, exc_info=True)
+            continue
+        stored.append({
+            "path": str(path),
+            "mime": mime,
+            "bytes": len(payload),
+        })
+    return stored
+
+
+def hydrate_image_artifacts(job_id: str) -> List[Dict[str, Any]]:
+    artifacts: List[Dict[str, Any]] = []
+    if not job_id:
+        return artifacts
+    directory = _artifact_directory(job_id)
+    if not directory.exists():
+        return artifacts
+    for path in sorted(directory.iterdir()):
+        if not path.is_file():
+            continue
+        try:
+            payload = path.read_bytes()
+        except Exception:
+            log.warning("Failed to read image artifact job_id=%s path=%s", job_id, path, exc_info=True)
+            continue
+        mime = mimetypes.guess_type(str(path))[0] or "image/png"
+        encoded = base64.b64encode(payload).decode("ascii")
+        data_uri = f"data:{mime};base64,{encoded}"
+        artifacts.append({
+            "kind": "image",
+            "mime": mime,
+            "bytes": len(payload),
+            "data_uri": data_uri,
+            "path": str(path),
+        })
+    return artifacts
 
 
 def _coerce_float(value: Any) -> Optional[float]:
@@ -946,6 +1040,7 @@ class JobQueue:
         )
         await self._db.create_job(record)
         asset_kind = ASSET_KIND_IMAGE if content_type_value == "image" else ASSET_KIND_VIDEO
+        task_type = IMAGE_TASK_GENERATE if asset_kind == ASSET_KIND_IMAGE else ASSET_TASK_RETRIEVE
         await self.enqueue(
             job_id=job_id,
             user_id=user_id,
@@ -960,7 +1055,7 @@ class JobQueue:
             auto_sanitized=auto_sanitized,
             preflight_reason=preflight_reason,
             preflight_scope=preflight_scope,
-            task_type=ASSET_TASK_RETRIEVE,
+            task_type=task_type,
             asset_kind=asset_kind,
             provider_job_id=submission.job_id,
             video_id=video_id,
@@ -1523,12 +1618,60 @@ class JobQueue:
                         )
             if inline_assets:
                 job_extra["inline_assets"] = inline_assets
+                if asset_kind == ASSET_KIND_IMAGE:
+                    stored_meta = _store_image_artifacts(pending.job_id, inline_assets)
+                    if stored_meta:
+                        job_extra.setdefault("image_artifacts", stored_meta)
             if assets_meta:
                 job_extra["assets_meta"] = assets_meta
             if key_mask:
                 job_extra.setdefault("gemini_key_mask", key_mask)
             if provider_data:
                 job_extra.setdefault("provider_data", provider_data)
+
+            if asset_kind == ASSET_KIND_IMAGE:
+                payload_source = provider_payload if isinstance(provider_payload, dict) else {}
+                if not payload_source and isinstance(provider_data.get("payload"), dict):
+                    payload_source = provider_data.get("payload")  # type: ignore[assignment]
+                candidates_payload = []
+                if isinstance(payload_source, dict):
+                    raw_candidates = payload_source.get("candidates")
+                    if isinstance(raw_candidates, list):
+                        candidates_payload = [candidate for candidate in raw_candidates if isinstance(candidate, dict)]
+                finish_reason = ""
+                if candidates_payload:
+                    primary = candidates_payload[0]
+                    finish_reason = str(
+                        primary.get("finish_reason")
+                        or primary.get("finishReason")
+                        or primary.get("finish_reason_code")
+                        or ""
+                    )
+                total_bytes = 0
+                for asset in inline_assets:
+                    try:
+                        total_bytes += int(asset.get("bytes") or 0)
+                    except Exception:
+                        continue
+                log_event(
+                    level="INFO",
+                    event="image_result",
+                    corr_id=pending.corr_id,
+                    job_id=pending.job_id,
+                    user_id=pending.user_id,
+                    username=pending.username,
+                    model=pending.model,
+                    provider=provider_key,
+                    size=pending.size,
+                    duration_ms=result.duration_ms,
+                    extra={
+                        "task": IMAGE_TASK_GENERATE,
+                        "candidates": len(candidates_payload),
+                        "image_parts_count": len(inline_assets),
+                        "bytes": total_bytes,
+                        "finish_reason": finish_reason or "",
+                    },
+                )
 
             recovery_attempted = bool(provider_data.get("assets_recovery_attempted"))
             no_media_confirmed = bool(provider_data.get("no_media_confirmed"))
@@ -2589,6 +2732,22 @@ class JobQueue:
         )
         await self._release_gate(pending, reason="no_media", status="failed")
 
+    async def _handle_image_generate(self, pending: PendingJob) -> None:
+        pending.asset_kind = ASSET_KIND_IMAGE
+        log_event(
+            level="INFO",
+            event="image_generate",
+            corr_id=pending.corr_id,
+            job_id=pending.job_id,
+            user_id=pending.user_id,
+            username=pending.username,
+            model=pending.model,
+            provider=pending.provider,
+            size=pending.size,
+            extra={"task": IMAGE_TASK_GENERATE},
+        )
+        await self._handle_asset_retrieve(pending)
+
     async def _process_job(self, pending: PendingJob) -> None:
         task_type = pending.task_type or ASSET_TASK_RETRIEVE
         if task_type == VIDEO_TASK_DOWNLOAD:
@@ -2612,7 +2771,10 @@ class JobQueue:
                     "video_id": pending.video_id,
                 },
             )
+        if task_type == IMAGE_TASK_GENERATE:
+            await self._handle_image_generate(pending)
+            return
         await self._handle_asset_retrieve(pending)
 
 
-__all__ = ["JobQueue"]
+__all__ = ["JobQueue", "hydrate_image_artifacts", "IMAGE_TASK_GENERATE", "IMAGE_TASK_RETRIEVE"]

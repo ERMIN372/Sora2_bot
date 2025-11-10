@@ -297,6 +297,7 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "flow.price_tag": "{credits} (~{approx})",
         "flow.no_prompt": "Добавьте описание. Пример: <code>кот идёт по неону, киберпанк</code>",
         "flow.order_submitted": "🧾 Заказ принят. Место в очереди: {queue_pos}. Пришлём видео сюда.",
+        "flow.order_submitted_image": "🧾 Заказ принят. Место в очереди: {queue_pos}. Пришлём фото сюда.",
         "flow.duplicate": "Задача уже в очереди.",
         "flow.not_enough": "Недостаточно кредитов. Выберите пакет ниже.",
         "status.running": "⚙️ Генерирую…",
