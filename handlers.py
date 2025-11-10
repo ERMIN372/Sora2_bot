@@ -33,6 +33,28 @@ from aiogram.types import (
     ReplyKeyboardMarkup,
     ReplyKeyboardRemove,
 )
+try:  # pragma: no cover - fallback for test stubs without ContentType
+    from aiogram.types import ContentType
+except ImportError:  # pragma: no cover - fallback used in tests
+    class _FallbackContentType:
+        ANY = "*"
+        TEXT = "text"
+        SUCCESSFUL_PAYMENT = "successful_payment"
+        INVOICE = "invoice"
+        MESSAGE_AUTO_DELETE_TIMER_CHANGED = "message_auto_delete_timer_changed"
+        MIGRATE_FROM_CHAT_ID = "migrate_from_chat_id"
+        MIGRATE_TO_CHAT_ID = "migrate_to_chat_id"
+        NEW_CHAT_MEMBERS = "new_chat_members"
+        LEFT_CHAT_MEMBER = "left_chat_member"
+        NEW_CHAT_TITLE = "new_chat_title"
+        NEW_CHAT_PHOTO = "new_chat_photo"
+        DELETE_CHAT_PHOTO = "delete_chat_photo"
+        GROUP_CHAT_CREATED = "group_chat_created"
+        SUPERGROUP_CHAT_CREATED = "supergroup_chat_created"
+        CHANNEL_CHAT_CREATED = "channel_chat_created"
+        VENUE = "venue"
+
+    ContentType = _FallbackContentType()
 from aiogram.utils import exceptions as aiogram_exceptions
 
 BadRequest = aiogram_exceptions.BadRequest
@@ -40,6 +62,8 @@ ChatNotFound = aiogram_exceptions.ChatNotFound
 RetryAfter = aiogram_exceptions.RetryAfter
 TelegramAPIError = aiogram_exceptions.TelegramAPIError
 Unauthorized = aiogram_exceptions.Unauthorized
+BotBlocked = getattr(aiogram_exceptions, "BotBlocked", TelegramAPIError)
+UserDeactivated = getattr(aiogram_exceptions, "UserDeactivated", TelegramAPIError)
 InvalidQueryID = getattr(
     aiogram_exceptions,
     "InvalidQueryID",
@@ -227,6 +251,28 @@ class AdminStates(StatesGroup):
 _ADMIN_BROADCAST_THROTTLE_SECONDS = 0.05
 
 
+class BroadcastContentNotSupported(Exception):
+    """Raised when Telegram refuses to copy the broadcast message."""
+
+
+_BROADCAST_UNSUPPORTED_CONTENT_TYPES: Set[ContentType] = {
+    ContentType.SUCCESSFUL_PAYMENT,
+    ContentType.INVOICE,
+    ContentType.MESSAGE_AUTO_DELETE_TIMER_CHANGED,
+    ContentType.MIGRATE_FROM_CHAT_ID,
+    ContentType.MIGRATE_TO_CHAT_ID,
+    ContentType.NEW_CHAT_MEMBERS,
+    ContentType.LEFT_CHAT_MEMBER,
+    ContentType.NEW_CHAT_TITLE,
+    ContentType.NEW_CHAT_PHOTO,
+    ContentType.DELETE_CHAT_PHOTO,
+    ContentType.GROUP_CHAT_CREATED,
+    ContentType.SUPERGROUP_CHAT_CREATED,
+    ContentType.CHANNEL_CHAT_CREATED,
+    ContentType.VENUE,
+}
+
+
 def _admin_menu_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
@@ -394,17 +440,126 @@ async def _send_text_safely(bot: Bot, user_id: int, text: str) -> bool:
         return False
 
 
-async def _broadcast_to_users(bot: Bot, recipients: Iterable[int], text: str) -> Tuple[int, int]:
+async def _copy_message_safely(
+    bot: Bot, user_id: int, from_chat_id: int, message_id: int
+) -> str:
+    try:
+        await bot.copy_message(chat_id=user_id, from_chat_id=from_chat_id, message_id=message_id)
+        return "ok"
+    except RetryAfter as exc:  # pragma: no cover - timing dependent
+        timeout = getattr(exc, "timeout", None)
+        try:
+            delay = float(timeout) if timeout is not None else 0.0
+        except (TypeError, ValueError):
+            delay = 0.0
+        await asyncio.sleep(max(delay, 0.0) + 0.5)
+        try:
+            await bot.copy_message(chat_id=user_id, from_chat_id=from_chat_id, message_id=message_id)
+            return "ok"
+        except RetryAfter as err:  # pragma: no cover - defensive guard
+            log.warning(
+                "Retry failed for broadcast delivery user=%s error=%s", user_id, err, exc_info=True
+            )
+            return "other"
+        except (BotBlocked, ChatNotFound, Unauthorized, CantTalkWithBot, UserDeactivated) as err:
+            log.info("Skipping delivery to user=%s error=%s", user_id, err)
+            return "blocked"
+        except BadRequest as err:
+            log.warning(
+                "Bad request when copying broadcast for user=%s error=%s", user_id, err, exc_info=True
+            )
+            return "bad_request"
+        except TelegramAPIError as err:  # pragma: no cover - network guard
+            log.warning(
+                "Failed to deliver broadcast to user=%s error=%s", user_id, err, exc_info=True
+            )
+            return "other"
+    except (BotBlocked, ChatNotFound, Unauthorized, CantTalkWithBot, UserDeactivated) as exc:
+        log.info("Skipping delivery to user=%s error=%s", user_id, exc)
+        return "blocked"
+    except BadRequest as exc:
+        log.warning(
+            "Bad request when copying broadcast for user=%s error=%s", user_id, exc, exc_info=True
+        )
+        return "bad_request"
+    except TelegramAPIError as exc:  # pragma: no cover - network guard
+        log.warning(
+            "Failed to deliver broadcast to user=%s error=%s", user_id, exc, exc_info=True
+        )
+        return "other"
+
+
+async def _broadcast_to_users(
+    bot: Bot, recipients: Iterable[int], from_chat_id: int, message_id: int
+) -> Tuple[int, int, int]:
     sent = 0
+    blocked = 0
     failed = 0
     for user_id in recipients:
-        if await _send_text_safely(bot, user_id, text):
+        outcome = await _copy_message_safely(bot, user_id, from_chat_id, message_id)
+        if outcome == "ok":
             sent += 1
+        elif outcome == "blocked":
+            blocked += 1
+        elif outcome == "bad_request":
+            raise BroadcastContentNotSupported()
         else:
             failed += 1
         if _ADMIN_BROADCAST_THROTTLE_SECONDS > 0:
             await asyncio.sleep(_ADMIN_BROADCAST_THROTTLE_SECONDS)
-    return sent, failed
+    return sent, blocked, failed
+
+
+async def _start_broadcast(
+    bot: Bot, state: FSMContext, message: Message, recipients: Iterable[int]
+) -> None:
+    data = await state.get_data()
+    from_chat_id = data.get("broadcast_src_chat_id")
+    message_id = data.get("broadcast_src_message_id")
+    preview_text = str(data.get("broadcast_preview_text") or "")
+    try:
+        from_chat_id_int = int(from_chat_id)
+        message_id_int = int(message_id)
+    except (TypeError, ValueError):
+        await message.answer(i18n.t("admin.status.internal_error"))
+        await _return_to_admin_menu(state, message)
+        return
+    recipients_list = list(recipients)
+    if not recipients_list:
+        await message.answer(i18n.t("admin.broadcast.empty_audience"))
+        await _return_to_admin_menu(state, message)
+        return
+    progress = await message.answer(
+        i18n.t("admin.broadcast.started", count=len(recipients_list))
+    )
+    try:
+        sent, blocked, failed = await _broadcast_to_users(
+            bot, recipients_list, from_chat_id_int, message_id_int
+        )
+    except BroadcastContentNotSupported:
+        summary = i18n.t("admin.broadcast.unsupported_type")
+        log.info("Admin broadcast failed: unsupported content")
+        try:
+            await progress.edit_text(summary)
+        except Exception:  # pragma: no cover - message edits may fail
+            await message.answer(summary)
+        await _return_to_admin_menu(state, message)
+        return
+    summary = i18n.t("admin.broadcast.completed", sent=sent, blocked=blocked, failed=failed)
+    try:
+        await progress.edit_text(summary)
+    except Exception:  # pragma: no cover - message edits may fail
+        await message.answer(summary)
+    log.info(
+        "Admin broadcast completed by %s: audience=%s sent=%s blocked=%s failed=%s preview=%s",
+        message.from_user.id if message.from_user else "?",
+        len(recipients_list),
+        sent,
+        blocked,
+        failed,
+        _shorten(preview_text),
+    )
+    await _return_to_admin_menu(state, message)
 
 
 async def _enter_admin_menu(state: FSMContext, message: Message) -> None:
@@ -4201,27 +4356,46 @@ async def admin_broadcast_message_handler(
     user_id = message.from_user.id if message.from_user else 0
     if not _is_admin(user_id, config):
         return
-    if _is_cancel_action(message.text):
+    if message.content_type == ContentType.TEXT and _is_cancel_action(message.text):
         await message.answer(i18n.t("admin.status.cancelled"))
         await _return_to_admin_menu(state, message)
         return
-    text = (message.text or "").strip()
-    if not text:
-        await message.answer(i18n.t("admin.broadcast.empty_message"), reply_markup=_admin_cancel_keyboard())
+    if message.media_group_id:
+        await message.answer(i18n.t("admin.broadcast.media_group_unsupported"), reply_markup=_admin_cancel_keyboard())
         return
+    if message.content_type in _BROADCAST_UNSUPPORTED_CONTENT_TYPES:
+        await message.answer(i18n.t("admin.broadcast.unsupported_service"), reply_markup=_admin_cancel_keyboard())
+        return
+    preview_text = ""
+    if message.content_type == ContentType.TEXT:
+        preview_text = (message.text or "").strip()
+        if not preview_text:
+            await message.answer(
+                i18n.t("admin.broadcast.empty_message"), reply_markup=_admin_cancel_keyboard()
+            )
+            return
+    else:
+        preview_text = (message.caption or "").strip()
     recipients = await _collect_broadcast_recipients(db)
     if not recipients:
         await message.answer(i18n.t("admin.broadcast.empty_audience"))
         await _return_to_admin_menu(state, message)
         return
-    await state.update_data(broadcast_message=text)
-    await AdminStates.broadcast_confirm.set()
-    preview = i18n.t(
-        "admin.broadcast.preview",
-        count=len(recipients),
-        message=_escape_format_value(text),
+    await state.update_data(
+        broadcast_src_chat_id=message.chat.id,
+        broadcast_src_message_id=message.message_id,
+        broadcast_preview_text=preview_text,
     )
-    await message.answer(preview, reply_markup=_admin_confirm_keyboard("broadcast"))
+    await message.answer(
+        i18n.t("admin.broadcast.accepted", count=len(recipients))
+    )
+    bot = getattr(message, "bot", None)
+    if bot is None:
+        log.warning("Admin broadcast message without bot instance")
+        await message.answer(i18n.t("admin.status.internal_error"))
+        await _return_to_admin_menu(state, message)
+        return
+    await _start_broadcast(bot, state, message, recipients)
 
 
 async def admin_direct_target_handler(
@@ -4324,37 +4498,6 @@ async def admin_panel_callback_handler(
     if bot is None:
         log.warning("Admin callback without bot instance action=%s", action)
         await message.answer(i18n.t("admin.status.internal_error"))
-        await _return_to_admin_menu(state, message)
-        return
-    if action == "broadcast" and decision == "confirm":
-        data = await state.get_data()
-        broadcast_text = data.get("broadcast_message")
-        if not broadcast_text:
-            await _return_to_admin_menu(state, message)
-            return
-        recipients = await _collect_broadcast_recipients(db)
-        if not recipients:
-            await message.answer(i18n.t("admin.broadcast.empty_audience"))
-            await _return_to_admin_menu(state, message)
-            return
-        try:
-            await message.edit_reply_markup()
-        except Exception:  # pragma: no cover - Telegram edit failures are non-fatal
-            pass
-        progress = await message.answer(i18n.t("admin.broadcast.started", count=len(recipients)))
-        sent, failed = await _broadcast_to_users(bot, recipients, broadcast_text)
-        summary = i18n.t("admin.broadcast.completed", sent=sent, failed=failed)
-        try:
-            await progress.edit_text(summary)
-        except Exception:  # pragma: no cover - message edits may fail
-            await message.answer(summary)
-        log.info(
-            "Admin broadcast completed by %s: audience=%s sent=%s failed=%s",
-            user_id,
-            len(recipients),
-            sent,
-            failed,
-        )
         await _return_to_admin_menu(state, message)
         return
     if action == "direct" and decision == "confirm":
@@ -5627,7 +5770,7 @@ def register_handlers(
     dp.register_message_handler(
         lambda message, state: admin_broadcast_message_handler(message, state, db, config),
         state=AdminStates.broadcast_message,
-        content_types=["text"],
+        content_types=ContentType.ANY,
     )
     dp.register_message_handler(
         lambda message, state: admin_direct_target_handler(message, state, db, config),
