@@ -1125,23 +1125,13 @@ def _build_video_settings_keyboard(
                 text=label, callback_data=f"opt:aspect:{context}:{token}"
             )
         )
-    hd_button = InlineKeyboardButton(
-        text=_append_checkmark("HD", session.hd_enabled),
-        callback_data=f"opt:hd:{context}:toggle",
-    )
-    start_button = InlineKeyboardButton(
-        text=i18n.t("video.prompt.start_button"), callback_data="start_generation"
-    )
     rows: list[list[InlineKeyboardButton]] = [
         prompt_row,
         image_row,
         aspect_row,
-        [start_button],
     ]
     if duration_row:
         rows.insert(2, duration_row)
-    if not is_veo:
-        rows.insert(-1, [hd_button])
     if include_back:
         rows.append([_back_button("video_mode")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
@@ -3871,10 +3861,6 @@ async def noop_callback_handler(callback: CallbackQuery) -> None:
     await safe_callback_answer(callback)
 
 
-async def start_generation_callback_handler(callback: CallbackQuery) -> None:
-    await safe_callback_answer(callback, i18n.t("video.prompt.start_hint"))
-
-
 async def order_callback_handler(
     callback: CallbackQuery,
     state: FSMContext,
@@ -5621,11 +5607,6 @@ def register_handlers(
     dp.register_callback_query_handler(
         lambda call: noop_callback_handler(call),
         lambda call: call.data == "noop",
-        state="*",
-    )
-    dp.register_callback_query_handler(
-        lambda call: start_generation_callback_handler(call),
-        lambda call: call.data == "start_generation",
         state="*",
     )
     dp.register_callback_query_handler(
