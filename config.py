@@ -316,7 +316,7 @@ class Config:
     gemini_api_endpoint: Optional[str] = None
     gemini_safety_threshold: str = "BLOCK_NONE"
     fallback_image_models: List[str] = field(
-        default_factory=lambda: ["gpt-image-1", "dall-e-3", "sdxl"]
+        default_factory=lambda: ["dall-e-3", "sdxl"]
     )
     openai_api_key: str = ""
     sora_api_key: str = ""
@@ -335,11 +335,9 @@ class Config:
     request_timeout: float = 20.0
     request_connect_timeout: float = 10.0
     request_read_timeout: float = 20.0
-    image_read_timeout_sec: float = 120.0
     provider_timeout_s: float = 60.0
     request_retries: int = 3
     retry_backoff: float = 2.0
-    image_max_retries: int = 3
     yookassa_shop_id: Optional[str] = None
     yookassa_secret_key: Optional[str] = None
     yookassa_test_mode: bool = True
@@ -782,13 +780,9 @@ def load_config() -> Config:
         request_read_timeout=_get_env_float(
             "REQUEST_READ_TIMEOUT", Config.request_read_timeout
         ),
-        image_read_timeout_sec=_get_env_float(
-            "IMAGE_READ_TIMEOUT_SEC", Config.image_read_timeout_sec
-        ),
         provider_timeout_s=provider_timeout_s,
         request_retries=_get_env_int("REQUEST_RETRIES", Config.request_retries),
         retry_backoff=_get_env_float("RETRY_BACKOFF", Config.retry_backoff),
-        image_max_retries=_get_env_int("IMAGE_MAX_RETRIES", Config.image_max_retries),
         yookassa_shop_id=os.getenv("YOOKASSA_SHOP_ID"),
         yookassa_secret_key=os.getenv("YOOKASSA_SECRET_KEY"),
         yookassa_test_mode=_get_env_bool("YOOKASSA_TEST_MODE", Config.yookassa_test_mode),
