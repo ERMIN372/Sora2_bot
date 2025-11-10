@@ -3038,6 +3038,76 @@ class GeminiGenerativeClient(BaseProviderClient):
                             corr_id=corr_id,
                             payload=payload_json,
                         )
+                        inline_submission = {
+                            "inline_assets": inline_assets,
+                            "assets_meta": asset_meta,
+                            "payload": payload_json,
+                        }
+                        if is_flash_image:
+                            metric_tags = {
+                                "model": str(decision.model),
+                                "method": actual_method,
+                                "version": decision.api_version or "",
+                                "status": "200",
+                            }
+                            increment_metric("gemini_calls_total", tags=metric_tags)
+                            record_timing_metric(
+                                "gemini_latency_ms",
+                                duration_ms,
+                                tags={
+                                    "model": metric_tags["model"],
+                                    "method": metric_tags["method"],
+                                    "version": metric_tags["version"],
+                                },
+                            )
+                            if finish_code_upper:
+                                increment_metric(
+                                    "metric_gemini_finish_reason",
+                                    tags={"reason": finish_code_upper},
+                                )
+                                if finish_code_upper == "STOP":
+                                    increment_metric(
+                                        "gemini_stop_total",
+                                        tags={"model": metric_tags["model"]},
+                                    )
+                            log.info(
+                                "gemini.call corr_id=%s provider=%s model=%s method=%s version=%s size=%s status=%s latency_ms=%s",
+                                corr_id or "",
+                                self.provider_name,
+                                decision.model,
+                                actual_method,
+                                decision.api_version,
+                                size or "",
+                                200,
+                                duration_ms,
+                            )
+                            log.info(
+                                "gemini.generate done model=%s method=%s version=%s env=%s key_mask=%s corr_id=%s latency_ms=%s",
+                                decision.model,
+                                actual_method,
+                                decision.api_version,
+                                self._environment,
+                                self._key_mask or "",
+                                corr_id or "",
+                                duration_ms,
+                            )
+                            self._log_debug_event(
+                                "gemini.inline_return",
+                                {
+                                    "corr_id": corr_id,
+                                    "job_id": None,
+                                    "inline_count": len(inline_assets),
+                                    "asset_bytes": [asset.get("bytes") for asset in inline_assets],
+                                    "asset_mime": [asset.get("mime") for asset in inline_assets],
+                                    "duration_ms": duration_ms,
+                                },
+                            )
+                            return ProviderJobSubmission(
+                                job_id=None,  # type: ignore[arg-type]
+                                status_code=200,
+                                duration_ms=duration_ms,
+                                data=inline_submission,
+                            )
                         job_id = str(uuid4())
                         assets_meta: Dict[str, Any] = dict(asset_meta)
                         meta = {
@@ -3147,11 +3217,7 @@ class GeminiGenerativeClient(BaseProviderClient):
                             job_id=job_id,
                             status_code=200,
                             duration_ms=duration_ms,
-                            data={
-                                "inline_assets": inline_assets,
-                                "assets_meta": asset_meta,
-                                "payload": payload_json,
-                            },
+                            data=inline_submission,
                         )
                 job_id = str(uuid4())
                 meta = {
@@ -3840,7 +3906,17 @@ class GeminiGenerativeClient(BaseProviderClient):
             current_prompt = decision.next_prompt
             attempt += 1
 
-    async def get_job_status(self, job_id: str) -> ProviderJobStatus:
+    async def get_job_status(self, job_id: Optional[str]) -> ProviderJobStatus:
+        if job_id is None:
+            return ProviderJobStatus(
+                job_id=job_id,  # type: ignore[arg-type]
+                status="completed",
+                error=None,
+                assets={},
+                data={},
+                status_code=200,
+                duration_ms=0,
+            )
         record = self._pending.pop(job_id, None)
         source = "memory" if record is not None else "disk"
         if record is None:
