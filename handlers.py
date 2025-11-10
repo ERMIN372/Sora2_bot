@@ -111,13 +111,12 @@ ASPECT_RATIO_OPTIONS: Dict[str, str] = {
 DEFAULT_ASPECT_RATIO = ASPECT_RATIO_OPTIONS["horizontal"]
 DEFAULT_HD_ENABLED = False
 
-DEFAULT_VIDEO_DURATION = 10
+DEFAULT_VIDEO_DURATION = 8
 ADMIN_SORA_DURATION_OPTION = 4
-VIDEO_DURATION_OPTIONS: Tuple[int, ...] = (10, 15, 25)
+VIDEO_DURATION_OPTIONS: Tuple[int, ...] = (8, 12)
 VIDEO_PRICE_RUB: Dict[int, Decimal] = {
-    10: Decimal("119"),
-    15: Decimal("169"),
-    25: Decimal("269"),
+    8: Decimal("99"),
+    12: Decimal("149"),
 }
 VEO_FIXED_DURATION = 8
 VEO_FIXED_PRICE_RUB = Decimal("89")
