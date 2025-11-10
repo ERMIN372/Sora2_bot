@@ -188,11 +188,6 @@ async def _probe_gemini_models(config: Config) -> Tuple[bool, str]:
     if image_model:
         if image_model not in supported:
             return False, f"image model {image_model} missing"
-        if not (
-            _supports_method(supported, image_model, "generate_content")
-            or _supports_method(supported, image_model, "generate_images")
-        ):
-            return False, f"image model {image_model} lacks generate_content"
         image_scope = _resolve_scope(image_model, "media")
         image_client = clients.get(image_scope) or clients.get("media")
         if image_client is None:
@@ -218,8 +213,8 @@ async def _probe_gemini_models(config: Config) -> Tuple[bool, str]:
                     model=image_model,
                     contents="ping",
                     config=_genai_types.GenerateContentConfig(
-                        response_mime_type="image/png",
-                        image_config={"aspect_ratio": "1:1"},
+                        response_modalities=["IMAGE"],
+                        image_config=_genai_types.ImageConfig(aspect_ratio="1:1"),
                     ),
                 ),
                 timeout=60.0,
@@ -267,6 +262,8 @@ async def _probe_gemini_models(config: Config) -> Tuple[bool, str]:
             parts = content.get("parts") if isinstance(content, dict) else []
             if not parts and isinstance(content, list):
                 parts = content
+            if not parts:
+                parts = []
             for part in parts:
                 if not isinstance(part, dict):
                     continue

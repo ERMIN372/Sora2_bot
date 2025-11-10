@@ -267,8 +267,6 @@ _BROADCAST_UNSUPPORTED_CONTENT_TYPES: Set[ContentType] = {
     ContentType.NEW_CHAT_PHOTO,
     ContentType.DELETE_CHAT_PHOTO,
     ContentType.GROUP_CHAT_CREATED,
-    ContentType.SUPERGROUP_CHAT_CREATED,
-    ContentType.CHANNEL_CHAT_CREATED,
     ContentType.VENUE,
 }
 
