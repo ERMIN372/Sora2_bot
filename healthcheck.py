@@ -345,7 +345,6 @@ async def _probe_gemini_models(config: Config) -> Tuple[bool, str]:
         )
         if not image_found:
             image_detail["warning"] = "NO_IMAGE_NON_CRITICAL"
-            return False, "image.no_inline"
 
     video_model = (config.gemini_model_video or "").strip()
     if video_model:
