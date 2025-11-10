@@ -258,6 +258,8 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
             "Длительность: {duration} сек\n"
             "Стоимость: {price}"
         ),
+        "video.prompt.quality_hd": "Качество: HD",
+        "video.prompt.quality_sd": "Качество: SD",
         "video.prompt.current_prompt": "Текущий промпт: отправьте текст",
         "video.prompt.current_image": "Изображение: не добавлено",
         "video.prompt.start_hint": "Пришлите описание или фото, чтобы продолжить.",
