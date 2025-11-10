@@ -62,7 +62,7 @@ def test_create_order_for_veo_uses_fixed_duration_and_price(config: Config) -> N
 
 def test_create_order_for_sora_preserves_duration_and_hd(config: Config) -> None:
     session = UserSession()
-    session.video_duration = 15
+    session.video_duration = 12
     session.hd_enabled = True
 
     order = _create_order(
@@ -78,9 +78,9 @@ def test_create_order_for_sora_preserves_duration_and_hd(config: Config) -> None
         include_size=True,
     )
 
-    assert order.duration_seconds == 15
+    assert order.duration_seconds == 12
     assert order.hd is True
-    assert order.price_rub == Decimal("169")
+    assert order.price_rub == Decimal("149")
     assert order.credits_cost == config.credits_for_rubles(order.price_rub)
 
     session.video_duration = DEFAULT_VIDEO_DURATION
