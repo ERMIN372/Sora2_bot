@@ -148,16 +148,18 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "admin.menu.close": "⬅️ Закрыть админку",
         "admin.menu.invalid": "Пожалуйста, воспользуйтесь кнопками меню.",
         "admin.menu.closed": "Админ-панель закрыта.",
-        "admin.broadcast.prompt": "Отправьте текст сообщения для рассылки всем пользователям.",
+        "admin.broadcast.prompt": (
+            "Отправьте ТЕКСТ или ОДНО сообщение с вложением (фото/видео/документ/голосовое/стикер)"
+            " и подписью. Мы разошлём ровно это сообщение всем пользователям."
+        ),
         "admin.broadcast.empty_message": "Сообщение не должно быть пустым.",
         "admin.broadcast.empty_audience": "Нет пользователей для рассылки.",
-        "admin.broadcast.preview": (
-            "Сообщение будет отправлено {count} получателям:\n\n"
-            "{message}\n\n"
-            "Отправить?"
-        ),
+        "admin.broadcast.accepted": "Ок, разошлю сообщение {count} пользователям. Начинаю рассылку…",
+        "admin.broadcast.media_group_unsupported": "Альбомы пока не поддерживаются. Отправьте одно сообщение с медиа и подписью.",
+        "admin.broadcast.unsupported_service": "Этот тип сообщения не поддерживается для рассылки. Отправьте обычный текст или одно медиа.",
+        "admin.broadcast.unsupported_type": "Telegram не разрешил переслать это сообщение. Попробуйте другой тип контента.",
         "admin.broadcast.started": "Рассылка запущена. Получателей: {count}.",
-        "admin.broadcast.completed": "Рассылка завершена. Успешно: {sent}, ошибок: {failed}.",
+        "admin.broadcast.completed": "Рассылка завершена. Успешно: {sent}, заблокировано: {blocked}, ошибок: {failed}.",
         "admin.buttons.cancel": "❌ Отмена",
         "admin.buttons.send": "✅ Отправить",
         "admin.buttons.abort": "↩️ Назад",

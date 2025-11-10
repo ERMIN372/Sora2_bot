@@ -19,7 +19,7 @@ if "yookassa_client" not in sys.modules:
     yookassa_client_module.create_payment = lambda *args, **kwargs: None
     sys.modules["yookassa_client"] = yookassa_client_module
 
-from aiogram.utils.exceptions import ChatNotFound, RetryAfter  # type: ignore
+from aiogram.utils.exceptions import RetryAfter  # type: ignore
 
 import handlers
 
@@ -101,25 +101,44 @@ def test_broadcast_to_users_counts(monkeypatch: pytest.MonkeyPatch):
             self.behaviour = {
                 1: ["ok"],
                 2: ["retry", "ok"],
-                3: ["fail"],
+                3: ["blocked"],
+                4: ["fail"],
             }
 
-        async def send_message(self, user_id: int, text: str) -> None:
-            sequence = self.behaviour[user_id]
+        async def copy_message(self, chat_id: int, from_chat_id: int, message_id: int) -> None:
+            sequence = self.behaviour[chat_id]
             outcome = sequence.pop(0)
             if outcome == "ok":
                 return None
             if outcome == "retry":
-                raise RetryAfter(timeout=0)
+                raise RetryAfter(timeout=0.3)
+            if outcome == "blocked":
+                raise handlers.BotBlocked()
             if outcome == "fail":
-                raise ChatNotFound()
+                raise handlers.TelegramAPIError()
             raise AssertionError(f"unexpected outcome {outcome}")
 
     bot = _Bot()
 
-    sent, failed = _run(handlers._broadcast_to_users(bot, [1, 2, 3], "hello"))
+    sent, blocked, failed = _run(
+        handlers._broadcast_to_users(bot, [1, 2, 3, 4], from_chat_id=10, message_id=20)
+    )
 
     assert sent == 2
+    assert blocked == 1
     assert failed == 1
-    # RetryAfter sleeps are recorded even when the timeout is zero
-    assert sleep_calls == [0]
+    # RetryAfter sleeps are recorded even when the timeout is small
+    assert sleep_calls == [0.8]
+
+
+def test_broadcast_to_users_bad_request(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr("handlers._ADMIN_BROADCAST_THROTTLE_SECONDS", 0)
+
+    class _Bot:
+        async def copy_message(self, chat_id: int, from_chat_id: int, message_id: int) -> None:
+                raise handlers.BadRequest("unsupported")
+
+    bot = _Bot()
+
+    with pytest.raises(handlers.BroadcastContentNotSupported):
+        _run(handlers._broadcast_to_users(bot, [1], from_chat_id=10, message_id=30))
