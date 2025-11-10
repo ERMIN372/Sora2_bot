@@ -832,6 +832,17 @@ def _find_video_model_option(config: Config, key: str) -> Optional[VideoModelOpt
     return None
 
 
+def _infer_category_from_model(model: Optional[str], config: Config) -> str:
+    if not model:
+        return "video"
+    lowered = model.strip().lower()
+    if "-image" in lowered or lowered in {"gemini-image", "dall-e-3", "sdxl", "openai-image"}:
+        return "image"
+    if config.gemini_model_image and lowered == config.gemini_model_image.strip().lower():
+        return "image"
+    return "video"
+
+
 def _provider_for_model(model: Optional[str], config: Config) -> str:
     name = _normalise_video_model_name(model or "")
     if name and _is_veo_video_model_name(name):
@@ -3675,7 +3686,9 @@ async def handle_text_input(
     user_id = await _ensure_user(message, db)
     session = SESSION_MANAGER.get(user_id)
     state_data = await state.get_data()
-    category = state_data.get("flow_type", "video")
+    stored_model = state_data.get("model")
+    inferred_category = _infer_category_from_model(stored_model, config) if stored_model else "video"
+    category = state_data.get("flow_type", inferred_category)
     if category == "image":
         model = state_data.get("model")
         provider = state_data.get("provider")
@@ -4023,8 +4036,10 @@ async def option_callback_handler(
         return
     session = SESSION_MANAGER.get(user.id)
     state_data = await state.get_data()
-    category = state_data.get("flow_type", "video")
-    model = state_data.get("model") or config.default_video_model
+    stored_model = state_data.get("model") or config.default_video_model
+    inferred_category = _infer_category_from_model(stored_model, config)
+    category = state_data.get("flow_type", inferred_category)
+    model = stored_model
     provider = state_data.get("provider") or model
     product = _resolve_product_key(category, provider, model, state_data.get("product"))
     is_veo = _is_veo_context(provider, product, model)
