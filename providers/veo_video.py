@@ -7,8 +7,10 @@ import binascii
 import json
 import logging
 import os
+import tempfile
 import time
 from fractions import Fraction
+from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 from uuid import uuid4
 
@@ -456,6 +458,7 @@ class VeoVideoClient(BaseProviderClient):
         )
         self._schema_logged = False
         self._asset_recovery_attempted: Set[str] = set()
+        self._last_download_meta: Dict[str, Any] = {}
 
     async def _submit_single_attempt(
         self,
@@ -649,6 +652,198 @@ class VeoVideoClient(BaseProviderClient):
 
             current_prompt = decision.next_prompt
             attempt += 1
+
+    @staticmethod
+    def _normalise_file_name(*candidates: Optional[str]) -> str:
+        for candidate in candidates:
+            if not candidate or not isinstance(candidate, str):
+                continue
+            cleaned = candidate.strip()
+            if not cleaned:
+                continue
+            cleaned = cleaned.split("?", 1)[0]
+            if cleaned.endswith(":download"):
+                cleaned = cleaned[: -len(":download")]
+            if not cleaned.startswith("files/"):
+                cleaned = f"files/{cleaned.split(':', 1)[0]}"
+            return cleaned
+        raise ValueError("video_id must not be empty")
+
+    @staticmethod
+    def _blob_to_bytes(blob: Any) -> bytes:
+        if blob is None:
+            return b""
+        if isinstance(blob, (bytes, bytearray, memoryview)):
+            return bytes(blob)
+        for attr_name in ("read", "getbuffer", "tobytes"):
+            attr = getattr(blob, attr_name, None)
+            if callable(attr):
+                try:
+                    data = attr()
+                except TypeError:
+                    continue
+                if isinstance(data, (bytes, bytearray, memoryview)):
+                    return bytes(data)
+                try:
+                    return bytes(data)
+                except Exception:  # pragma: no cover - defensive
+                    continue
+        data_attr = getattr(blob, "data", None)
+        if isinstance(data_attr, (bytes, bytearray, memoryview)):
+            return bytes(data_attr)
+        try:
+            return bytes(blob)
+        except Exception:  # pragma: no cover - defensive
+            return b""
+
+    async def _download_file(
+        self,
+        *,
+        video_id: str,
+        asset_id: Optional[str],
+    ) -> Tuple[bytes, Optional[_genai_types.File], int]:
+        name = self._normalise_file_name(asset_id, video_id)
+        start = time.perf_counter()
+        file_meta: Optional[_genai_types.File] = None
+        try:
+            file_meta = await asyncio.to_thread(self._client.files.get, name=name)
+        except _genai_errors.APIError as exc:
+            log.warning(
+                "gemini.veo.files.get failed video_id=%s asset_id=%s status=%s",  # pragma: no cover - network guard
+                video_id,
+                asset_id or "",
+                getattr(exc, "status", None),
+            )
+        except Exception:  # pragma: no cover - defensive
+            log.exception("gemini.veo.files.get crashed video_id=%s", video_id)
+
+        try:
+            blob = await asyncio.to_thread(self._client.files.download, name=name)
+        except _genai_errors.APIError as exc:
+            raise ProviderAPIError(
+                provider=self.provider_name,
+                status_code=getattr(exc, "code", 500) or 500,
+                message="Gemini Veo download failed",
+                error_type=getattr(exc, "status", None),
+                provider_message=str(getattr(exc, "response", exc)),
+            ) from exc
+        except Exception as exc:  # pragma: no cover - defensive
+            raise ProviderAPIError(
+                provider=self.provider_name,
+                status_code=500,
+                message="Gemini Veo download crashed",
+                error_type="download_error",
+                provider_message=str(exc),
+            ) from exc
+
+        payload = self._blob_to_bytes(blob)
+        duration_ms = int((time.perf_counter() - start) * 1000)
+        if not payload:
+            raise ProviderAPIError(
+                provider=self.provider_name,
+                status_code=0,
+                message="Gemini Veo returned an empty file",
+                error_type="empty_file",
+                provider_message="",
+                duration_ms=duration_ms,
+            )
+        return payload, file_meta, duration_ms
+
+    @staticmethod
+    def _resolve_filename(meta: Optional[_genai_types.File], fallback: str) -> str:
+        parts: List[str] = []
+        if meta is not None:
+            for candidate in (
+                getattr(meta, "display_name", None),
+                getattr(meta, "name", None),
+            ):
+                if isinstance(candidate, str) and candidate.strip():
+                    parts.append(candidate.split("/", 1)[-1])
+        if not parts:
+            parts.append(fallback.split("/", 1)[-1])
+        raw_name = parts[0] or "veo_video"
+        if raw_name.endswith(":download"):
+            raw_name = raw_name[: -len(":download")]
+        filename = raw_name or "veo_video"
+        return filename
+
+    @staticmethod
+    def _infer_mime(meta: Optional[_genai_types.File]) -> str:
+        mime = getattr(meta, "mime_type", None)
+        if isinstance(mime, str) and mime:
+            return mime
+        return "video/mp4"
+
+    async def content(
+        self,
+        video_id: str,
+        *,
+        asset_id: Optional[str] = None,
+    ) -> Tuple[bytes, Dict[str, str]]:
+        """Download asset bytes for a Veo video via the Files API.
+
+        Official guidance for ``veo-3.0-generate-001`` requires polling the
+        operation and then calling ``files.download`` with the ``video`` field of
+        the generated asset. See https://ai.google.dev/api/generate/video#retrieve
+        """
+
+        payload, file_meta, duration_ms = await self._download_file(
+            video_id=video_id, asset_id=asset_id
+        )
+        mime = self._infer_mime(file_meta)
+        headers: Dict[str, str] = {"content-type": mime}
+        headers["content-length"] = str(len(payload))
+        if file_meta is not None:
+            size_bytes = getattr(file_meta, "size_bytes", None)
+            if isinstance(size_bytes, (int, float)) and size_bytes > 0:
+                headers["x-file-size"] = str(int(size_bytes))
+        self._last_download_meta = {
+            "video_id": video_id,
+            "asset_id": asset_id or "",
+            "status_code": 200,
+            "duration_ms": duration_ms,
+            "bytes": len(payload),
+            "mime": mime,
+            "timestamp": time.time(),
+        }
+        return payload, headers
+
+    async def download_content(self, video_id: str, format: str = "mp4") -> Path:
+        payload, file_meta, duration_ms = await self._download_file(
+            video_id=video_id, asset_id=None
+        )
+        mime = self._infer_mime(file_meta)
+        filename = self._resolve_filename(file_meta, video_id)
+        format_hint = (format or "").strip().lower()
+        if format_hint not in {"mp4", "webm"}:
+            format_hint = "webm" if "webm" in mime.lower() else "mp4"
+        extension = f".{format_hint}"
+        if not filename.lower().endswith(extension):
+            filename = f"{filename}{extension}"
+        target_dir = Path(tempfile.mkdtemp(prefix="veo-video-"))
+        path = target_dir / filename
+        try:
+            path.write_bytes(payload)
+        except Exception as exc:  # pragma: no cover - defensive
+            raise ProviderAPIError(
+                provider=self.provider_name,
+                status_code=500,
+                message="Failed to persist Veo download",
+                error_type="io_error",
+                provider_message=str(exc),
+            ) from exc
+        self._last_download_meta = {
+            "video_id": video_id,
+            "status_code": 200,
+            "duration_ms": duration_ms,
+            "bytes": len(payload),
+            "mime": mime,
+            "file_path": str(path),
+            "attempt": 1,
+            "note": "success",
+            "timestamp": time.time(),
+        }
+        return path
 
     async def get_job_status(self, job_id: str) -> ProviderJobStatus:
         operation = await self._get_operation(job_id)
