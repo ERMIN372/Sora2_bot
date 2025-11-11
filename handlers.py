@@ -2133,6 +2133,53 @@ async def _launch_order(
             idempotency_key=idempotency_key,
             content_type=order.category,
         )
+        inline_result: Optional[Dict[str, Any]] = None
+        if isinstance(getattr(job_record, "extra", None), dict):
+            candidate_inline = job_record.extra.get("inline_result")
+            if isinstance(candidate_inline, dict):
+                inline_result = candidate_inline
+        if inline_result:
+            session.last_launch_key = key
+            session.last_launch_ts = now
+            session.awaiting_payment = False
+            session.pending_order = None
+            await callback.message.answer(i18n.t("flow.nano_image_progress"))
+            artifacts = inline_result.get("inline_assets") if isinstance(inline_result.get("inline_assets"), list) else []
+            messages_sent: List[Message] = []
+            if artifacts:
+                try:
+                    messages_sent = await _send_hydrated_images(
+                        bot=callback.message.bot,
+                        user_id=user_id,
+                        artifacts=artifacts,  # type: ignore[arg-type]
+                    )
+                except Exception:
+                    log.exception("Failed to send inline Gemini image corr_id=%s", corr_id)
+            if not messages_sent:
+                refunded = False
+                try:
+                    await db.add_credits(user_id, credits_cost)
+                    refunded = True
+                except Exception:  # pragma: no cover - defensive refund
+                    log.exception("Failed to refund credits after inline delivery error")
+                await callback.message.answer(i18n.t("status.delivery_generic"))
+                await _release_lock("inline_failed", "failed")
+                log_event(
+                    level="INFO",
+                    event="refund",
+                    corr_id=corr_id,
+                    user_id=user_id,
+                    username=user.username,
+                    model=order.model,
+                    provider=provider_key,
+                    size=order.size,
+                    credits_cost=credits_cost,
+                    refund_done=refunded,
+                )
+                return
+            await callback.message.answer(i18n.t("flow.nano_image_done"))
+            await _release_lock("inline_completed", "completed")
+            return
         if (job_record.status or "").lower() == "completed" and task_label == "image_generate":
             hydrated_assets = hydrate_image_artifacts(job_record.id)
             if hydrated_assets:

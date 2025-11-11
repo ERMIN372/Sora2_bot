@@ -1,6 +1,6 @@
 import asyncio
 import base64
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import Any, Dict, Optional
 
@@ -382,6 +382,68 @@ def test_process_job_records_inline_payload(monkeypatch, config: Config, fake_db
             event.get("event") == "done" and event.get("extra", {}).get("gemini_key_mask")
             for event in events
         )
+
+    asyncio.run(_run())
+
+
+def test_submit_gemini_flash_inline_returns_inline_result(
+    config: Config, fake_db: FakeDB
+) -> None:
+    async def _run() -> None:
+        image_bytes = b"\x89PNG"
+        data_uri = f"data:image/png;base64,{base64.b64encode(image_bytes).decode('ascii')}"
+        payload = {
+            "inline_assets": [
+                {
+                    "data_uri": data_uri,
+                    "mime": "image/png",
+                    "bytes": len(image_bytes),
+                }
+            ]
+        }
+
+        class _InlineProvider:
+            def __init__(self) -> None:
+                self.calls: list[Dict[str, Any]] = []
+
+            async def enqueue_job(self, **kwargs: Any) -> ProviderJobSubmission:
+                self.calls.append(kwargs)
+                return ProviderJobSubmission(
+                    job_id=None,
+                    status_code=200,
+                    duration_ms=42,
+                    data=payload,
+                )
+
+            async def close(self) -> None:  # pragma: no cover
+                return None
+
+        provider = _InlineProvider()
+        local_config = replace(config, gemini_model_image="gemini-2.5-flash-image")
+        queue = JobQueue(
+            db=fake_db,
+            providers={"gemini-image": provider},
+            default_provider="gemini-image",
+            config=local_config,
+            gate=None,
+        )
+
+        record = await queue.submit(
+            user_id=123,
+            prompt="draw a cat",
+            size="512x512",
+            model=local_config.gemini_model_image,
+            corr_id="corr-inline",
+            provider="gemini-image",
+            content_type="image",
+        )
+
+        assert record.status == "completed"
+        assert isinstance(record.extra.get("inline_result"), dict)
+        assert record.extra["inline_result"]["inline_assets"][0]["data_uri"] == data_uri
+        assert set(fake_db.jobs.keys()) == {"job-1"}
+        assert queue._queue.empty()
+        assert provider.calls, "provider should be invoked"
 
     asyncio.run(_run())
 
