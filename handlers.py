@@ -2185,6 +2185,7 @@ async def _launch_order(
     )
 
     provider_settings: Dict[str, Any] = {}
+    job_meta: Dict[str, Any] = {}
     if order.category == "video":
         if order.duration_seconds:
             provider_settings["duration"] = order.duration_seconds
@@ -2197,6 +2198,7 @@ async def _launch_order(
         )
         if inline_data:
             provider_settings["reference_inline_data"] = inline_data
+        job_meta["ref_file_id"] = order.image_file_id
 
     try:
         job_record = await job_queue.submit(
@@ -2217,6 +2219,7 @@ async def _launch_order(
             preflight_scope=preflight.scope,
             idempotency_key=idempotency_key,
             content_type=order.category,
+            extra=job_meta or None,
         )
         inline_result: Optional[Dict[str, Any]] = None
         if isinstance(getattr(job_record, "extra", None), dict):
@@ -2303,6 +2306,7 @@ async def _launch_order(
                     preflight_scope=preflight.scope,
                     idempotency_key=idempotency_key,
                     content_type=order.category,
+                    extra=job_meta or None,
                 )
     except RuntimeError as exc:
         log.warning(
@@ -2483,6 +2487,7 @@ async def _launch_order(
                     preflight_scope=preflight.scope,
                     idempotency_key=idempotency_key,
                     content_type=order.category,
+                    extra=job_meta or None,
                 )
                 await callback.message.answer(
                     "Автоматически запускаем Veo в качестве фоллбека."
@@ -3649,6 +3654,13 @@ def _build_archive_payload_from_sent(
         return None
     content_type = "image" if (job.content_type or "video") == "image" else "video"
     duration = sent.duration_seconds if content_type == "video" else None
+    ref_file_id: Optional[str] = None
+    job_meta = job.extra if isinstance(job.extra, dict) else {}
+    candidate_ref = job_meta.get("ref_file_id") if isinstance(job_meta, dict) else None
+    if isinstance(candidate_ref, str) and candidate_ref:
+        ref_file_id = candidate_ref
+    elif isinstance(job.image_file_id, str) and job.image_file_id:
+        ref_file_id = job.image_file_id
     payload = ArchivePayload(
         corr_id=job.corr_id or job.id,
         prompt=job.prompt,
@@ -3664,6 +3676,7 @@ def _build_archive_payload_from_sent(
         duration_seconds=duration,
         delivery_method=sent.method,
         sent_at=datetime.utcnow(),
+        ref_file_id=ref_file_id,
     )
     return payload
 

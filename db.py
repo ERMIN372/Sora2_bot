@@ -159,6 +159,7 @@ def _job_from_dict(data: Dict[str, Any]) -> GenerationJobRecord:
     status_message_updated_at = _parse_datetime(status_message_updated_raw)
     content_type = str(data.get("content_type") or "video")
     operation_name = data.get("operation_name") or None
+    metadata = _parse_metadata(data.get("metadata"))
     return GenerationJobRecord(
         id=str(data.get("job_id", "")),
         user_id=int(data.get("user_id", 0)),
@@ -184,7 +185,7 @@ def _job_from_dict(data: Dict[str, Any]) -> GenerationJobRecord:
         status_message_updated_at=status_message_updated_at,
         operation_name=operation_name,
         file_url=file_url,
-        extra={},
+        extra=dict(metadata),
     )
 
 
@@ -478,6 +479,7 @@ class Database:
             operation_name=job.operation_name,
             file_url=job.file_url,
             video_id=job.video_id,
+            metadata=job.extra,
         )
 
     async def find_job_by_idempotency_key(
