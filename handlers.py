@@ -125,6 +125,7 @@ from services.gemini_downloader import (
 from services.sora_downloader import SoraDownloadError, download_sora_asset
 from services.error_reporter import ErrorReporter
 from services.status_tracker import StatusMessageManager
+from services import gsheets_ref
 from telegram_files import BufferedInputFile
 from utils import build_inline_data_from_telegram_file
 import yookassa_client
@@ -1353,6 +1354,7 @@ def _build_balance_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text=i18n.t("buttons.top_up_short"), callback_data="menu:topup")],
+            [InlineKeyboardButton(text="💌 Реферальная ссылка", callback_data="balance:ref_link")],
         ]
     )
 
@@ -1411,7 +1413,73 @@ async def _send_balance_info(message: Message, db: Database) -> None:
     user_id = await _ensure_user(message, db)
     credits = await db.get_user_credits(user_id)
     balance_text = i18n.t("balance.info", credits=credits)
+    balance_text += "\n\nЗа пополнение по твоей ссылке: +100 кредитов."
     await message.answer(balance_text, reply_markup=_build_balance_keyboard())
+
+
+async def balance_callback_handler(callback: CallbackQuery) -> None:
+    data = callback.data or ""
+    if data != "balance:ref_link":
+        await safe_callback_answer(callback)
+        return
+    await safe_callback_answer(callback)
+    user = callback.from_user
+    if not user:
+        return
+    bot_username = callback.bot.username or ""
+    if not bot_username:
+        try:
+            me = await callback.bot.get_me()
+        except Exception:
+            log.exception("Failed to fetch bot username for referral link")
+            return
+        bot_username = me.username or ""
+    bot_username = bot_username.lstrip("@")
+    if not bot_username:
+        log.warning("Bot username unavailable for referral link user=%s", user.id)
+        return
+    ref_link = f"https://t.me/{bot_username}?start=ref_{user.id}"
+    response = f"Твоя ссылка:\n{ref_link}"
+    if callback.message:
+        await callback.message.answer(response)
+    else:
+        await callback.bot.send_message(user.id, response)
+
+
+async def _process_referral_payload(message: Message, payload: str) -> None:
+    payload = payload.strip()
+    if not payload.startswith("ref_"):
+        return
+    user = message.from_user
+    if not user:
+        return
+    new_user_id = user.id
+    suffix = payload.split("ref_", 1)[1]
+    try:
+        referrer_id = int(suffix)
+    except ValueError:
+        log.warning("Invalid referral payload %s from user=%s", payload, new_user_id)
+        return
+    if referrer_id == new_user_id:
+        log.debug("Ignored self-referral start user=%s", new_user_id)
+        return
+    try:
+        existing = await gsheets_ref.find_ref_by_new_user_id(new_user_id)
+    except Exception:
+        log.exception("Failed to lookup referral row for user=%s", new_user_id)
+        return
+    if existing:
+        log.debug(
+            "Referral already tracked new_user=%s referrer=%s", new_user_id, existing.get("referrer_user_id")
+        )
+        return
+    try:
+        appended = await gsheets_ref.append_ref_row(referrer_id, new_user_id)
+    except Exception:
+        log.exception("Failed to append referral row new_user=%s referrer=%s", new_user_id, referrer_id)
+        return
+    if appended:
+        log.debug("ref track ok new_user=%s referrer=%s", new_user_id, referrer_id)
 
 
 def _build_help_keyboard(config: Config) -> InlineKeyboardMarkup:
@@ -3582,6 +3650,16 @@ def _build_archive_payload_from_sent(
 async def start_command(
     message: Message, db: Database, state: FSMContext, config: Config
 ) -> None:
+    payload = ""
+    try:
+        payload = message.get_args()
+    except AttributeError:
+        payload = ""
+    if payload:
+        try:
+            await _process_referral_payload(message, payload)
+        except Exception:
+            log.exception("Failed to process referral payload for user=%s", message.from_user.id if message.from_user else "?")
     await state.finish()
     await _ensure_user(message, db)
     await _send_main_menu(message, config)
@@ -5924,6 +6002,11 @@ def register_handlers(
     dp.register_callback_query_handler(
         lambda call, state: menu_callback_handler(call, db, config, state),
         lambda call: call.data and call.data.startswith("menu:"),
+        state="*",
+    )
+    dp.register_callback_query_handler(
+        balance_callback_handler,
+        lambda call: call.data == "balance:ref_link",
         state="*",
     )
 

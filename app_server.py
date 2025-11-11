@@ -20,6 +20,7 @@ from config import CFG, Config
 from db import Database
 from handlers import resend_pending_order
 from i18n import format_credits, i18n
+from services import gsheets_ref
 import yookassa_client
 
 log = logging.getLogger(__name__)
@@ -81,7 +82,22 @@ class YooKassaProcessor:
             return
         status = getattr(payment, "status", "") or ""
         paid = bool(getattr(payment, "paid", False))
-        amount_cp = self._amount_to_cop(getattr(payment, "amount", None))
+        amount_obj = getattr(payment, "amount", None)
+        amount_cp = self._amount_to_cop(amount_obj)
+        amount_value_str = ""
+        amount_currency = ""
+        if amount_obj is not None:
+            value_raw = getattr(amount_obj, "value", "")
+            currency_raw = getattr(amount_obj, "currency", "")
+            if value_raw is not None:
+                amount_value_str = str(value_raw)
+            if currency_raw is not None:
+                amount_currency = str(currency_raw)
+        if not amount_value_str and amount_cp:
+            try:
+                amount_value_str = str((Decimal(amount_cp) / Decimal(100)).quantize(Decimal("0.01")))
+            except Exception:
+                amount_value_str = str(amount_cp)
         idempotency_key = str(
             metadata.get("idempotency_key")
             or metadata.get("idempotency_key".upper())
@@ -245,6 +261,12 @@ class YooKassaProcessor:
             balance_after,
             amount_cp,
         )
+        await self._apply_referral_bonus(
+            payer_user_id=user_id_int,
+            payment_id=payment_id,
+            amount_value=amount_value_str,
+            currency=amount_currency,
+        )
         await self._notify_success(user_id_int, purchased_credits)
 
     async def poll_pending_once(self) -> None:
@@ -275,6 +297,105 @@ class YooKassaProcessor:
             await resend_pending_order(bot=self._bot, db=self._db, config=self._config, user_id=user_id)
         except Exception:  # pragma: no cover - Telegram API interaction
             log.exception("Failed to notify user %s about YooKassa success", user_id)
+
+    async def _apply_referral_bonus(
+        self,
+        *,
+        payer_user_id: int,
+        payment_id: str,
+        amount_value: str,
+        currency: str,
+    ) -> None:
+        try:
+            referral_row = await gsheets_ref.find_ref_by_new_user_id(
+                payer_user_id, only_pending=True
+            )
+        except Exception:
+            log.exception(
+                "Failed to lookup referral for payer=%s payment=%s",
+                payer_user_id,
+                payment_id,
+            )
+            return
+        if not referral_row:
+            return
+        referrer_raw = referral_row.get("referrer_user_id")
+        try:
+            referrer_id = int(str(referrer_raw))
+        except (TypeError, ValueError):
+            log.warning(
+                "Invalid referrer id %r for referral payer=%s payment=%s",
+                referrer_raw,
+                payer_user_id,
+                payment_id,
+            )
+            return
+        if referrer_id == payer_user_id:
+            log.warning(
+                "Skipping referral bonus for self-referral referrer=%s payment=%s",
+                referrer_id,
+                payment_id,
+            )
+            return
+        bonus_credits = 100
+        try:
+            await self._db.ensure_user(referrer_id, None)
+            await self._db.add_credits(referrer_id, bonus_credits)
+        except Exception:
+            log.exception(
+                "Failed to credit referral bonus referrer=%s payer=%s payment=%s",
+                referrer_id,
+                payer_user_id,
+                payment_id,
+            )
+            return
+        try:
+            marked = await gsheets_ref.mark_credited(
+                referral_row,
+                amount=amount_value,
+                currency=currency,
+                payment_id=payment_id,
+            )
+        except Exception:
+            log.exception(
+                "Failed to mark referral credited referrer=%s payer=%s payment=%s",
+                referrer_id,
+                payer_user_id,
+                payment_id,
+            )
+            marked = False
+        if not marked:
+            log.warning(
+                "Referral row not marked credited referrer=%s payer=%s payment=%s",
+                referrer_id,
+                payer_user_id,
+                payment_id,
+            )
+        try:
+            await self._bot.send_message(
+                referrer_id,
+                "🎉 Твой друг пополнил баланс. +100 кредитов за рефералку начислены.",
+            )
+        except Exception:
+            log.exception(
+                "Failed to notify referrer %s about referral bonus", referrer_id
+            )
+        try:
+            await self._bot.send_message(
+                payer_user_id,
+                "Спасибо за пополнение! Твоя покупка засчитана по реферал-ссылке друга.",
+            )
+        except Exception:
+            log.exception(
+                "Failed to notify payer %s about referral attribution",
+                payer_user_id,
+            )
+        log.info(
+            "Referral bonus granted referrer=%s payer=%s payment=%s",
+            referrer_id,
+            payer_user_id,
+            payment_id,
+        )
 
     def _extract_metadata(self, payment) -> dict:
         metadata = getattr(payment, "metadata", None) or {}
