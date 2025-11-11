@@ -152,6 +152,17 @@ VEO_FIXED_PRICE_RUB = Decimal("89")
 
 log = logging.getLogger(__name__)
 
+_BOT_USERNAME_CACHE: str = ""
+
+
+async def _get_bot_username(bot: Bot) -> str:
+    global _BOT_USERNAME_CACHE
+    if _BOT_USERNAME_CACHE:
+        return _BOT_USERNAME_CACHE
+    me = await bot.get_me()
+    _BOT_USERNAME_CACHE = me.username or ""
+    return _BOT_USERNAME_CACHE
+
 
 SIZE_OPTIONS: Dict[str, str] = {
     "vertical": "720x1280",
@@ -1426,20 +1437,25 @@ async def balance_callback_handler(callback: CallbackQuery) -> None:
     user = callback.from_user
     if not user:
         return
-    bot_username = callback.bot.username or ""
+    bot_username = await _get_bot_username(callback.bot)
     if not bot_username:
-        try:
-            me = await callback.bot.get_me()
-        except Exception:
-            log.exception("Failed to fetch bot username for referral link")
-            return
-        bot_username = me.username or ""
-    bot_username = bot_username.lstrip("@")
-    if not bot_username:
-        log.warning("Bot username unavailable for referral link user=%s", user.id)
+        if callback.message:
+            await callback.message.answer(
+                "У бота не задан @username. Задайте имя пользователя боту в настройках, затем повторите попытку."
+            )
+        else:
+            await callback.bot.send_message(
+                user.id,
+                "У бота не задан @username. Задайте имя пользователя боту в настройках, затем повторите попытку.",
+            )
         return
+    bot_username = bot_username.lstrip("@")
     ref_link = f"https://t.me/{bot_username}?start=ref_{user.id}"
-    response = f"Твоя ссылка:\n{ref_link}"
+    response = (
+        "Твоя реферальная ссылка:\n"
+        f"{ref_link}\n\n"
+        "Когда друг перейдёт по ней и пополнит баланс на любую сумму — тебе начислится 100 кредитов."
+    )
     if callback.message:
         await callback.message.answer(response)
     else:
