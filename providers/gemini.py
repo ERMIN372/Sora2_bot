@@ -3407,6 +3407,10 @@ class GeminiGenerativeClient(BaseProviderClient):
                 if (
                     decision.task == "image"
                     and provider_error.status_code in {400, 404}
+                    and (
+                        not isinstance(decision.model, str)
+                        or decision.model.strip().lower() != "gemini-2.5-flash-image"
+                    )
                 ):
                     alt_version = "v1beta" if decision_version == "v1" else "v1"
                     if alt_version not in attempted_api_versions:

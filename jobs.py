@@ -1013,11 +1013,80 @@ class JobQueue:
             model_key = fallback.model
             request_settings = fallback.settings
             stable_idempotency_key = fallback.idempotency_key
-        job_id = submission.job_id
-        video_id = _extract_video_id(submission.data, client=client)
-        operation_name = submission.data.get("operation_name") if isinstance(submission.data, dict) else None
+        submission_payload = submission.data if isinstance(submission.data, dict) else {}
+        inline_assets_payload = []
+        if isinstance(submission_payload.get("inline_assets"), list):
+            inline_assets_payload = submission_payload.get("inline_assets")  # type: ignore[assignment]
         now = datetime.utcnow()
         effective_cost = credits_cost or self._config.generation_cost_credits
+        is_flash_inline = (
+            provider_key == "gemini-image"
+            and (model_key or "").strip().lower() == "gemini-2.5-flash-image"
+            and not submission.job_id
+            and bool(inline_assets_payload)
+        )
+        if is_flash_inline:
+            inline_job_id = str(uuid.uuid4())
+            record = GenerationJobRecord(
+                id=inline_job_id,
+                user_id=user_id,
+                prompt=effective_prompt,
+                status="completed",
+                video_url=None,
+                video_id=None,
+                error=None,
+                created_at=now,
+                updated_at=now,
+                image_file_id=image_file_id,
+                size=size,
+                model=model_key,
+                cost_credits=effective_cost,
+                username=username,
+                corr_id=corr_id,
+                content_type="image",
+                idempotency_key=stable_idempotency_key,
+                operation_name=None,
+            )
+            if isinstance(record.extra, dict):
+                record.extra.update(
+                    {
+                        "inline_result": submission_payload,
+                        "gemini_key_mask": self._gemini_key_mask or None,
+                        "provider": provider_key,
+                        "duration_ms": submission.duration_ms,
+                        "status_code": submission.status_code,
+                    }
+                )
+            log_event(
+                level="INFO",
+                event="request",
+                corr_id=corr_id,
+                job_id=inline_job_id,
+                user_id=user_id,
+                username=username,
+                model=model_key,
+                provider=provider_key,
+                size=size,
+                credits_cost=effective_cost,
+                duration_ms=submission.duration_ms,
+                status_code=submission.status_code,
+                prompt=None,
+                gsheets_ok=True,
+                extra={
+                    "gemini_key_mask": self._gemini_key_mask or None,
+                    "preflight_blocked": False,
+                    "preflight_reason": preflight_reason,
+                    "preflight_scope": preflight_scope,
+                    "preflight_auto_sanitized": auto_sanitized,
+                    "video_id": None,
+                    "inline_result": True,
+                },
+            )
+            return record
+
+        job_id = submission.job_id
+        video_id = _extract_video_id(submission.data, client=client)
+        operation_name = submission_payload.get("operation_name") if isinstance(submission.data, dict) else None
         record = GenerationJobRecord(
             id=job_id,
             user_id=user_id,
