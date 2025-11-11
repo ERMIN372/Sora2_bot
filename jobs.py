@@ -936,6 +936,7 @@ class JobQueue:
         idempotency_key: Optional[str] = None,
         content_type: str = "video",
         credits_cost: Optional[int] = None,
+        extra: Optional[Dict[str, Any]] = None,
     ) -> GenerationJobRecord:
         model_key = model or self._config.default_video_model
         client, provider_key = self._resolve_provider(provider or model_key)
@@ -1014,6 +1015,7 @@ class JobQueue:
             request_settings = fallback.settings
             stable_idempotency_key = fallback.idempotency_key
         submission_payload = submission.data if isinstance(submission.data, dict) else {}
+        extras_payload = dict(extra or {})
         inline_assets_payload = []
         if isinstance(submission_payload.get("inline_assets"), list):
             inline_assets_payload = submission_payload.get("inline_assets")  # type: ignore[assignment]
@@ -1057,6 +1059,8 @@ class JobQueue:
                         "status_code": submission.status_code,
                     }
                 )
+                if extras_payload:
+                    record.extra.update(extras_payload)
             log_event(
                 level="INFO",
                 event="request",
@@ -1107,6 +1111,8 @@ class JobQueue:
             idempotency_key=stable_idempotency_key,
             operation_name=operation_name,
         )
+        if extras_payload:
+            record.extra.update(extras_payload)
         await self._db.create_job(record)
         asset_kind = ASSET_KIND_IMAGE if content_type_value == "image" else ASSET_KIND_VIDEO
         task_type = IMAGE_TASK_GENERATE if asset_kind == ASSET_KIND_IMAGE else ASSET_TASK_RETRIEVE

@@ -152,6 +152,7 @@ _JOBS_HEADERS = [
     "corr_id",
     "idempotency_key",
     "content_type",
+    "metadata",
     "status_message_id",
     "status_message_index",
     "status_message_updated_at",
@@ -469,6 +470,7 @@ def _normalise_job(row: Dict[str, Any]) -> Dict[str, Any]:
         "corr_id": _parse_str(row.get("corr_id")),
         "idempotency_key": _parse_str(row.get("idempotency_key")),
         "content_type": _parse_str(row.get("content_type")) or "video",
+        "metadata": _parse_str(row.get("metadata")),
         "status_message_id": _parse_int(row.get("status_message_id")),
         "status_message_index": _parse_int(row.get("status_message_index")),
         "status_message_updated_at": _parse_str(row.get("status_message_updated_at")),
@@ -1151,6 +1153,7 @@ async def create_job(
     operation_name: Optional[str] = None,
     file_url: Optional[str] = None,
     video_id: Optional[str] = None,
+    metadata: Optional[Dict[str, Any]] = None,
 ) -> None:
     state = await _ensure_jobs_state()
     async with state.lock:
@@ -1159,6 +1162,14 @@ async def create_job(
         now = _now()
         row_index = state.next_row
         username_clean = _clean_username(username) if username is not None else ""
+        metadata_payload: Dict[str, Any] = {}
+        if isinstance(metadata, dict):
+            for key, value in metadata.items():
+                if isinstance(value, (str, int, float, bool)) or value is None:
+                    metadata_payload[key] = value
+                else:
+                    metadata_payload[key] = str(value)
+        metadata_str = json.dumps(metadata_payload, ensure_ascii=False) if metadata_payload else ""
         record = {
             "job_id": job_id,
             "user_id": user_id,
@@ -1181,6 +1192,7 @@ async def create_job(
             "corr_id": corr_id or "",
             "idempotency_key": idempotency_key or "",
             "content_type": (content_type or "video"),
+            "metadata": metadata_str,
             "status_message_id": "",
             "status_message_index": 0,
             "status_message_updated_at": "",

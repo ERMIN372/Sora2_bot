@@ -10,6 +10,20 @@ from typing import Literal, Optional
 
 import aiohttp
 from aiogram import Bot
+try:  # pragma: no cover - optional aiogram dependency for tests
+    from aiogram.types import InputMediaPhoto
+    from aiogram.types.input_media import InputMediaVideo
+except Exception:  # pragma: no cover - tests provide stubs
+    class InputMediaPhoto:  # type: ignore[override]
+        def __init__(self, media, caption=None, parse_mode=None, **kwargs):
+            self.media = media
+            self.caption = caption
+            self.parse_mode = parse_mode
+            self.extra = dict(kwargs)
+
+    class InputMediaVideo(InputMediaPhoto):  # type: ignore[override]
+        def __init__(self, media, caption=None, parse_mode=None, **kwargs):
+            super().__init__(media, caption=caption, parse_mode=parse_mode, **kwargs)
 from aiogram.utils import exceptions as aiogram_exceptions
 
 BadRequest = aiogram_exceptions.BadRequest
@@ -56,6 +70,7 @@ class ArchivePayload:
     duration_seconds: Optional[int] = None
     delivery_method: Optional[str] = None
     sent_at: Optional[datetime] = None
+    ref_file_id: Optional[str] = None
 
     def resolved_file_size(self) -> Optional[int]:
         if self.file_size is not None:
@@ -317,17 +332,65 @@ class ArchivePublisher:
         return self._can_publish
 
     async def _send_media(self, payload: ArchivePayload, caption: str):
+        ref_id = payload.ref_file_id if isinstance(payload.ref_file_id, str) and payload.ref_file_id else None
+        delivery_method = (
+            payload.delivery_method or ("video" if payload.content_type == "video" else "photo")
+        )
+        prepared_data: Optional[bytes] = None
+        prepared_filename: Optional[str] = None
+        prepared_input: Optional[BufferedInputFile] = None
+        message = None
+
+        if (
+            ref_id
+            and payload.content_type == "video"
+            and delivery_method == "video"
+        ):
+            try:
+                if payload.file_id:
+                    video_media = payload.file_id
+                else:
+                    prepared_data, prepared_filename = await self._prepare_input(payload)
+                    prepared_input = BufferedInputFile(
+                        prepared_data,
+                        filename=prepared_filename,
+                        mime_type=payload.mime_type,
+                    )
+                    video_media = prepared_input
+                media_group = [
+                    InputMediaVideo(
+                        media=video_media,
+                        caption=caption,
+                        parse_mode="MarkdownV2",
+                        duration=payload.duration_seconds,
+                        supports_streaming=True,
+                    ),
+                    InputMediaPhoto(media=ref_id),
+                ]
+                messages = await self._bot.send_media_group(self._channel_id, media_group)
+                return messages[0] if messages else None
+            except Exception:
+                log.debug(
+                    "Archive album send failed corr_id=%s, falling back",
+                    payload.corr_id,
+                    exc_info=True,
+                )
+                if prepared_data is None and not payload.file_id:
+                    prepared_data, prepared_filename = await self._prepare_input(payload)
+                    prepared_input = BufferedInputFile(
+                        prepared_data,
+                        filename=prepared_filename,
+                        mime_type=payload.mime_type,
+                    )
+
         if payload.file_id:
-            method = (payload.delivery_method or "video") if payload.content_type == "video" else (
-                payload.delivery_method or "photo"
-            )
-            if method == "video" and payload.content_type == "video":
+            if payload.content_type == "video" and delivery_method == "video":
                 log.debug(
                     "Sending archive video via file_id corr_id=%s duration=%s",
                     payload.corr_id,
                     payload.duration_seconds,
                 )
-                return await self._bot.send_video(
+                message = await self._bot.send_video(
                     self._channel_id,
                     payload.file_id,
                     caption=caption,
@@ -335,43 +398,73 @@ class ArchivePublisher:
                     duration=payload.duration_seconds,
                     supports_streaming=True,
                 )
-            if method == "photo" and payload.content_type == "image":
+            elif payload.content_type == "image" and delivery_method == "photo":
                 log.debug("Sending archive photo via file_id corr_id=%s", payload.corr_id)
-                return await self._bot.send_photo(
+                message = await self._bot.send_photo(
                     self._channel_id,
                     payload.file_id,
                     caption=caption,
                     parse_mode="MarkdownV2",
                 )
-            log.debug("Sending archive document via file_id corr_id=%s", payload.corr_id)
-            return await self._bot.send_document(
-                self._channel_id,
-                payload.file_id,
-                caption=caption,
-                parse_mode="MarkdownV2",
+            else:
+                log.debug("Sending archive document via file_id corr_id=%s", payload.corr_id)
+                message = await self._bot.send_document(
+                    self._channel_id,
+                    payload.file_id,
+                    caption=caption,
+                    parse_mode="MarkdownV2",
+                )
+        else:
+            if prepared_data is None:
+                prepared_data, prepared_filename = await self._prepare_input(payload)
+            filename = prepared_filename or self._build_filename(payload)
+            input_file = prepared_input or BufferedInputFile(
+                prepared_data,
+                filename=filename,
+                mime_type=payload.mime_type,
             )
+            if payload.content_type == "video":
+                log.debug(
+                    "Sending archive video corr_id=%s filename=%s duration=%s",
+                    payload.corr_id,
+                    filename,
+                    payload.duration_seconds,
+                )
+                message = await self._bot.send_video(
+                    self._channel_id,
+                    input_file,
+                    caption=caption,
+                    parse_mode="MarkdownV2",
+                    duration=payload.duration_seconds,
+                    supports_streaming=True,
+                )
+            else:
+                log.debug(
+                    "Sending archive document corr_id=%s filename=%s",
+                    payload.corr_id,
+                    filename,
+                )
+                message = await self._bot.send_document(
+                    self._channel_id,
+                    input_file,
+                    caption=caption,
+                    parse_mode="MarkdownV2",
+                )
 
-        data, filename = await self._prepare_input(payload)
-        input_file = BufferedInputFile(data, filename=filename, mime_type=payload.mime_type)
-        if payload.content_type == "video":
-            log.debug(
-                "Sending archive video corr_id=%s filename=%s duration=%s", payload.corr_id, filename, payload.duration_seconds
-            )
-            return await self._bot.send_video(
-                self._channel_id,
-                input_file,
-                caption=caption,
-                parse_mode="MarkdownV2",
-                duration=payload.duration_seconds,
-                supports_streaming=True,
-            )
-        log.debug("Sending archive document corr_id=%s filename=%s", payload.corr_id, filename)
-        return await self._bot.send_document(
-            self._channel_id,
-            input_file,
-            caption=caption,
-            parse_mode="MarkdownV2",
-        )
+        if ref_id and payload.content_type == "video" and message is not None:
+            try:
+                await self._bot.send_photo(
+                    self._channel_id,
+                    ref_id,
+                    reply_to_message_id=message.message_id,
+                )
+            except Exception:
+                log.debug(
+                    "Archive reference send failed corr_id=%s",
+                    payload.corr_id,
+                    exc_info=True,
+                )
+        return message
 
     async def _prepare_input(self, payload: ArchivePayload) -> tuple[bytes, str]:
         filename = payload.filename or self._build_filename(payload)
