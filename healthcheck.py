@@ -350,62 +350,64 @@ async def _probe_gemini_models(config: Config) -> Tuple[bool, str]:
     if video_model:
         if video_model not in supported:
             return False, f"video model {video_model} missing"
+        video_detail = detail.setdefault("video", {"model": video_model})
         if not _supports_method(supported, video_model, "generate_videos"):
-            return False, f"video model {video_model} lacks generate_videos"
-        video_client = clients.get("media")
-        if video_client is None:
-            return False, "video client media unavailable"
-        video_config = _genai_types.GenerateVideosConfig(duration_seconds=1)
-        try:
-            start = time.perf_counter()
-            operation = await asyncio.wait_for(
-                asyncio.to_thread(
-                    video_client.models.generate_videos,
-                    model=video_model,
-                    prompt="ping",
-                    config=video_config,
-                ),
-                timeout=60.0,
+            warning_msg = f"video model {video_model} lacks generate_videos"
+            warnings.append(warning_msg)
+            video_detail["warning"] = "missing generate_videos"
+        else:
+            video_client = clients.get("media")
+            if video_client is None:
+                return False, "video client media unavailable"
+            video_config = _genai_types.GenerateVideosConfig(duration_seconds=1)
+            try:
+                start = time.perf_counter()
+                operation = await asyncio.wait_for(
+                    asyncio.to_thread(
+                        video_client.models.generate_videos,
+                        model=video_model,
+                        prompt="ping",
+                        config=video_config,
+                    ),
+                    timeout=60.0,
+                )
+            except _genai_errors.APIError as exc:
+                detail_msg = f"{getattr(exc, 'code', 0)}:{getattr(exc, 'status', '')}".strip(":")
+                log.warning("Gemini video submit failed model=%s", video_model, exc_info=True)
+                return False, detail_msg or str(exc)
+            except Exception as exc:  # pragma: no cover - defensive
+                log.warning("Gemini video submit crashed model=%s", video_model, exc_info=True)
+                return False, str(exc)
+
+            operation_name = getattr(operation, "name", None) or ""
+            if not operation_name:
+                return False, "video:missing_operation_name"
+
+            polls = 0
+            refreshed = operation
+            if not getattr(operation, "done", False):
+                for _ in range(2):
+                    polls += 1
+                    await asyncio.sleep(random.uniform(2.0, 3.0))
+                    try:
+                        refreshed = await asyncio.to_thread(video_client.operations.get, operation)
+                    except _genai_errors.APIError as exc:
+                        detail_msg = f"{getattr(exc, 'code', 0)}:{getattr(exc, 'status', '')}".strip(":")
+                        log.warning(
+                            "Gemini video poll failed model=%s op=%s", video_model, operation_name, exc_info=True
+                        )
+                        return False, detail_msg or str(exc)
+                    if getattr(refreshed, "done", False):
+                        break
+
+            video_detail.update(
+                {
+                    "operation": getattr(refreshed, "name", None) or operation_name,
+                    "polls": polls,
+                    "done": bool(getattr(refreshed, "done", False)),
+                    "latency_ms": int((time.perf_counter() - start) * 1000),
+                }
             )
-        except _genai_errors.APIError as exc:
-            detail_msg = f"{getattr(exc, 'code', 0)}:{getattr(exc, 'status', '')}".strip(":")
-            log.warning("Gemini video submit failed model=%s", video_model, exc_info=True)
-            return False, detail_msg or str(exc)
-        except Exception as exc:  # pragma: no cover - defensive
-            log.warning("Gemini video submit crashed model=%s", video_model, exc_info=True)
-            return False, str(exc)
-
-        operation_name = getattr(operation, "name", None) or ""
-        if not operation_name:
-            return False, "video:missing_operation_name"
-
-        polls = 0
-        refreshed = operation
-        if not getattr(operation, "done", False):
-            for _ in range(2):
-                polls += 1
-                await asyncio.sleep(random.uniform(2.0, 3.0))
-                try:
-                    refreshed = await asyncio.to_thread(video_client.operations.get, operation)
-                except _genai_errors.APIError as exc:
-                    detail_msg = f"{getattr(exc, 'code', 0)}:{getattr(exc, 'status', '')}".strip(":")
-                    log.warning(
-                        "Gemini video poll failed model=%s op=%s", video_model, operation_name, exc_info=True
-                    )
-                    return False, detail_msg or str(exc)
-                if getattr(refreshed, "done", False):
-                    break
-
-        detail.setdefault("video", {})
-        detail["video"].update(
-            {
-                "model": video_model,
-                "operation": getattr(refreshed, "name", None) or operation_name,
-                "polls": polls,
-                "done": bool(getattr(refreshed, "done", False)),
-                "latency_ms": int((time.perf_counter() - start) * 1000),
-            }
-        )
 
     if warnings:
         detail["warnings"] = warnings

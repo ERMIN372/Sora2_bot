@@ -27,6 +27,7 @@ from aiogram.types import (
     CallbackQuery,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
+    InputFile,
     InputMediaPhoto,
     KeyboardButton,
     Message,
@@ -3413,13 +3414,17 @@ async def _deliver_remote_media(
                 return None
         else:
             if downloaded.size <= _TELEGRAM_VIDEO_MAX_BYTES:
-                message = await dp.bot.send_video(
-                    job.user_id,
-                    BufferedInputFile(
+                if downloaded.path and downloaded.path.exists():
+                    video_source: Any = InputFile(downloaded.path, filename=filename)
+                else:
+                    video_source = BufferedInputFile(
                         downloaded.content,
                         filename=filename,
                         mime_type=downloaded.mime,
-                    ),
+                    )
+                message = await dp.bot.send_video(
+                    job.user_id,
+                    video_source,
                     supports_streaming=True,
                     duration=duration_seconds or None,
                 )

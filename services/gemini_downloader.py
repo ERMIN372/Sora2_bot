@@ -4,11 +4,25 @@ import asyncio
 import logging
 import mimetypes
 import os
+import re
 from dataclasses import dataclass
-from typing import Optional
+from pathlib import Path
+from typing import Optional, Tuple
 from urllib.parse import urlparse
 
-import aiohttp
+try:  # pragma: no cover - optional dependency during tests
+    import httpx
+except ModuleNotFoundError:  # pragma: no cover - tests may stub the client
+    class _HttpxMissing:
+        class Timeout:  # type: ignore[return-type]
+            def __init__(self, *args, **kwargs) -> None:
+                raise ModuleNotFoundError("httpx is required")
+
+        class AsyncClient:  # type: ignore[return-type]
+            def __init__(self, *args, **kwargs) -> None:
+                raise ModuleNotFoundError("httpx is required")
+
+    httpx = _HttpxMissing()  # type: ignore[assignment]
 
 from config import Config
 from services.gemini_client import get_media_client
@@ -32,6 +46,7 @@ class DownloadedAsset:
     filename: str
     size: int
     key_mask: str
+    path: Optional[Path] = None
 
 
 class GeminiDownloadError(RuntimeError):
@@ -54,6 +69,9 @@ class GeminiKeyMismatchError(GeminiDownloadError):
         )
         self.expected = expected
         self.actual = actual
+
+
+_DOWNLOAD_DIR = Path("attached_assets") / "downloads" / "gemini"
 
 
 def _extract_file_name(asset_url: str) -> str:
@@ -123,6 +141,22 @@ def _build_filename(
     return f"{base}{extension}"
 
 
+def _sanitise_segment(segment: str) -> str:
+    cleaned = segment.strip().replace(os.sep, "_")
+    return re.sub(r"[^a-zA-Z0-9_.-]", "_", cleaned) or "asset"
+
+
+def _ensure_download_path(asset_name: str, filename: str) -> Path:
+    segments = [seg for seg in asset_name.split("/") if seg.strip()]
+    if not segments:
+        segments = ["asset"]
+    safe_segments = [_sanitise_segment(seg) for seg in segments]
+    directory = _DOWNLOAD_DIR.joinpath(*safe_segments[:-1]) if len(safe_segments) > 1 else _DOWNLOAD_DIR
+    directory.mkdir(parents=True, exist_ok=True)
+    safe_filename = _sanitise_segment(filename)
+    return directory / safe_filename
+
+
 def _extract_mime(
     *,
     file_meta: Optional[_genai_types.File],
@@ -137,123 +171,6 @@ def _extract_mime(
     return "application/octet-stream"
 
 
-async def _download_direct_asset(
-    *,
-    url: str,
-    api_key: str,
-    config: Config,
-    corr_id: str,
-    asset_name: str,
-    mask: str,
-    mime_hint: Optional[str],
-    filename_hint: Optional[str],
-) -> DownloadedAsset:
-    if not api_key:
-        raise GeminiConfigurationError("Gemini API key is not configured", status_code=401)
-
-    timeout = aiohttp.ClientTimeout(
-        total=None,
-        sock_connect=config.request_connect_timeout,
-        sock_read=config.request_read_timeout,
-    )
-    headers = {"X-Goog-Api-Key": api_key}
-    retry_schedule = (3.0, 6.0, 10.0)
-    max_attempts = len(retry_schedule) + 1
-
-    async with aiohttp.ClientSession(timeout=timeout) as session:
-        for attempt in range(1, max_attempts + 1):
-            log.info(
-                "gemini.download direct start corr_id=%s asset=%s attempt=%s/%s key_mask=%s",
-                corr_id,
-                asset_name,
-                attempt,
-                max_attempts,
-                mask or "",
-            )
-            try:
-                async with session.get(url, headers=headers) as response:
-                    payload = await response.read()
-                    status = response.status
-                    if status == 200:
-                        mime = response.headers.get("Content-Type") or mime_hint or "video/mp4"
-                        disposition_name = _parse_disposition_filename(
-                            response.headers.get("Content-Disposition")
-                        )
-                        effective_hint = filename_hint or disposition_name
-                        filename = _build_filename(
-                            asset_name=asset_name,
-                            file_meta=None,
-                            filename_hint=effective_hint,
-                            mime=mime,
-                        )
-                        try:
-                            size_bytes = int(response.headers.get("Content-Length") or 0)
-                        except (TypeError, ValueError):
-                            size_bytes = 0
-                        if size_bytes <= 0:
-                            size_bytes = len(payload)
-                        log.info(
-                            "gemini.download direct success corr_id=%s asset=%s bytes=%s key_mask=%s",
-                            corr_id,
-                            asset_name,
-                            len(payload),
-                            mask or "",
-                        )
-                        return DownloadedAsset(
-                            content=payload,
-                            mime=mime,
-                            filename=filename,
-                            size=size_bytes,
-                            key_mask=mask,
-                        )
-                    elif status == 403:
-                        if attempt <= len(retry_schedule):
-                            await asyncio.sleep(retry_schedule[attempt - 1])
-                            continue
-                        raise GeminiConfigurationError(
-                            "Сервер отказал в доступе к прямой ссылке Gemini",
-                            status_code=status,
-                            error_status="PERMISSION_DENIED",
-                        )
-                    elif status in {401, 429, 500, 502, 503, 504, 408}:
-                        if attempt >= max_attempts:
-                            raise GeminiDownloadError(
-                                "Gemini вернул ошибку при скачивании",
-                                status_code=status,
-                                error_status=str(status),
-                            )
-                        await asyncio.sleep(
-                            retry_schedule[min(attempt - 1, len(retry_schedule) - 1)]
-                        )
-                        continue
-                    else:
-                        raise GeminiDownloadError(
-                            "Gemini вернул ошибку при скачивании",
-                            status_code=status,
-                            error_status=str(status),
-                        )
-            except (GeminiDownloadError, GeminiConfigurationError):
-                raise
-            except Exception as exc:
-                log.warning(
-                    "gemini.download direct error corr_id=%s asset=%s attempt=%s/%s key_mask=%s error=%s",
-                    corr_id,
-                    asset_name,
-                    attempt,
-                    max_attempts,
-                    mask or "",
-                    exc,
-                )
-                if attempt >= max_attempts:
-                    raise GeminiDownloadError(str(exc)) from exc
-                await asyncio.sleep(
-                    retry_schedule[min(attempt - 1, len(retry_schedule) - 1)]
-                )
-                continue
-
-    raise GeminiDownloadError("Не удалось скачать файл Gemini", status_code=0)
-
-
 async def download_asset(
     *,
     asset_url: str,
@@ -263,7 +180,7 @@ async def download_asset(
     expected_mask: Optional[str],
     mime_hint: Optional[str] = None,
     filename_hint: Optional[str] = None,
-    ) -> DownloadedAsset:
+) -> DownloadedAsset:
     """Download the Gemini asset referenced by *asset_url* via the Files API."""
 
     ensure_gemini_key_logged(
@@ -284,29 +201,40 @@ async def download_asset(
     if not cleaned_url:
         raise GeminiDownloadError("Пустая ссылка на файл Gemini", status_code=400)
 
+    should_fetch_meta = True
     if cleaned_url.startswith("http://") or cleaned_url.startswith("https://"):
-        if "/files/" not in cleaned_url:
-            return await _download_direct_asset(
-                url=cleaned_url,
-                api_key=api_key,
-                config=config,
-                corr_id=corr_id,
-                asset_name=asset_name,
-                mask=mask or "",
-                mime_hint=mime_hint,
-                filename_hint=filename_hint,
-            )
-
-    try:
-        file_name = _extract_file_name(cleaned_url)
-    except ValueError as exc:
-        raise GeminiDownloadError(str(exc), status_code=400) from exc
+        direct_url = cleaned_url
+        try:
+            file_name = _extract_file_name(cleaned_url)
+        except ValueError:
+            file_name = asset_name
+            should_fetch_meta = False
+    else:
+        try:
+            file_name = _extract_file_name(cleaned_url)
+        except ValueError as exc:
+            raise GeminiDownloadError(str(exc), status_code=400) from exc
+        base = cleaned_url.split("?", 1)[0]
+        if not base:
+            base = file_name
+        if ":download" not in base:
+            base = f"{base}:download"
+        query = "alt=media"
+        if "?" in cleaned_url:
+            _, existing_query = cleaned_url.split("?", 1)
+            if existing_query:
+                parts = [part for part in existing_query.split("&") if part]
+                if not any(part.startswith("alt=") for part in parts):
+                    parts.append("alt=media")
+                query = "&".join(parts)
+        direct_url = f"https://generativelanguage.googleapis.com/v1beta/{base}?{query}"
 
     client = get_media_client(config)
-    attempt = 0
-    retry_schedule = (3.0, 6.0, 10.0)
+    retry_schedule = (0.5, 1.0, 2.0)
     max_attempts = len(retry_schedule) + 1
+    attempt = 0
     file_meta: Optional[_genai_types.File] = None
+    disposition_hint: Optional[str] = None
 
     while attempt < max_attempts:
         attempt += 1
@@ -320,113 +248,221 @@ async def download_asset(
             (config.environment or "dev").lower(),
             mask or "",
         )
-        try:
-            if file_meta is None:
-                file_meta = await asyncio.to_thread(client.files.get, name=file_name)
-            payload = await asyncio.to_thread(client.files.download, file=file_meta)
-        except _genai_errors.APIError as exc:
-            raw_code = getattr(exc, "code", 0)
-            payload_error = None
-            if isinstance(raw_code, dict):
-                payload_error = raw_code.get("error") if isinstance(raw_code.get("error"), dict) else None
-                raw_code = (
-                    (payload_error or {}).get("code")
-                    or (payload_error or {}).get("status")
-                    or 0
-                )
+        if file_meta is None and should_fetch_meta:
             try:
-                status_code = int(raw_code or 0)
-            except (TypeError, ValueError):
-                status_code = int(exc.args[0]) if exc.args else 0
-            status_label = str(getattr(exc, "status", "") or "").upper() or None
-            if payload_error:
-                status_label = (
-                    str(payload_error.get("status") or status_label or "").upper() or None
+                file_meta = await asyncio.to_thread(client.files.get, name=file_name)
+            except _genai_errors.APIError as exc:
+                status_code, status_label = _extract_status(exc)
+                log.warning(
+                    "gemini.download file.meta error corr_id=%s asset=%s file=%s status=%s status_label=%s key_mask=%s",
+                    corr_id,
+                    asset_name,
+                    file_name,
+                    status_code or "",
+                    status_label or "",
+                    mask or "",
                 )
-            message = str(exc)
-            log.warning(
-                "gemini.download api_error corr_id=%s asset=%s file=%s status=%s status_label=%s key_mask=%s",
-                corr_id,
-                asset_name,
-                file_name,
-                status_code or "",
-                status_label or "",
-                mask or "",
-            )
-            file_meta = None
-            if status_code == 403 or status_label in {"PERMISSION_DENIED", "SERVICE_DISABLED", "UNAUTHENTICATED"}:
-                if attempt <= len(retry_schedule):
-                    await asyncio.sleep(retry_schedule[attempt - 1])
+                file_meta = None
+                if status_code in {401, 429, 500, 502, 503, 504, 408} or status_label in {
+                    "UNAVAILABLE",
+                    "RESOURCE_EXHAUSTED",
+                }:
+                    if attempt >= max_attempts:
+                        raise GeminiDownloadError(
+                            str(exc), status_code=status_code, error_status=status_label
+                        ) from exc
+                    await asyncio.sleep(retry_schedule[min(attempt - 1, len(retry_schedule) - 1)])
+                    continue
+                if status_code in {403} or status_label in {
+                    "PERMISSION_DENIED",
+                    "SERVICE_DISABLED",
+                    "UNAUTHENTICATED",
+                }:
+                    if attempt >= max_attempts:
+                        raise GeminiDownloadError(
+                            str(exc) or "Gemini вернул ошибку доступа при скачивании",
+                            status_code=status_code or 403,
+                            error_status=status_label or "PERMISSION_DENIED",
+                        ) from exc
+                    await asyncio.sleep(retry_schedule[min(attempt - 1, len(retry_schedule) - 1)])
                     continue
                 raise GeminiDownloadError(
-                    message or "Gemini вернул ошибку доступа при скачивании",
-                    status_code=status_code or 403,
-                    error_status="download_failed",
+                    str(exc), status_code=status_code, error_status=status_label
                 ) from exc
-            if status_code in {401, 429, 500, 502, 503, 504, 408}:
-                if attempt >= max_attempts:
-                    raise GeminiDownloadError(
-                        message, status_code=status_code, error_status=status_label
-                    ) from exc
-                await asyncio.sleep(
-                    retry_schedule[min(attempt - 1, len(retry_schedule) - 1)]
+            except Exception as exc:
+                log.warning(
+                    "gemini.download file.meta exception corr_id=%s asset=%s file=%s attempt=%s/%s key_mask=%s error=%s",
+                    corr_id,
+                    asset_name,
+                    file_name,
+                    attempt,
+                    max_attempts,
+                    mask or "",
+                    exc,
                 )
+                if attempt >= max_attempts:
+                    raise GeminiDownloadError(str(exc)) from exc
+                await asyncio.sleep(retry_schedule[min(attempt - 1, len(retry_schedule) - 1)])
                 continue
-            raise GeminiDownloadError(
-                message, status_code=status_code, error_status=status_label
-            ) from exc
-        except Exception as exc:
-            log.warning(
-                "gemini.download error corr_id=%s asset=%s file=%s attempt=%s/%s key_mask=%s error=%s",
-                corr_id,
-                asset_name,
-                file_name,
-                attempt,
-                max_attempts,
-                mask or "",
-                exc,
-            )
-            file_meta = None
-            if attempt >= max_attempts:
-                raise GeminiDownloadError(str(exc)) from exc
-            await asyncio.sleep(
-                retry_schedule[min(attempt - 1, len(retry_schedule) - 1)]
-            )
-            continue
-        else:
-            if not payload:
-                raise GeminiDownloadError("Gemini вернул пустой файл", status_code=0)
-            mime = _extract_mime(file_meta=file_meta, mime_hint=mime_hint)
-            filename = _build_filename(
+
+        try:
+            payload, headers = await _download_via_http(
+                url=direct_url,
+                api_key=api_key,
+                corr_id=corr_id,
                 asset_name=asset_name,
-                file_meta=file_meta,
-                filename_hint=filename_hint,
-                mime=mime,
+                mask=mask or "",
+                attempt=attempt,
+                max_attempts=max_attempts,
+                config=config,
             )
-            size_bytes = (
-                int(getattr(file_meta, "size_bytes", 0) or 0)
-                if file_meta is not None
-                else 0
+        except GeminiDownloadError as exc:
+            if attempt >= max_attempts:
+                raise
+            await asyncio.sleep(retry_schedule[min(attempt - 1, len(retry_schedule) - 1)])
+            continue
+
+        disposition_hint = _parse_disposition_filename(headers.get("content-disposition"))
+        mime = headers.get("content-type") or _extract_mime(file_meta=file_meta, mime_hint=mime_hint)
+        if not mime:
+            mime = _extract_mime(file_meta=file_meta, mime_hint=mime_hint)
+        if not mime.lower().startswith("video/"):
+            raise GeminiDownloadError(
+                "Gemini вернул файл неожиданного типа",
+                status_code=200,
+                error_status=mime or "invalid_mime",
             )
-            if size_bytes <= 0:
-                size_bytes = len(payload)
-            log.info(
-                "gemini.download success corr_id=%s asset=%s file=%s bytes=%s key_mask=%s",
-                corr_id,
-                asset_name,
-                file_name,
-                len(payload),
-                mask or "",
-            )
-            return DownloadedAsset(
-                content=payload,
-                mime=mime,
-                filename=filename,
-                size=size_bytes,
-                key_mask=mask,
-            )
+        filename = _build_filename(
+            asset_name=asset_name,
+            file_meta=file_meta,
+            filename_hint=filename_hint or disposition_hint,
+            mime=mime,
+        )
+        path = _ensure_download_path(asset_name, filename)
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            log.warning("Failed to create download directory path=%s", path.parent, exc_info=True)
+        try:
+            path.write_bytes(payload)
+        except Exception as exc:
+            raise GeminiDownloadError(str(exc)) from exc
+        size_bytes = path.stat().st_size if path.exists() else len(payload)
+        if size_bytes <= 0:
+            raise GeminiDownloadError("Gemini вернул пустой файл", status_code=0)
+        log.info(
+            "gemini.download success corr_id=%s asset=%s file=%s bytes=%s key_mask=%s",
+            corr_id,
+            asset_name,
+            file_name,
+            size_bytes,
+            mask or "",
+        )
+        return DownloadedAsset(
+            content=payload,
+            mime=mime,
+            filename=filename,
+            size=size_bytes,
+            key_mask=mask or "",
+            path=path,
+        )
 
     raise GeminiDownloadError("Не удалось скачать файл Gemini", status_code=0)
+
+
+def _extract_status(exc: _genai_errors.APIError) -> Tuple[int, Optional[str]]:
+    raw_code = getattr(exc, "code", 0)
+    payload_error = None
+    if isinstance(raw_code, dict):
+        payload_error = raw_code.get("error") if isinstance(raw_code.get("error"), dict) else None
+        raw_code = (
+            (payload_error or {}).get("code")
+            or (payload_error or {}).get("status")
+            or 0
+        )
+    try:
+        status_code = int(raw_code or 0)
+    except (TypeError, ValueError):
+        status_code = int(exc.args[0]) if exc.args else 0
+    status_label = str(getattr(exc, "status", "") or "").upper() or None
+    if payload_error:
+        status_label = str(payload_error.get("status") or status_label or "").upper() or None
+    return status_code, status_label
+
+
+async def _download_via_http(
+    *,
+    url: str,
+    api_key: str,
+    corr_id: str,
+    asset_name: str,
+    mask: str,
+    attempt: int,
+    max_attempts: int,
+    config: Config,
+) -> Tuple[bytes, httpx.Headers]:
+    timeout = httpx.Timeout(
+        connect=config.request_connect_timeout,
+        read=config.request_read_timeout,
+        write=config.request_connect_timeout,
+        pool=None,
+    )
+    headers = {"x-goog-api-key": api_key}
+    retryable_status = {408, 429, 500, 502, 503, 504}
+
+    log.info(
+        "gemini.download http start corr_id=%s asset=%s attempt=%s/%s key_mask=%s",
+        corr_id,
+        asset_name,
+        attempt,
+        max_attempts,
+        mask or "",
+    )
+    try:
+        async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+            response = await client.get(url, headers=headers)
+    except httpx.TimeoutException as exc:
+        raise GeminiDownloadError("Gemini не ответил вовремя", status_code=0) from exc
+    except httpx.RequestError as exc:
+        raise GeminiDownloadError(str(exc), status_code=0) from exc
+
+    status = response.status_code
+    if status == 200:
+        payload = await response.aread()
+        declared_length = response.headers.get("content-length")
+        if declared_length is not None:
+            try:
+                if int(declared_length) <= 0:
+                    raise GeminiDownloadError("Gemini вернул пустой файл", status_code=0)
+            except ValueError:
+                pass
+        if not payload:
+            raise GeminiDownloadError("Gemini вернул пустой файл", status_code=0)
+        return payload, response.headers
+
+    if status in retryable_status:
+        raise GeminiDownloadError(
+            "Gemini вернул ошибку при скачивании",
+            status_code=status,
+            error_status=str(status),
+        )
+    if status in {401}:
+        raise GeminiConfigurationError(
+            "Gemini вернул ошибку доступа при скачивании",
+            status_code=status,
+            error_status=str(status),
+        )
+    if status == 403:
+        raise GeminiConfigurationError(
+            "Сервер отказал в доступе к прямой ссылке Gemini",
+            status_code=status,
+            error_status="PERMISSION_DENIED",
+        )
+    raise GeminiDownloadError(
+        "Gemini вернул ошибку при скачивании",
+        status_code=status,
+        error_status=str(status),
+    )
 
 
 __all__ = [
