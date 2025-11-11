@@ -12,11 +12,21 @@ except ImportError:  # pragma: no cover - aiogram<3 provides only InputFile
     class BufferedInputFile(InputFile):
         """Fallback BufferedInputFile implementation for aiogram 2.x."""
 
-        def __init__(self, data: bytes | bytearray | memoryview, filename: str, *, mime_type: str | None = None) -> None:
+        def __init__(
+            self,
+            data: bytes | bytearray | memoryview,
+            filename: str,
+            *,
+            mime_type: str | None = None,
+        ) -> None:
             payload = bytes(data)
             buffer = io.BytesIO(payload)
             buffer.seek(0)
-            super().__init__(buffer, filename=filename)
+            try:
+                super().__init__(buffer, filename=filename)
+            except TypeError:  # pragma: no cover - aiogram stubs without __init__
+                self.file = buffer  # type: ignore[attr-defined]
+                self.filename = filename  # type: ignore[attr-defined]
             self.mime_type = mime_type
 
         @property
