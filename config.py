@@ -155,11 +155,11 @@ TOPUP_UI_PACKS = [
 
 UI_MODEL_LABELS = {
     # UI labels only, the actual API model identifiers remain unchanged
-    "veo": "veo3",
-    "veo-3.0-generate-001": "veo3",
-    "sora": "OpenAI Sora 2",
-    "sora-2": "OpenAI Sora 2",
-    "sora-2-pro": "OpenAI Sora 2",
+    "veo": "💚Gemini veo3",
+    "veo-3.0-generate-001": "💚Gemini veo3",
+    "sora": "☁️OpenAI Sora 2",
+    "sora-2": "☁️OpenAI Sora 2",
+    "sora-2-pro": "☁️OpenAI Sora 2",
 }
 
 TOP_UP_PACKAGES: Dict[str, Dict[str, Decimal]] = {
