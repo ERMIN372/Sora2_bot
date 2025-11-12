@@ -5,6 +5,7 @@ import asyncio
 import base64
 import binascii
 import html
+import io
 import fnmatch
 import json
 import logging
@@ -3471,14 +3472,43 @@ async def _deliver_remote_media(
                 return None
         else:
             if downloaded.size <= _TELEGRAM_VIDEO_MAX_BYTES:
-                if downloaded.path and downloaded.path.exists():
-                    video_source: Any = InputFile(downloaded.path, filename=filename)
-                else:
-                    video_source = BufferedInputFile(
-                        downloaded.content,
-                        filename=filename,
-                        mime_type=downloaded.mime,
+                video_source: Optional[Any] = None
+                file_path = getattr(downloaded, "path", None)
+                if file_path:
+                    try:
+                        path_obj = file_path if isinstance(file_path, Path) else Path(file_path)
+                    except (TypeError, ValueError):
+                        path_obj = None
+                    if path_obj and path_obj.exists():
+                        video_source = InputFile(str(path_obj), filename=filename)
+                if video_source is None:
+                    blob = getattr(downloaded, "content", None)
+                    if blob is None:
+                        blob = getattr(downloaded, "bytes", None)
+                    if isinstance(blob, (bytes, bytearray)) and len(blob) > 0:
+                        memory_filename = filename or getattr(downloaded, "filename", None) or "video.mp4"
+                        buffer = io.BytesIO(bytes(blob))
+                        buffer.name = memory_filename
+                        video_source = InputFile(buffer, filename=memory_filename)
+                if video_source is None:
+                    log.warning(
+                        "No downloadable media payload provider=%s job_id=%s corr_id=%s",
+                        provider_key,
+                        job.id,
+                        corr_id,
                     )
+                    await _handle_delivery_failure(
+                        dp,
+                        job,
+                        config,
+                        db,
+                        error_reporter=error_reporter,
+                        message=i18n.t("status.delivery_generic"),
+                        reason="no_media",
+                        extra_log={"asset_bytes": downloaded.size, "stage": "missing_asset_payload"},
+                        key_mask=downloaded.key_mask or expected_mask,
+                    )
+                    return None
                 message = await dp.bot.send_video(
                     job.user_id,
                     video_source,
