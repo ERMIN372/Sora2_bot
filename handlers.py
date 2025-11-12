@@ -3493,42 +3493,98 @@ async def _deliver_remote_media(
         else:
             if downloaded.size <= _TELEGRAM_VIDEO_MAX_BYTES:
                 video_source: Optional[Any] = None
-                file_path = getattr(downloaded, "path", None)
-                if file_path:
-                    try:
-                        path_obj = file_path if isinstance(file_path, Path) else Path(file_path)
-                    except (TypeError, ValueError):
-                        path_obj = None
-                    if path_obj and path_obj.exists():
-                        video_source = InputFile(str(path_obj), filename=filename)
-                if video_source is None:
-                    blob = getattr(downloaded, "content", None)
-                    if blob is None:
+                is_veo_provider = provider_key == "veo" or (
+                    isinstance(job.model, str)
+                    and job.model.lower().startswith("veo-3.0-")
+                )
+                if is_veo_provider:
+                    file_path = getattr(downloaded, "path", None)
+                    if file_path is not None:
+                        path_obj: Optional[Path]
+                        try:
+                            path_obj = file_path if isinstance(file_path, Path) else Path(file_path)
+                        except (TypeError, ValueError):
+                            path_obj = None
+                        if path_obj and path_obj.exists():
+                            try:
+                                video_source = InputFile(str(path_obj), filename=filename)
+                            except TypeError:
+                                try:
+                                    payload = path_obj.read_bytes()
+                                except OSError:
+                                    payload = b""
+                                if payload:
+                                    video_source = BufferedInputFile(
+                                        payload,
+                                        filename=filename,
+                                        mime_type=downloaded.mime,
+                                    )
+                        elif isinstance(file_path, str):
+                            try:
+                                video_source = InputFile(file_path, filename=filename)
+                            except TypeError:
+                                video_source = None
+                    if video_source is None:
                         blob = getattr(downloaded, "bytes", None)
-                    if isinstance(blob, (bytes, bytearray)) and len(blob) > 0:
-                        memory_filename = filename or getattr(downloaded, "filename", None) or "video.mp4"
-                        buffer = io.BytesIO(bytes(blob))
-                        buffer.name = memory_filename
-                        video_source = InputFile(buffer, filename=memory_filename)
-                if video_source is None:
-                    log.warning(
-                        "No downloadable media payload provider=%s job_id=%s corr_id=%s",
-                        provider_key,
-                        job.id,
-                        corr_id,
-                    )
-                    await _handle_delivery_failure(
-                        dp,
-                        job,
-                        config,
-                        db,
-                        error_reporter=error_reporter,
-                        message=i18n.t("status.delivery_generic"),
-                        reason="no_media",
-                        extra_log={"asset_bytes": downloaded.size, "stage": "missing_asset_payload"},
-                        key_mask=downloaded.key_mask or expected_mask,
-                    )
-                    return None
+                        if blob is None:
+                            blob = getattr(downloaded, "content", None)
+                        if isinstance(blob, (bytes, bytearray)) and len(blob) > 0:
+                            memory_filename = (
+                                getattr(downloaded, "filename", None)
+                                or filename
+                                or "video.mp4"
+                            )
+                            buffer = io.BytesIO(bytes(blob))
+                            buffer.name = memory_filename
+                            try:
+                                video_source = InputFile(buffer, filename=memory_filename)
+                            except TypeError:
+                                video_source = BufferedInputFile(
+                                    bytes(blob),
+                                    filename=memory_filename,
+                                    mime_type=downloaded.mime,
+                                )
+                    if video_source is None:
+                        raise RuntimeError("no_media_assets_for_delivery_veo")
+                else:
+                    file_path = getattr(downloaded, "path", None)
+                    if file_path:
+                        try:
+                            path_obj = file_path if isinstance(file_path, Path) else Path(file_path)
+                        except (TypeError, ValueError):
+                            path_obj = None
+                        if path_obj and path_obj.exists():
+                            video_source = InputFile(str(path_obj), filename=filename)
+                    if video_source is None:
+                        blob = getattr(downloaded, "content", None)
+                        if blob is None:
+                            blob = getattr(downloaded, "bytes", None)
+                        if isinstance(blob, (bytes, bytearray)) and len(blob) > 0:
+                            memory_filename = (
+                                filename or getattr(downloaded, "filename", None) or "video.mp4"
+                            )
+                            buffer = io.BytesIO(bytes(blob))
+                            buffer.name = memory_filename
+                            video_source = InputFile(buffer, filename=memory_filename)
+                    if video_source is None:
+                        log.warning(
+                            "No downloadable media payload provider=%s job_id=%s corr_id=%s",
+                            provider_key,
+                            job.id,
+                            corr_id,
+                        )
+                        await _handle_delivery_failure(
+                            dp,
+                            job,
+                            config,
+                            db,
+                            error_reporter=error_reporter,
+                            message=i18n.t("status.delivery_generic"),
+                            reason="no_media",
+                            extra_log={"asset_bytes": downloaded.size, "stage": "missing_asset_payload"},
+                            key_mask=downloaded.key_mask or expected_mask,
+                        )
+                        return None
                 message = await dp.bot.send_video(
                     job.user_id,
                     video_source,
