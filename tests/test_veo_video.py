@@ -97,3 +97,51 @@ def test_build_source_requires_prompt_or_image(config: Config) -> None:
     client = VeoVideoClient(config=config)
     with pytest.raises(RuntimeError):
         client._build_source("", {})
+
+
+@pytest.mark.parametrize("has_public_method", [True, False])
+def test_generate_videos_operation_forwards_reference_image(
+    config: Config, has_public_method: bool
+) -> None:
+    client = VeoVideoClient(config=config)
+    captured: dict[str, object] = {}
+
+    reference_image = object()
+    source = SimpleNamespace(prompt="Make a video", image=reference_image)
+
+    if has_public_method:
+        class DummyModels:
+            def generate_videos(self, **kwargs):
+                captured["called"] = "generate_videos"
+                captured["kwargs"] = kwargs
+                return "operation"
+
+            def _generate_videos(self, **kwargs):  # pragma: no cover - fallback not used
+                raise AssertionError("_generate_videos should not be used in this branch")
+
+        models = DummyModels()
+    else:
+
+        class DummyModels:
+            def _generate_videos(self, **kwargs):
+                captured["called"] = "_generate_videos"
+                captured["kwargs"] = kwargs
+                return "operation"
+
+        models = DummyModels()
+
+    dummy_client = SimpleNamespace(models=models)
+
+    operation = client._generate_videos_operation(
+        dummy_client,
+        model="veo-test",
+        source=source,
+        config=None,
+    )
+
+    assert operation == "operation"
+    assert captured["called"] == ("generate_videos" if has_public_method else "_generate_videos")
+    kwargs = captured["kwargs"]
+    assert kwargs["image"] is reference_image
+    assert kwargs["prompt"] == "Make a video"
+    assert kwargs["model"] == "veo-test"

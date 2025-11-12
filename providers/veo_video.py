@@ -1056,11 +1056,15 @@ class VeoVideoClient(BaseProviderClient):
     ) -> _genai_types.GenerateVideosOperation:
         models = client.models
         prompt_text = None
+        image_ref = None
         if source is not None:
             prompt_text = getattr(source, "prompt", None) or None
+            image_ref = getattr(source, "image", None)
         if prompt_text is None:
             raise RuntimeError("Prompt is required for video generation")
         kwargs = {"model": model, "prompt": prompt_text, "config": config}
+        if image_ref is not None:
+            kwargs["image"] = image_ref
         if hasattr(models, "generate_videos"):
             return models.generate_videos(**{k: v for k, v in kwargs.items() if v is not None})
         return models._generate_videos(**{k: v for k, v in kwargs.items() if v is not None})
