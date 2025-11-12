@@ -850,6 +850,28 @@ def _find_video_model_option(config: Config, key: str) -> Optional[VideoModelOpt
     return None
 
 
+def _video_model_preview_path(option: VideoModelOption) -> Optional[Path]:
+    provider = (option.provider or "").strip().lower()
+    model = (option.model or "").strip().lower()
+    filename: Optional[str] = None
+    if "veo" in provider or "veo" in model:
+        filename = "veo3.MP4"
+    elif "sora" in provider or "sora" in model:
+        filename = "sora2.MP4"
+    if not filename:
+        return None
+    path = _HANDLERS_DIR / filename
+    if not path.exists():
+        log.warning(
+            "Video preview %s not found for model %s (provider=%s)",
+            path,
+            option.model,
+            option.provider,
+        )
+        return None
+    return path
+
+
 def _image_model_preview_path(option: ImageModelOption) -> Optional[Path]:
     provider = (option.provider or "").strip().lower()
     model = (option.model or "").strip().lower()
@@ -4302,14 +4324,36 @@ async def video_model_callback_handler(
         product=resolved_product,
     )
     await GenerationStates.video_mode.set()
+    prompt_text = i18n.t("video.mode.prompt")
+    keyboard = _build_mode_keyboard("video")
+    preview_path = _video_model_preview_path(option)
+    if preview_path is not None:
+        try:
+            await callback.message.edit_reply_markup()
+        except Exception:  # pragma: no cover - Telegram edits may fail
+            pass
+        try:
+            await callback.message.answer_video(
+                InputFile(str(preview_path), filename=preview_path.name),
+                caption=prompt_text,
+                reply_markup=keyboard,
+            )
+            return
+        except Exception:  # pragma: no cover - Telegram may refuse video
+            log.exception(
+                "Failed to send preview for video model %s (provider=%s)",
+                option.model,
+                option.provider,
+            )
     try:
         await callback.message.edit_text(
-            i18n.t("video.mode.prompt"),
-            reply_markup=_build_mode_keyboard("video"),
+            prompt_text,
+            reply_markup=keyboard,
         )
     except Exception:  # pragma: no cover - Telegram edits may fail
         await callback.message.answer(
-            i18n.t("video.mode.prompt"), reply_markup=_build_mode_keyboard("video")
+            prompt_text,
+            reply_markup=keyboard,
         )
 
 
