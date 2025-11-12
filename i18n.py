@@ -320,6 +320,7 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "status.delivery_key_mismatch": "Остановили задачу: используется другой ключ Gemini. Кредиты вернули.",
         "status.delivery_config_error": "Gemini временно недоступен. Мы вернули кредиты — попробуйте позже.",
         "status.delivery_generic": "Не удалось скачать видео. Мы вернули кредиты — попробуйте позже.",
+        "status.delivery_telegram_error": "Не удалось отправить видео в Telegram: {error}. Кредиты вернули.",
         "status.delivery_too_large": "Видео слишком большое для Telegram. Кредиты вернули.",
         "errors.video_models_unavailable": "Нет доступных моделей видеогенерации. Обратитесь к оператору или попробуйте позже.",
         "errors.image_generation_disabled": "Генерация изображений недоступна. Обратитесь к оператору или попробуйте позже.",
