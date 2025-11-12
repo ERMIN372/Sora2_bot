@@ -10,7 +10,11 @@ from config import (
     DEFAULT_MARKUP_PCT,
     PricingConfig,
 )
-from providers.veo_video import VeoVideoClient
+from providers.veo_video import (
+    VeoVideoClient,
+    _collect_candidate_file_ids,
+    _extract_operation_assets,
+)
 
 
 @pytest.fixture()
@@ -97,6 +101,51 @@ def test_build_source_requires_prompt_or_image(config: Config) -> None:
     client = VeoVideoClient(config=config)
     with pytest.raises(RuntimeError):
         client._build_source("", {})
+
+
+def test_extract_operation_assets_handles_file_uri() -> None:
+    operation = {
+        "result": {
+            "generated_videos": [
+                {
+                    "video": {
+                        "fileUri": "https://generativelanguage.googleapis.com/v1beta/files/abc123:download",
+                        "mimeType": "video/mp4",
+                        "durationSeconds": 9.7,
+                        "sizeBytes": 4096,
+                    }
+                }
+            ]
+        }
+    }
+
+    assets = _extract_operation_assets(operation)
+
+    assert len(assets) == 1
+    asset = assets[0]
+    assert asset["url"] == "https://generativelanguage.googleapis.com/v1beta/files/abc123:download"
+    assert asset["file_id"] == "files/abc123"
+    assert asset["mime"] == "video/mp4"
+    assert asset["duration_seconds"] == 10
+    assert asset["size_bytes"] == 4096
+
+
+def test_collect_candidate_file_ids_recovers_file_uri() -> None:
+    payload = {
+        "response": {
+            "generatedVideos": [
+                {
+                    "video": {
+                        "uri": "https://generativelanguage.googleapis.com/v1beta/files/xyz789:download?alt=media",
+                    }
+                }
+            ]
+        }
+    }
+
+    file_ids = _collect_candidate_file_ids(payload)
+
+    assert file_ids == ["files/xyz789"]
 
 
 @pytest.mark.parametrize("has_public_method", [True, False])

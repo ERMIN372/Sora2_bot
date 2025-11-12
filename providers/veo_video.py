@@ -49,6 +49,8 @@ _ASSET_URL_KEYS: Sequence[str] = (
     "downloadUri",
     "signed_uri",
     "signedUri",
+    "file_uri",
+    "fileUri",
     "uri",
     "url",
 )
@@ -228,6 +230,10 @@ def _collect_candidate_file_ids(payload: Dict[str, Any]) -> List[str]:
                         continue
                     if text.startswith("files/"):
                         candidates.add(text.split("?", 1)[0])
+                    elif "/files/" in text:
+                        suffix = text.split("/files/", 1)[-1].split("?", 1)[0]
+                        if suffix:
+                            candidates.add(f"files/{suffix}".split(":", 1)[0])
                     elif text.startswith("file-"):
                         base = text.split(":", 1)[0]
                         candidates.add(f"files/{base}")
@@ -289,6 +295,10 @@ def _extract_operation_assets(operation: Dict[str, Any]) -> List[Dict[str, Any]]
             url = _first_str(node, _ASSET_URL_KEYS)
             if url and url.startswith("files/") and not file_id:
                 file_id = url.split("?", 1)[0]
+            elif url and "/files/" in url and not file_id:
+                suffix = url.split("/files/", 1)[-1].split("?", 1)[0]
+                if suffix:
+                    file_id = f"files/{suffix}".split(":", 1)[0]
             if file_id and not file_id.startswith("files/"):
                 file_id = f"files/{file_id.split(':', 1)[0]}"
             if file_id or url:
