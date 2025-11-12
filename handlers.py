@@ -3284,6 +3284,8 @@ async def _deliver_remote_media(
     db: Database,
     error_reporter: ErrorReporter,
 ) -> Optional[SentMediaInfo]:
+    from pathlib import Path
+
     corr_id = job.corr_id or job.id
     asset_name = str(asset.get("key") or "video")
     mime_hint = asset.get("mime") if isinstance(asset.get("mime"), str) else None
