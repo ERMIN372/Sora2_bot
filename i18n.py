@@ -132,7 +132,7 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "buttons.balance": "💼 Баланс",
         "buttons.top_up": "💳 Пополнить баланс",
         "buttons.help": "ℹ️ Помощь",
-        "buttons.chatgpt": "ChatGPT",
+        "buttons.chatgpt": "🤖 ChatGPT (общение с ботом)",
         "buttons.video_create": "/video_create",
         "buttons.video_remix": "/video_remix",
         "buttons.video_list": "/video_list",
