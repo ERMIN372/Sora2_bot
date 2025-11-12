@@ -451,7 +451,7 @@ class ArchivePublisher:
                     parse_mode="MarkdownV2",
                 )
 
-        if ref_id and payload.content_type == "video" and message is not None:
+        if ref_id and message is not None:
             try:
                 await self._bot.send_photo(
                     self._channel_id,
