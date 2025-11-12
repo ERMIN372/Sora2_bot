@@ -2823,6 +2823,8 @@ async def _send_job_update(
                 )
 
         if sent_info is None:
+            if job.status == "failed":
+                return
             await _handle_delivery_failure(
                 dp,
                 job,
@@ -2916,6 +2918,39 @@ def _expected_key_mask(job: GenerationJobRecord) -> Optional[str]:
     if isinstance(mask, str) and mask:
         return mask
     return None
+
+
+def _extract_telegram_error_details(exc: TelegramAPIError) -> tuple[str, Dict[str, Any]]:
+    """Return a human-readable description and structured details for *exc*."""
+
+    description = (
+        getattr(exc, "message", "")
+        or getattr(exc, "description", "")
+        or (str(exc.args[0]) if getattr(exc, "args", None) else "")
+    )
+    if not description:
+        description = str(exc)
+    description = description.strip() or exc.__class__.__name__
+
+    details: Dict[str, Any] = {
+        "telegram_exception": exc.__class__.__name__,
+        "telegram_error_message": description,
+    }
+
+    error_code = getattr(exc, "error_code", None)
+    if error_code is not None and error_code != "":
+        details["telegram_error_code"] = error_code
+
+    parameters = getattr(exc, "parameters", None)
+    if parameters is not None:
+        retry_after = getattr(parameters, "retry_after", None)
+        if retry_after:
+            details["retry_after"] = retry_after
+        migrate_to_chat_id = getattr(parameters, "migrate_to_chat_id", None)
+        if migrate_to_chat_id:
+            details["migrate_to_chat_id"] = migrate_to_chat_id
+
+    return description, details
 
 
 def _select_remote_media_asset(job: GenerationJobRecord) -> Optional[Dict[str, Any]]:
@@ -3368,6 +3403,23 @@ async def _deliver_remote_media(
             )
             return None
 
+    if downloaded.size <= 0:
+        log.warning(
+            "Downloaded asset is empty provider=%s job_id=%s corr_id=%s", provider_key, job.id, corr_id
+        )
+        await _handle_delivery_failure(
+            dp,
+            job,
+            config,
+            db,
+            error_reporter=error_reporter,
+            message=i18n.t("status.delivery_generic"),
+            reason="no_media",
+            extra_log={"asset_bytes": downloaded.size, "stage": "empty_asset"},
+            key_mask=downloaded.key_mask or expected_mask,
+        )
+        return None
+
     method: Literal["video", "document", "photo"] = "video"
     message: Optional[Message] = None
     duration_seconds = _extract_video_duration(job)
@@ -3456,17 +3508,71 @@ async def _deliver_remote_media(
                     key_mask=downloaded.key_mask or expected_mask,
                 )
                 return None
-    except Exception:
-        log.exception("Failed to send Gemini video to user_id=%s", job.user_id)
+    except TelegramAPIError as exc:
+        error_text, error_details = _extract_telegram_error_details(exc)
+        if provider_key == "sora":
+            log.exception(
+                "Failed to send Sora media to Telegram job_id=%s user_id=%s error=%s",
+                job.id,
+                job.user_id,
+                error_text,
+            )
+        else:
+            log.exception(
+                "Failed to send media to Telegram job_id=%s user_id=%s provider=%s",
+                job.id,
+                job.user_id,
+                provider_key,
+            )
+        visible_error = error_text
+        if len(visible_error) > 240:
+            visible_error = visible_error[:237] + "…"
+        failure_message = (
+            i18n.t("status.delivery_telegram_error", error=visible_error)
+            if provider_key == "sora"
+            else i18n.t("status.delivery_generic")
+        )
+        extra_payload = {"asset_bytes": downloaded.size, **error_details}
         await _handle_delivery_failure(
             dp,
             job,
             config,
             db,
             error_reporter=error_reporter,
-            message=i18n.t("status.delivery_generic"),
+            message=failure_message,
             reason="telegram_error",
-            extra_log={"asset_bytes": downloaded.size},
+            extra_log=extra_payload,
+            key_mask=downloaded.key_mask or expected_mask,
+        )
+        return None
+    except Exception as exc:
+        log.exception(
+            "Unexpected Telegram delivery error job_id=%s user_id=%s provider=%s",
+            job.id,
+            job.user_id,
+            provider_key,
+        )
+        generic_error = str(exc).strip() or exc.__class__.__name__
+        if len(generic_error) > 240:
+            generic_error = generic_error[:237] + "…"
+        failure_message = (
+            i18n.t("status.delivery_telegram_error", error=generic_error)
+            if provider_key == "sora"
+            else i18n.t("status.delivery_generic")
+        )
+        await _handle_delivery_failure(
+            dp,
+            job,
+            config,
+            db,
+            error_reporter=error_reporter,
+            message=failure_message,
+            reason="telegram_error",
+            extra_log={
+                "asset_bytes": downloaded.size,
+                "telegram_exception": exc.__class__.__name__,
+                "telegram_error_message": generic_error,
+            },
             key_mask=downloaded.key_mask or expected_mask,
         )
         return None
