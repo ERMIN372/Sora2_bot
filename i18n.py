@@ -234,8 +234,8 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "image.mode.text": "По тексту",
         "image.mode.photo": "По фото",
         "image.models.prompt": "Выберите модель генерации фото:",
-        "image.model.gemini": "Nano Banana — 5 ₽ за 1 изображение",
-        "image.model.dalle3": "DALL·E 3 — 5 ₽ за 1 изображение",
+        "image.model.gemini": "🍌 Nano Banana — 5 ₽ за 1 изображение",
+        "image.model.dalle3": "🌄 DALL·E 3 — 5 ₽ за 1 изображение",
         "image.model.unavailable": "недоступно",
         "video.prompt.text": (
             "В этом разделе нужно задать настройки для видео с помощью {model}.\n"
