@@ -154,6 +154,8 @@ VEO_FIXED_PRICE_RUB = Decimal("89")
 
 log = logging.getLogger(__name__)
 
+_HANDLERS_DIR = Path(__file__).resolve().parent
+
 _BOT_USERNAME_CACHE: str = ""
 
 
@@ -845,6 +847,22 @@ def _find_video_model_option(config: Config, key: str) -> Optional[VideoModelOpt
     for option in _video_model_options(config):
         if option.key == key:
             return option
+    return None
+
+
+def _image_model_preview_path(option: ImageModelOption) -> Optional[Path]:
+    provider = (option.provider or "").strip().lower()
+    model = (option.model or "").strip().lower()
+    filename: Optional[str] = None
+    if "gemini" in provider or "gemini" in model or "banana" in option.label.lower():
+        filename = "nanobanana.jpg"
+    elif "dall" in provider or "dall" in model:
+        filename = "dalle3.jpg"
+    if not filename:
+        return None
+    path = _HANDLERS_DIR / filename
+    if path.is_file():
+        return path
     return None
 
 
@@ -4149,15 +4167,41 @@ async def image_model_callback_handler(
         mode=None,
     )
     await GenerationStates.image_mode.set()
+    prompt_text = i18n.t("image.mode.prompt")
+    keyboard = _build_mode_keyboard("image")
+    preview_path = _image_model_preview_path(option)
+    if preview_path is not None:
+        try:
+            payload = preview_path.read_bytes()
+        except Exception:  # pragma: no cover - filesystem errors are unlikely
+            log.exception("Failed to read preview image at %s", preview_path)
+        else:
+            try:
+                await callback.message.edit_reply_markup()
+            except Exception:  # pragma: no cover - Telegram edits may fail
+                pass
+            try:
+                await callback.message.answer_photo(
+                    BufferedInputFile(payload, filename=preview_path.name),
+                    caption=prompt_text,
+                    reply_markup=keyboard,
+                )
+                return
+            except Exception:  # pragma: no cover - Telegram may refuse photo
+                log.exception(
+                    "Failed to send preview for image model %s (provider=%s)",
+                    option.model,
+                    option.provider,
+                )
     try:
         await callback.message.edit_text(
-            i18n.t("image.mode.prompt"),
-            reply_markup=_build_mode_keyboard("image"),
+            prompt_text,
+            reply_markup=keyboard,
         )
     except Exception:  # pragma: no cover - Telegram edits may fail
         await callback.message.answer(
-            i18n.t("image.mode.prompt"),
-            reply_markup=_build_mode_keyboard("image"),
+            prompt_text,
+            reply_markup=keyboard,
         )
 
 
