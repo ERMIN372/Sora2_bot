@@ -3549,7 +3549,10 @@ async def _deliver_remote_media(
                             except TypeError:
                                 video_source = None
                     if video_source is None:
-                        blob = getattr(downloaded, "bytes", None)
+                        if (file_path is None or file_path == "") and hasattr(downloaded, "bytes"):
+                            blob = downloaded.bytes  # type: ignore[attr-defined]
+                        else:
+                            blob = getattr(downloaded, "bytes", None)
                         if blob is None:
                             blob = getattr(downloaded, "content", None)
                         if isinstance(blob, (bytes, bytearray)) and len(blob) > 0:
