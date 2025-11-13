@@ -228,6 +228,14 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "video.get.read_error": "Файл скачан, но не удалось прочитать: {error}",
         "video.get.sent": "Видео {video_id} отправлено. Размер: {size} байт. Провайдер: {provider}.",
         "video.mode.prompt": "Как будем генерировать видео?",
+        "video.mode.prompt_sora": (
+            "👆🏻Сверху пример генерации Sora2\n\n"
+            "🎥Как будем генерировать видео?"
+        ),
+        "video.mode.prompt_veo": (
+            "👆🏻Сверху пример генерации Veo3\n\n"
+            "🎥Как будем генерировать видео?"
+        ),
         "video.mode.text": "💬 По тексту",
         "video.mode.photo": "📸 По фото",
         "image.mode.prompt": "Как будем генерировать изображение?",

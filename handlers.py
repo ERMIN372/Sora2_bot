@@ -4329,7 +4329,13 @@ async def video_model_callback_handler(
         product=resolved_product,
     )
     await GenerationStates.video_mode.set()
-    prompt_text = i18n.t("video.mode.prompt")
+    provider_key = (option.provider or "").strip().lower()
+    if provider_key.startswith("sora"):
+        prompt_text = i18n.t("video.mode.prompt_sora")
+    elif provider_key.startswith("veo"):
+        prompt_text = i18n.t("video.mode.prompt_veo")
+    else:
+        prompt_text = i18n.t("video.mode.prompt")
     keyboard = _build_mode_keyboard("video")
     preview_path = _video_model_preview_path(option)
     if preview_path is not None:
