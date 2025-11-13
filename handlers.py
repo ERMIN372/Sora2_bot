@@ -86,6 +86,7 @@ from config import (
     Config,
     PRODUCT_PRICING_UI,
     SORA_SUPPORTED_MODELS,
+    TAROT_READING_PRICE_CREDITS,
     TOPUP_UI_PACKS,
     UI_MODEL_LABELS,
 )
@@ -1595,6 +1596,17 @@ _TAROT_TYPE_LABELS: Dict[str, str] = {
 }
 
 
+def _tarot_price_credits(config: Config) -> int:
+    value = config.get_product_credits("tarot")
+    if value <= 0:
+        return TAROT_READING_PRICE_CREDITS
+    return value
+
+
+def _tarot_price_text(config: Config) -> str:
+    return format_credits(_tarot_price_credits(config))
+
+
 def _build_tarot_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
@@ -1761,7 +1773,10 @@ async def _send_main_menu(message: Message, config: Config) -> None:
 async def tarot_menu(message: Message, state: FSMContext, config: Config) -> None:
     await state.finish()
     await TarotStates.choosing_type.set()
-    await message.answer(i18n.t("tarot.greeting"), reply_markup=_build_tarot_keyboard())
+    greeting = i18n.t("tarot.greeting")
+    price_hint = _tarot_price_text(config)
+    body = f"{greeting}\n\nСтоимость расклада: {price_hint}."
+    await message.answer(body, reply_markup=_build_tarot_keyboard())
 
 
 def _parse_tarot_callback(data: str) -> Optional[str]:
@@ -1808,6 +1823,7 @@ async def tarot_type_callback_handler(
 async def tarot_question_handler(
     message: Message,
     state: FSMContext,
+    db: Database,
     config: Config,
     chat_client: Optional[OpenAIChatClient],
 ) -> None:
@@ -1824,6 +1840,31 @@ async def tarot_question_handler(
         await state.finish()
         await _send_main_menu(message, config)
         return
+
+    user_id = await _ensure_user(message, db)
+    tarot_price = _tarot_price_credits(config)
+    tarot_price_text = format_credits(tarot_price)
+
+    async def _notify_not_enough_credits() -> None:
+        await message.answer(
+            i18n.t(
+                "tarot.errors.not_enough_credits",
+                credits_text=tarot_price_text,
+            )
+        )
+        chat = message.chat
+        if chat is not None:
+            await _send_payment_showcase(message.bot, chat.id, config)
+
+    if tarot_price > 0:
+        balance = await db.get_user_credits(user_id)
+        if balance < tarot_price:
+            await _notify_not_enough_credits()
+            return
+        deducted = await db.deduct_credit(user_id, tarot_price)
+        if not deducted:
+            await _notify_not_enough_credits()
+            return
 
     await message.answer(i18n.t("tarot.drawing", spread=spread_label))
     cards = draw_cards(3)
@@ -4240,16 +4281,21 @@ async def start_command(
     await _send_main_menu(message, config)
 
 
+def _render_help_text(config: Config) -> str:
+    return i18n.t(
+        "help.main",
+        video_models=_video_models_description(config),
+        image_model=_image_model_description(config),
+        tarot_price=_tarot_price_text(config),
+    )
+
+
 async def help_command(
     message: Message, db: Database, state: FSMContext, config: Config
 ) -> None:
     await _ensure_user(message, db)
     await message.answer(
-        i18n.t(
-            "help.main",
-            video_models=_video_models_description(config),
-            image_model=_image_model_description(config),
-        ),
+        _render_help_text(config),
         reply_markup=_build_help_keyboard(config),
     )
 
@@ -4904,7 +4950,7 @@ async def order_callback_handler(
         session.awaiting_payment = False
         await state.finish()
         await callback.message.answer(
-            i18n.t("help.main"), reply_markup=_main_keyboard(config)
+            _render_help_text(config), reply_markup=_main_keyboard(config)
         )
         return
     if not order:
@@ -6346,7 +6392,7 @@ async def successful_text_handler(
 ) -> None:
     current_state = await state.get_state()
     if current_state == TarotStates.waiting_for_question.state:
-        await tarot_question_handler(message, state, config, chat_client)
+        await tarot_question_handler(message, state, db, config, chat_client)
         return
     if current_state == TarotStates.choosing_type.state:
         await message.answer(i18n.t("tarot.choose_type_hint"))
@@ -6589,7 +6635,7 @@ def register_handlers(
     )
     dp.register_message_handler(
         lambda message, state: tarot_question_handler(
-            message, state, config, chatgpt_client
+            message, state, db, config, chatgpt_client
         ),
         state=TarotStates.waiting_for_question,
         content_types=["text"],
