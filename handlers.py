@@ -888,6 +888,19 @@ def _image_model_preview_path(option: ImageModelOption) -> Optional[Path]:
     return None
 
 
+def _image_mode_prompt_text(
+    provider: Optional[str],
+    model: Optional[str],
+    label: Optional[str],
+) -> str:
+    provider_key = (provider or "").strip().lower()
+    model_key = (model or "").strip().lower()
+    label_key = (label or "").strip().lower()
+    if any("dall" in value for value in (provider_key, model_key, label_key)):
+        return i18n.t("image.mode.prompt_dalle3")
+    return i18n.t("image.mode.prompt")
+
+
 def _infer_category_from_model(model: Optional[str], config: Config) -> str:
     if not model:
         return "video"
@@ -1890,15 +1903,20 @@ async def flow_back_callback_handler(
         )
         await GenerationStates.image_mode.set()
         keyboard = _build_mode_keyboard("image")
+        prompt_text = _image_mode_prompt_text(
+            provider,
+            model,
+            model_label,
+        )
         try:
             await callback.message.edit_text(
-                i18n.t("image.mode.prompt"),
+                prompt_text,
                 reply_markup=keyboard,
                 parse_mode="MarkdownV2",
             )
         except Exception:  # pragma: no cover - Telegram edits may fail
             await callback.message.answer(
-                i18n.t("image.mode.prompt"),
+                prompt_text,
                 reply_markup=keyboard,
                 parse_mode="MarkdownV2",
             )
@@ -4059,8 +4077,13 @@ async def generate_image_menu(
             product=_resolve_product_key("image", option.provider, option.model),
         )
         await GenerationStates.image_mode.set()
+        prompt_text = _image_mode_prompt_text(
+            option.provider,
+            option.model,
+            option.label,
+        )
         await message.answer(
-            i18n.t("image.mode.prompt"),
+            prompt_text,
             reply_markup=_build_mode_keyboard("image"),
             parse_mode="MarkdownV2",
         )
@@ -4259,7 +4282,11 @@ async def image_model_callback_handler(
         mode=None,
     )
     await GenerationStates.image_mode.set()
-    prompt_text = i18n.t("image.mode.prompt")
+    prompt_text = _image_mode_prompt_text(
+        option.provider,
+        option.model,
+        option.label,
+    )
     keyboard = _build_mode_keyboard("image")
     preview_path = _image_model_preview_path(option)
     if preview_path is not None:
