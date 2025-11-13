@@ -118,6 +118,9 @@ from providers.openai_chat import OpenAIChatClient
 from providers.openai_video import OpenAIVideoClient
 import services
 from services.gemini_catalog import list_veo_video_models
+
+
+_BASE_DIR = Path(__file__).resolve().parent
 from services.gemini_client import get_media_client, get_text_client
 from services.gemini_downloader import (
     GeminiConfigurationError,
@@ -1804,7 +1807,8 @@ async def tarot_menu(message: Message, state: FSMContext, config: Config) -> Non
     greeting = i18n.t("tarot.greeting")
     price_hint = _tarot_price_text(config)
     body = f"{greeting}\n\nСтоимость расклада: {price_hint}."
-    await message.answer(body, reply_markup=_build_tarot_keyboard())
+    tarot_preview = InputFile(_BASE_DIR / "tarot.jpg")
+    await message.answer_photo(tarot_preview, caption=body, reply_markup=_build_tarot_keyboard())
 
 
 def _parse_tarot_callback(data: str) -> Optional[str]:
