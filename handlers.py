@@ -18,7 +18,7 @@ import re
 import uuid
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Literal, Mapping, Optional, Set, Tuple
+from typing import Any, Dict, Iterable, List, Literal, Mapping, Optional, Sequence, Set, Tuple
 
 from aiogram import Bot, Dispatcher
 from aiogram.dispatcher import FSMContext
@@ -129,6 +129,8 @@ from services.error_reporter import ErrorReporter
 from services.status_tracker import StatusMessageManager
 from services import gsheets_ref
 from telegram_files import BufferedInputFile
+from tarot_data import draw_cards
+from tarot_telegram import send_card
 from utils import build_inline_data_from_telegram_file
 import yookassa_client
 
@@ -212,6 +214,7 @@ MAIN_MENU_BUTTONS = {
     i18n.t("buttons.balance"),
     i18n.t("buttons.top_up"),
     i18n.t("buttons.help"),
+    i18n.t("buttons.tarot"),
     i18n.t("buttons.chatgpt"),
 }
 
@@ -251,6 +254,13 @@ class ChatGPTState(StatesGroup):
     """Conversation states for the GPT-4.1 assistant."""
 
     awaiting_input = State()
+
+
+class TarotStates(StatesGroup):
+    """Conversation states for tarot spreads."""
+
+    choosing_type = State()
+    waiting_for_question = State()
 
 
 class AdminStates(StatesGroup):
@@ -1301,6 +1311,7 @@ def _main_keyboard(config: Config) -> ReplyKeyboardMarkup:
         [KeyboardButton(text=i18n.t("buttons.top_up"))],
         [KeyboardButton(text=i18n.t("buttons.help"))],
     ]
+    keyboard.append([KeyboardButton(text=i18n.t("buttons.tarot"))])
     keyboard.append([KeyboardButton(text=i18n.t("buttons.chatgpt"))])
     return ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True)
 
@@ -1577,6 +1588,95 @@ def _build_help_keyboard(config: Config) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+_TAROT_TYPE_LABELS: Dict[str, str] = {
+    "love": "tarot.types.love",
+    "career": "tarot.types.career",
+    "self": "tarot.types.self",
+}
+
+
+def _build_tarot_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=i18n.t("tarot.buttons.love"),
+                    callback_data="tarot_love",
+                ),
+                InlineKeyboardButton(
+                    text=i18n.t("tarot.buttons.career"),
+                    callback_data="tarot_career",
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    text=i18n.t("tarot.buttons.self"),
+                    callback_data="tarot_self",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text=i18n.t("tarot.buttons.back"),
+                    callback_data="tarot_back",
+                )
+            ],
+        ]
+    )
+
+
+def _tarot_type_label(tarot_type: str) -> Optional[str]:
+    key = _TAROT_TYPE_LABELS.get(tarot_type)
+    if key is None:
+        return None
+    return i18n.t(key)
+
+
+def _build_tarot_interpretation(
+    tarot_type: str, question: str, cards: Sequence[Mapping[str, object]]
+) -> str:
+    spread_label = _tarot_type_label(tarot_type) or tarot_type
+    card_lines: list[str] = []
+    for index, card in enumerate(cards, start=1):
+        name = str(card.get("name", i18n.t("tarot.interpretation.unknown")))
+        keywords = [str(item) for item in card.get("keywords", []) if item]
+        if keywords:
+            keywords_text = ", ".join(dict.fromkeys(keywords[:5]))
+            card_lines.append(
+                i18n.t(
+                    "tarot.interpretation.card_with_keywords",
+                    index=index,
+                    name=name,
+                    keywords=keywords_text,
+                )
+            )
+            continue
+        fortunes = [str(item) for item in card.get("fortune_telling", []) if item]
+        if fortunes:
+            card_lines.append(
+                i18n.t(
+                    "tarot.interpretation.card_with_meaning",
+                    index=index,
+                    name=name,
+                    meaning=fortunes[0],
+                )
+            )
+            continue
+        card_lines.append(
+            i18n.t(
+                "tarot.interpretation.card_fallback",
+                index=index,
+                name=name,
+            )
+        )
+
+    return i18n.t(
+        "tarot.interpretation.summary",
+        spread=spread_label,
+        question=question,
+        cards="\n".join(card_lines),
+    )
+
+
 async def _send_main_menu(message: Message, config: Config) -> None:
     await message.answer(
         i18n.t(
@@ -1586,6 +1686,97 @@ async def _send_main_menu(message: Message, config: Config) -> None:
         ),
         reply_markup=_main_keyboard(config),
     )
+
+
+async def tarot_menu(message: Message, state: FSMContext, config: Config) -> None:
+    await state.finish()
+    await TarotStates.choosing_type.set()
+    await message.answer(i18n.t("tarot.greeting"), reply_markup=_build_tarot_keyboard())
+
+
+def _parse_tarot_callback(data: str) -> Optional[str]:
+    if data.startswith("tarot_"):
+        suffix = data.split("_", 1)[1]
+        if suffix in _TAROT_TYPE_LABELS:
+            return suffix
+    return None
+
+
+async def tarot_type_callback_handler(
+    callback: CallbackQuery, state: FSMContext, config: Config
+) -> None:
+    data = (callback.data or "").strip()
+    message = callback.message
+    if data == "tarot_back":
+        await safe_callback_answer(callback)
+        await state.finish()
+        if message:
+            try:
+                await message.edit_reply_markup()
+            except TelegramAPIError as exc:
+                log.debug("Failed to remove tarot keyboard: %s", exc)
+            await _send_main_menu(message, config)
+        return
+
+    tarot_type = _parse_tarot_callback(data)
+    if tarot_type is None:
+        await safe_callback_answer(callback)
+        return
+
+    spread_label = _tarot_type_label(tarot_type) or tarot_type
+    await safe_callback_answer(callback)
+    await state.update_data(tarot_type=tarot_type, tarot_label=spread_label)
+    await TarotStates.waiting_for_question.set()
+    if message:
+        try:
+            await message.edit_reply_markup()
+        except TelegramAPIError as exc:
+            log.debug("Failed to update tarot message keyboard: %s", exc)
+        await message.answer(i18n.t("tarot.ask_question", spread=spread_label))
+
+
+async def tarot_question_handler(
+    message: Message, state: FSMContext, config: Config
+) -> None:
+    user_text = (message.text or "").strip()
+    if not user_text:
+        await message.answer(i18n.t("tarot.errors.empty_question"))
+        return
+
+    data = await state.get_data()
+    tarot_type = data.get("tarot_type")
+    spread_label = data.get("tarot_label") or _tarot_type_label(str(tarot_type))
+    if not tarot_type:
+        await message.answer(i18n.t("tarot.errors.missing_type"))
+        await state.finish()
+        await _send_main_menu(message, config)
+        return
+
+    await message.answer(i18n.t("tarot.drawing", spread=spread_label))
+    cards = draw_cards(3)
+    for index, card in enumerate(cards, start=1):
+        try:
+            await send_card(
+                message,
+                card,
+                spread_prefix=i18n.t("tarot.card_prefix", index=index),
+                disable_notification=True,
+            )
+        except Exception:
+            log.exception("Failed to send tarot card", extra={"index": index})
+            await message.answer(i18n.t("tarot.errors.send_failed", index=index))
+
+    interpretation = _build_tarot_interpretation(tarot_type, user_text, cards)
+    await message.answer(interpretation)
+    await message.answer(
+        i18n.t("tarot.finish"),
+        reply_markup=_main_keyboard(config),
+    )
+    await state.finish()
+
+
+async def tarot_choose_type_text_handler(message: Message) -> None:
+    await message.answer(i18n.t("tarot.choose_type_hint"))
 
 
 async def _ensure_user(message: Message, db: Database) -> int:
@@ -6067,6 +6258,13 @@ async def successful_text_handler(
     db: Database,
     config: Config,
 ) -> None:
+    current_state = await state.get_state()
+    if current_state == TarotStates.waiting_for_question.state:
+        await tarot_question_handler(message, state, config)
+        return
+    if current_state == TarotStates.choosing_type.state:
+        await message.answer(i18n.t("tarot.choose_type_hint"))
+        return
     if message.text in MAIN_MENU_BUTTONS or message.is_command():
         return
     await handle_text_input(message, state, db, config)
@@ -6263,6 +6461,11 @@ def register_handlers(
         state="*",
     )
     dp.register_message_handler(
+        lambda message, state: tarot_menu(message, state, config),
+        lambda message: message.text == i18n.t("buttons.tarot"),
+        state="*",
+    )
+    dp.register_message_handler(
         lambda message, state: chatgpt_menu(
             message, state, config, chatgpt_client
         ),
@@ -6297,6 +6500,17 @@ def register_handlers(
         lambda message, state: handle_photo_input(message, state, db, config),
         state=GenerationStates.photo_prompt,
         content_types=["photo"],
+    )
+    dp.register_message_handler(
+        lambda message, state: tarot_question_handler(message, state, config),
+        state=TarotStates.waiting_for_question,
+        content_types=["text"],
+    )
+    dp.register_message_handler(
+        lambda message: tarot_choose_type_text_handler(message),
+        lambda message: (message.text or "") not in MAIN_MENU_BUTTONS and not message.is_command(),
+        state=TarotStates.choosing_type,
+        content_types=["text"],
     )
     dp.register_message_handler(
         lambda message, state: photo_message_handler(message, state, db, config),
@@ -6371,6 +6585,11 @@ def register_handlers(
     dp.register_callback_query_handler(
         lambda call, state: menu_callback_handler(call, db, config, state),
         lambda call: call.data and call.data.startswith("menu:"),
+        state="*",
+    )
+    dp.register_callback_query_handler(
+        lambda call, state: tarot_type_callback_handler(call, state, config),
+        lambda call: call.data and call.data.startswith("tarot_"),
         state="*",
     )
     dp.register_callback_query_handler(
