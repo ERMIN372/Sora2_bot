@@ -1863,11 +1863,15 @@ async def flow_back_callback_handler(
         keyboard = _build_mode_keyboard("video")
         try:
             await callback.message.edit_text(
-                i18n.t("video.mode.prompt"), reply_markup=keyboard
+                i18n.t("video.mode.prompt"),
+                reply_markup=keyboard,
+                parse_mode="MarkdownV2",
             )
         except Exception:  # pragma: no cover - Telegram edits may fail
             await callback.message.answer(
-                i18n.t("video.mode.prompt"), reply_markup=keyboard
+                i18n.t("video.mode.prompt"),
+                reply_markup=keyboard,
+                parse_mode="MarkdownV2",
             )
         return
     if target == "image_mode":
@@ -1888,11 +1892,15 @@ async def flow_back_callback_handler(
         keyboard = _build_mode_keyboard("image")
         try:
             await callback.message.edit_text(
-                i18n.t("image.mode.prompt"), reply_markup=keyboard
+                i18n.t("image.mode.prompt"),
+                reply_markup=keyboard,
+                parse_mode="MarkdownV2",
             )
         except Exception:  # pragma: no cover - Telegram edits may fail
             await callback.message.answer(
-                i18n.t("image.mode.prompt"), reply_markup=keyboard
+                i18n.t("image.mode.prompt"),
+                reply_markup=keyboard,
+                parse_mode="MarkdownV2",
             )
         return
     if target == "image_model":
@@ -4054,6 +4062,7 @@ async def generate_image_menu(
         await message.answer(
             i18n.t("image.mode.prompt"),
             reply_markup=_build_mode_keyboard("image"),
+            parse_mode="MarkdownV2",
         )
         return
     await GenerationStates.image_model.set()
@@ -4268,6 +4277,7 @@ async def image_model_callback_handler(
                     BufferedInputFile(payload, filename=preview_path.name),
                     caption=prompt_text,
                     reply_markup=keyboard,
+                    parse_mode="MarkdownV2",
                 )
                 return
             except Exception:  # pragma: no cover - Telegram may refuse photo
@@ -4280,11 +4290,13 @@ async def image_model_callback_handler(
         await callback.message.edit_text(
             prompt_text,
             reply_markup=keyboard,
+            parse_mode="MarkdownV2",
         )
     except Exception:  # pragma: no cover - Telegram edits may fail
         await callback.message.answer(
             prompt_text,
             reply_markup=keyboard,
+            parse_mode="MarkdownV2",
         )
 
 
@@ -4348,6 +4360,7 @@ async def video_model_callback_handler(
                 InputFile(str(preview_path), filename=preview_path.name),
                 caption=prompt_text,
                 reply_markup=keyboard,
+                parse_mode="MarkdownV2",
             )
             return
         except Exception:  # pragma: no cover - Telegram may refuse video
@@ -4360,11 +4373,13 @@ async def video_model_callback_handler(
         await callback.message.edit_text(
             prompt_text,
             reply_markup=keyboard,
+            parse_mode="MarkdownV2",
         )
     except Exception:  # pragma: no cover - Telegram edits may fail
         await callback.message.answer(
             prompt_text,
             reply_markup=keyboard,
+            parse_mode="MarkdownV2",
         )
 
 
