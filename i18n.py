@@ -241,7 +241,12 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         ),
         "video.mode.text": "💬 По тексту",
         "video.mode.photo": "📸 По фото",
-        "image.mode.prompt": "Как будем генерировать изображение?",
+        "image.mode.prompt": (
+            "🍌 Создавайте и редактируйте свои фото с Нано Банана!\n\n"
+            "📑 Перед началом прочитайте 👉 [инструкцию](https://teletype.in/@cjournalgpt/ntvEKFwNRMQ)\n\n"
+            "📲 [Канал с примерами и видео](https://t.me/neirosetologia)\n\n"
+            "🌁 Как будем генерировать изображение?"
+        ),
         "image.mode.text": "💬 По тексту",
         "image.mode.photo": "📸 По фото",
         "image.models.prompt": "Выберите модель генерации фото:",
