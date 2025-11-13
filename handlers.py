@@ -1500,6 +1500,22 @@ async def _send_balance_info(message: Message, db: Database) -> None:
     await message.answer(balance_text, reply_markup=_build_balance_keyboard())
 
 
+async def _build_referral_response(bot: Bot, user_id: int) -> tuple[Optional[str], Optional[str]]:
+    bot_username = await _get_bot_username(bot)
+    if not bot_username:
+        return None, (
+            "У бота не задан @username. Задайте имя пользователя боту в настройках, затем повторите попытку."
+        )
+    bot_username = bot_username.lstrip("@")
+    ref_link = f"https://t.me/{bot_username}?start=ref_{user_id}"
+    response = (
+        "Твоя реферальная ссылка:\n"
+        f"{ref_link}\n\n"
+        "Когда друг перейдёт по ней и пополнит баланс на любую сумму — тебе начислится 100 кредитов."
+    )
+    return response, None
+
+
 async def balance_callback_handler(callback: CallbackQuery) -> None:
     data = callback.data or ""
     if data != "balance:ref_link":
@@ -1509,29 +1525,28 @@ async def balance_callback_handler(callback: CallbackQuery) -> None:
     user = callback.from_user
     if not user:
         return
-    bot_username = await _get_bot_username(callback.bot)
-    if not bot_username:
+    response, error = await _build_referral_response(callback.bot, user.id)
+    if error:
         if callback.message:
-            await callback.message.answer(
-                "У бота не задан @username. Задайте имя пользователя боту в настройках, затем повторите попытку."
-            )
+            await callback.message.answer(error)
         else:
-            await callback.bot.send_message(
-                user.id,
-                "У бота не задан @username. Задайте имя пользователя боту в настройках, затем повторите попытку.",
-            )
+            await callback.bot.send_message(user.id, error)
         return
-    bot_username = bot_username.lstrip("@")
-    ref_link = f"https://t.me/{bot_username}?start=ref_{user.id}"
-    response = (
-        "Твоя реферальная ссылка:\n"
-        f"{ref_link}\n\n"
-        "Когда друг перейдёт по ней и пополнит баланс на любую сумму — тебе начислится 100 кредитов."
-    )
     if callback.message:
         await callback.message.answer(response)
     else:
         await callback.bot.send_message(user.id, response)
+
+
+async def referral_command(message: Message) -> None:
+    user = message.from_user
+    if not user:
+        return
+    response, error = await _build_referral_response(message.bot, user.id)
+    if error:
+        await message.answer(error)
+        return
+    await message.answer(response)
 
 
 async def _process_referral_payload(message: Message, payload: str) -> None:
@@ -2335,6 +2350,7 @@ def _build_packages_keyboard(config: Config) -> Optional[InlineKeyboardMarkup]:
                 )
             ]
         )
+    rows.append([InlineKeyboardButton(text="💌 Реферальная ссылка", callback_data="balance:ref_link")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -6590,6 +6606,11 @@ def register_handlers(
         state="*",
     )
     dp.register_message_handler(
+        lambda message: referral_command(message),
+        Command("reff"),
+        state="*",
+    )
+    dp.register_message_handler(
         lambda message, state: _notify_pro_unavailable(message),
         Command("pro"),
         state="*",
@@ -6774,6 +6795,7 @@ __all__ = [
     "chatgpt_menu",
     "chatgpt_respond",
     "balance_command",
+    "referral_command",
     "top_up_menu",
     "resend_pending_order",
 ]
