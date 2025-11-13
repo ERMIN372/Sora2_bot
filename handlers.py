@@ -1677,6 +1677,76 @@ def _build_tarot_interpretation(
     )
 
 
+async def generate_tarot_reading(
+    tarot_type: str,
+    user_question: str,
+    cards: Sequence[Mapping[str, object]],
+    *,
+    chat_client: Optional[OpenAIChatClient],
+) -> Optional[str]:
+    """Use ChatGPT to build a tarot reading for the provided spread."""
+
+    if chat_client is None:
+        return None
+
+    spread_label = _tarot_type_label(tarot_type) or tarot_type
+    card_blocks: list[str] = []
+    for card in cards:
+        name = str(card.get("name", i18n.t("tarot.interpretation.unknown")))
+        raw_keywords = [str(item) for item in card.get("keywords", []) if item]
+        keywords = ", ".join(dict.fromkeys(raw_keywords[:5])) if raw_keywords else "—"
+        meanings = card.get("meanings", {})
+        if isinstance(meanings, Mapping):
+            light_raw = meanings.get("light")
+            shadow_raw = meanings.get("shadow")
+            if isinstance(light_raw, Sequence) and not isinstance(light_raw, (str, bytes)):
+                light_values = [str(item) for item in list(light_raw)[:3] if item]
+            else:
+                light_values = []
+            if isinstance(shadow_raw, Sequence) and not isinstance(shadow_raw, (str, bytes)):
+                shadow_values = [str(item) for item in list(shadow_raw)[:3] if item]
+            else:
+                shadow_values = []
+        else:
+            light_values = []
+            shadow_values = []
+
+        light_text = ", ".join(dict.fromkeys(light_values[:2])) if light_values else "—"
+        shadow_text = ", ".join(dict.fromkeys(shadow_values[:2])) if shadow_values else "—"
+        card_blocks.append(
+            "\n".join(
+                [
+                    f"- {name}",
+                    f"  Ключевые слова: {keywords}",
+                    f"  Свет: {light_text}",
+                    f"  Тень: {shadow_text}",
+                ]
+            )
+        )
+
+    system_prompt = (
+        "Ты — опытный таролог. Анализируй заданный вопрос и выпавшие карты, "
+        "дай развёрнутое, но лаконичное толкование на русском языке. "
+        "Используй Markdown, выделяй отдельные секции для общего смысла "
+        "и советов, избегай списков, которые может неправильно распознать Telegram."
+    )
+    prompt_lines = [
+        f"Тип расклада: {spread_label}",
+        f"Вопрос клиента: {user_question.strip()}",
+        "Карты:",
+    ]
+    prompt_lines.extend(card_blocks)
+    prompt = "\n".join(prompt_lines)
+    try:
+        return await chat_client.generate_reply(
+            prompt,
+            system_prompt=system_prompt,
+        )
+    except Exception:
+        log.exception("Failed to generate tarot reading via ChatGPT")
+        return None
+
+
 async def _send_main_menu(message: Message, config: Config) -> None:
     await message.answer(
         i18n.t(
@@ -1736,7 +1806,10 @@ async def tarot_type_callback_handler(
 
 
 async def tarot_question_handler(
-    message: Message, state: FSMContext, config: Config
+    message: Message,
+    state: FSMContext,
+    config: Config,
+    chat_client: Optional[OpenAIChatClient],
 ) -> None:
     user_text = (message.text or "").strip()
     if not user_text:
@@ -1766,8 +1839,20 @@ async def tarot_question_handler(
             log.exception("Failed to send tarot card", extra={"index": index})
             await message.answer(i18n.t("tarot.errors.send_failed", index=index))
 
-    interpretation = _build_tarot_interpretation(tarot_type, user_text, cards)
-    await message.answer(interpretation)
+    interpretation = await generate_tarot_reading(
+        tarot_type,
+        user_text,
+        cards,
+        chat_client=chat_client,
+    )
+    if not interpretation:
+        interpretation = _build_tarot_interpretation(tarot_type, user_text, cards)
+        await message.answer(interpretation)
+    else:
+        try:
+            await message.answer(interpretation, parse_mode="Markdown")
+        except BadRequest:
+            await message.answer(interpretation)
     await message.answer(
         i18n.t("tarot.finish"),
         reply_markup=_main_keyboard(config),
@@ -6257,10 +6342,11 @@ async def successful_text_handler(
     state: FSMContext,
     db: Database,
     config: Config,
+    chat_client: Optional[OpenAIChatClient],
 ) -> None:
     current_state = await state.get_state()
     if current_state == TarotStates.waiting_for_question.state:
-        await tarot_question_handler(message, state, config)
+        await tarot_question_handler(message, state, config, chat_client)
         return
     if current_state == TarotStates.choosing_type.state:
         await message.answer(i18n.t("tarot.choose_type_hint"))
@@ -6502,7 +6588,9 @@ def register_handlers(
         content_types=["photo"],
     )
     dp.register_message_handler(
-        lambda message, state: tarot_question_handler(message, state, config),
+        lambda message, state: tarot_question_handler(
+            message, state, config, chatgpt_client
+        ),
         state=TarotStates.waiting_for_question,
         content_types=["text"],
     )
@@ -6518,7 +6606,9 @@ def register_handlers(
         state=None,
     )
     dp.register_message_handler(
-        lambda message, state: successful_text_handler(message, state, db, config),
+        lambda message, state: successful_text_handler(
+            message, state, db, config, chatgpt_client
+        ),
         content_types=["text"],
         state=None,
     )
