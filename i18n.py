@@ -234,6 +234,9 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         ),
         "video.mode.prompt_veo": (
             "👆🏻Сверху пример генерации Veo3\n\n"
+            "😎Хайповые ролики с бабушками, генерация видео с твоим изображением и многое другое!\n\n"
+            "📖 [Инструкция по составлению запроса](https://teletype.in/@cjournalgpt/lBU0ScFKc6G)\n\n"
+            "📲 [Канал с примерами и видео](https://t.me/neirosetologia)\n\n"
             "🎥Как будем генерировать видео?"
         ),
         "video.mode.text": "💬 По тексту",
