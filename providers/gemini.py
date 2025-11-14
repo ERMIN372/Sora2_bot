@@ -1760,7 +1760,7 @@ class GeminiGenerativeClient(BaseProviderClient):
         prompt: str,
         settings: Optional[Dict[str, Any]] = None,
     ) -> List[Dict[str, Any]]:
-        parts: List[Dict[str, Any]] = [{"text": prompt}]
+        parts: List[Dict[str, Any]] = []
         if settings:
             reference = settings.get("reference_inline_data")
             if isinstance(reference, dict):
@@ -1775,6 +1775,7 @@ class GeminiGenerativeClient(BaseProviderClient):
                             }
                         }
                     )
+        parts.append({"text": prompt})
         return [{"role": "user", "parts": parts}]
 
     def _build_generation_config(
@@ -3091,51 +3092,20 @@ class GeminiGenerativeClient(BaseProviderClient):
                                 corr_id or "",
                                 duration_ms,
                             )
-                            job_id = str(uuid4())
-                            assets_meta = dict(asset_meta)
-                            meta = {
-                                "prompt": decision.prompt,
-                                "settings": request_settings or {},
-                                "payload": payload_json,
-                                "assets_meta": assets_meta,
-                                "request": request_meta,
-                                "request_mode": actual_method,
-                                "task": decision.task,
-                                "key_mask": self._key_mask,
-                                "model": decision.model,
-                                "api_version": decision.api_version,
-                                "headers": dict(headers or {}),
-                            }
-                            if response_id:
-                                meta["response_id"] = response_id
-                            if idempotency_key:
-                                meta["idempotency_key"] = idempotency_key
-                            self._pending[job_id] = (
-                                payload_json,
-                                200,
-                                duration_ms,
-                                meta,
-                            )
-                            self._persist_pending_record(
-                                job_id,
-                                payload=payload_json,
-                                status_code=200,
-                                duration_ms=duration_ms,
-                                meta=meta,
-                            )
                             self._log_debug_event(
                                 "gemini.inline_return",
                                 {
                                     "corr_id": corr_id,
-                                    "job_id": job_id,
+                                    "job_id": "",
                                     "inline_count": len(inline_assets),
                                     "asset_bytes": [asset.get("bytes") for asset in inline_assets],
                                     "asset_mime": [asset.get("mime") for asset in inline_assets],
                                     "duration_ms": duration_ms,
                                 },
                             )
+                            # gemini-2.5-flash-image responds synchronously; skip queuing for polling.
                             return ProviderJobSubmission(
-                                job_id=job_id,
+                                job_id="",
                                 status_code=200,
                                 duration_ms=duration_ms,
                                 data=inline_submission,
