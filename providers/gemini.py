@@ -3963,12 +3963,27 @@ class GeminiGenerativeClient(BaseProviderClient):
                 {"job_id": job_id},
                 level=logging.DEBUG,
             )
+            friendly_message = (
+                "Результат не найден. Провайдер не вернул данные для этой задачи."
+            )
+            error_payload = {
+                "code": "result_not_found",
+                "status": 404,
+                "message": "Gemini pending result cache miss",
+                "job_id": job_id,
+                "provider": self.provider_name,
+            }
+            meta = {
+                "request_mode": "poll",
+                "provider": self.provider_name,
+                "missing_pending_record": True,
+            }
             return ProviderJobStatus(
                 job_id=job_id,
                 status="failed",
-                error="Result not found",
+                error=friendly_message,
                 assets={},
-                data={},
+                data={"meta": meta, "error": error_payload},
                 status_code=404,
                 duration_ms=0,
             )
