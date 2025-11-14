@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import sys
 import types
+from typing import Any
 
 
 def ensure_aiogram_stub() -> None:
@@ -27,20 +28,68 @@ def ensure_aiogram_stub() -> None:
     filters.CommandStart = type("CommandStart", (), {})
 
     state = types.ModuleType("aiogram.dispatcher.filters.state")
-    state.State = type("State", (), {})
-    state.StatesGroup = type("StatesGroup", (), {})
+
+    class _State:
+        def __init__(self, name: str | None = None) -> None:
+            self.state = name or "state"
+
+        async def set(self) -> None:  # pragma: no cover - simple stub
+            return None
+
+    class _StatesGroup:
+        pass
+
+    state.State = _State
+    state.StatesGroup = _StatesGroup
 
     types_module = types.ModuleType("aiogram.types")
-    placeholder = type("_Type", (), {})
-    types_module.CallbackQuery = placeholder
-    types_module.InlineKeyboardButton = placeholder
-    types_module.InlineKeyboardMarkup = placeholder
-    types_module.InputFile = placeholder
-    types_module.InputMediaPhoto = placeholder
-    types_module.KeyboardButton = placeholder
-    types_module.Message = placeholder
-    types_module.ReplyKeyboardMarkup = placeholder
-    types_module.ReplyKeyboardRemove = placeholder
+
+    class _Base:
+        def __init__(self, *args, **kwargs) -> None:  # pragma: no cover - simple stub
+            for key, value in kwargs.items():
+                setattr(self, key, value)
+
+    class CallbackQuery(_Base):
+        pass
+
+    class InlineKeyboardButton(_Base):
+        def __init__(self, *, text: str, callback_data: str | None = None, url: str | None = None) -> None:
+            super().__init__(text=text, callback_data=callback_data, url=url)
+
+    class InlineKeyboardMarkup(_Base):
+        def __init__(self, *, inline_keyboard: list[list[Any]]) -> None:  # type: ignore[override]
+            super().__init__(inline_keyboard=inline_keyboard)
+
+    class InputFile(_Base):
+        pass
+
+    class InputMediaPhoto(_Base):
+        pass
+
+    class KeyboardButton(_Base):
+        def __init__(self, *, text: str) -> None:
+            super().__init__(text=text)
+
+    class Message(_Base):
+        pass
+
+    class ReplyKeyboardMarkup(_Base):
+        def __init__(self, *, keyboard: list[list[Any]], resize_keyboard: bool = False) -> None:  # type: ignore[override]
+            super().__init__(keyboard=keyboard, resize_keyboard=resize_keyboard)
+
+    class ReplyKeyboardRemove(_Base):
+        def __init__(self, *, selective: bool | None = None) -> None:  # type: ignore[override]
+            super().__init__(selective=selective)
+
+    types_module.CallbackQuery = CallbackQuery
+    types_module.InlineKeyboardButton = InlineKeyboardButton
+    types_module.InlineKeyboardMarkup = InlineKeyboardMarkup
+    types_module.InputFile = InputFile
+    types_module.InputMediaPhoto = InputMediaPhoto
+    types_module.KeyboardButton = KeyboardButton
+    types_module.Message = Message
+    types_module.ReplyKeyboardMarkup = ReplyKeyboardMarkup
+    types_module.ReplyKeyboardRemove = ReplyKeyboardRemove
 
     class _ContentType:
         ANY = "*"

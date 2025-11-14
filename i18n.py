@@ -135,6 +135,7 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "buttons.help": "ℹ️ Помощь",
         "buttons.tarot": "🔮 Расклад на Таро",
         "buttons.chatgpt": "🤖 ChatGPT (общение с ботом)",
+        "buttons.trends": "📈 Тренды",
         "buttons.video_create": "/video_create",
         "buttons.video_remix": "/video_remix",
         "buttons.video_list": "/video_list",
@@ -198,6 +199,35 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "video.create.enqueued": "Задача отправлена в очередь.",
         "video.create.model_unavailable": "Модель {requested} недоступна. Используем {fallback}.",
         "tarot.greeting": "🔮 Давай посмотрим карты! Выбери тему расклада:",
+        "trend.intro": (
+            "📈 Добро пожаловать в трендовые сценарии!\n\n"
+            "Выбери подборку, чтобы быстро собрать структуру ролика."
+        ),
+        "trend.presets.hint": "Выбери тренд, с которого начнём:",
+        "trend.models.prompt": "Выбери модель для генерации:",
+        "trend.models.sora": "☁️ OpenAI Sora 2",
+        "trend.models.veo": "💚 Gemini veo3",
+        "trend.buttons.back": "⬅️ Назад",
+        "trend.question.prompt": "Шаг {index}/{total}\n{question}",
+        "trend.question.example": "Например: {example}",
+        "trend.question.invalid": "Ответ не должен быть пустым. Напиши короткую фразу.",
+        "trend.status.preparing": "⚙️ Собираю детали тренда…",
+        "trend.status.caption": "✏️ Генерирую подпись…",
+        "trend.status.submitted": "🚀 Запрос отправлен! Как только видео будет готово — пришлю.",
+        "trend.status.not_enough": "Не хватает {credits} для запуска тренда.",
+        "trend.status.failed": "Не удалось запустить генерацию. Попробуй ещё раз позже.",
+        "trend.caption.system": (
+            "Ты креативный копирайтер. Пиши короткие цепляющие подписи для вертикальных "
+            "видео на русском языке. Стиль — живой, энергичный, с одним ярким эмодзи."
+        ),
+        "trend.caption.prompt": (
+            "Нужна подпись к ролику «{title}».\n"
+            "Сценарий:\n{scenario}\n\n"
+            "Сформулируй 1–2 предложения с живым призывом к действию."
+        ),
+        "trend.caption.ready": "✍️ Черновик подписи:\n{caption}",
+        "trend.caption.unavailable": "Не удалось сгенерировать подпись автоматически — придумай свою.",
+        "trend.scenario.ready": "🧾 Сценарий:\n{scenario}",
         "tarot.buttons.love": "❤️ Любовь",
         "tarot.buttons.career": "💼 Карьера",
         "tarot.buttons.self": "🪞 Самопознание",

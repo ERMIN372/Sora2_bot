@@ -132,6 +132,7 @@ from services.sora_downloader import SoraDownloadError, download_sora_asset
 from services.error_reporter import ErrorReporter
 from services.status_tracker import StatusMessageManager
 from services import gsheets_ref
+from trend_presets import TREND_PRESETS, TrendPreset, get_trend_by_id
 from telegram_files import BufferedInputFile
 from tarot_data import draw_cards
 from tarot_telegram import send_card
@@ -156,6 +157,7 @@ VIDEO_PRICE_RUB: Dict[int, Decimal] = {
 }
 VEO_FIXED_DURATION = 8
 VEO_FIXED_PRICE_RUB = Decimal("89")
+TREND_VIDEO_PRICE_CREDITS = 99
 
 
 log = logging.getLogger(__name__)
@@ -220,6 +222,7 @@ MAIN_MENU_BUTTONS = {
     i18n.t("buttons.help"),
     i18n.t("buttons.tarot"),
     i18n.t("buttons.chatgpt"),
+    i18n.t("buttons.trends"),
 }
 
 _PRO_REQUEST_PATTERN = re.compile(
@@ -265,6 +268,14 @@ class TarotStates(StatesGroup):
 
     choosing_type = State()
     waiting_for_question = State()
+
+
+class TrendStates(StatesGroup):
+    """Conversation states for preset trend videos."""
+
+    choosing_trend = State()
+    choosing_model = State()
+    answering_params = State()
 
 
 class AdminStates(StatesGroup):
@@ -1315,6 +1326,7 @@ def _main_keyboard(config: Config) -> ReplyKeyboardMarkup:
         [KeyboardButton(text=i18n.t("buttons.top_up"))],
         [KeyboardButton(text=i18n.t("buttons.help"))],
     ]
+    keyboard.append([KeyboardButton(text=i18n.t("buttons.trends"))])
     keyboard.append([KeyboardButton(text=i18n.t("buttons.tarot"))])
     keyboard.append([KeyboardButton(text=i18n.t("buttons.chatgpt"))])
     return ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True)
@@ -1661,6 +1673,126 @@ def _tarot_type_label(tarot_type: str) -> Optional[str]:
     return i18n.t(key)
 
 
+def _trend_price_credits(config: Config) -> int:
+    value = config.get_product_credits("trend_video")
+    if value <= 0:
+        return TREND_VIDEO_PRICE_CREDITS
+    return value
+
+
+def _trend_preset_by_id(trend_id: str) -> Optional[TrendPreset]:
+    return get_trend_by_id(trend_id)
+
+
+def _build_trend_presets_keyboard() -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    for preset in TREND_PRESETS:
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=f"{preset.title}",
+                    callback_data=f"trend_select:{preset.id}",
+                )
+            ]
+        )
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text=i18n.t("trend.buttons.back"), callback_data="trend_select:back"
+            )
+        ]
+    )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _build_trend_model_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=i18n.t("trend.models.sora"), callback_data="trend_model:sora"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text=i18n.t("trend.models.veo"), callback_data="trend_model:veo"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text=i18n.t("trend.buttons.back"), callback_data="trend_model:back"
+                )
+            ],
+        ]
+    )
+
+
+def _format_trend_question(preset: TrendPreset, index: int) -> str:
+    total = len(preset.params)
+    param = preset.params[index]
+    body = i18n.t(
+        "trend.question.prompt",
+        index=index + 1,
+        total=total,
+        question=param.question,
+    )
+    if param.example:
+        body = f"{body}\n{i18n.t('trend.question.example', example=param.example)}"
+    return body
+
+
+def _compose_trend_prompt(
+    preset: TrendPreset, answers: Mapping[str, str], model_choice: str
+) -> str:
+    template = preset.prompt_templates.get(model_choice)
+    if not template:
+        template = next(iter(preset.prompt_templates.values()), "")
+    values = {param.key: _escape_format_value(answers.get(param.key, "")) for param in preset.params}
+    values.setdefault("title", _escape_format_value(preset.title))
+    if not template:
+        return ""
+    return template.format(**values)
+
+
+def _build_trend_scenario(preset: TrendPreset, answers: Mapping[str, str]) -> str:
+    lines: list[str] = []
+    for param in preset.params:
+        value = answers.get(param.key, "").strip()
+        if not value:
+            continue
+        lines.append(f"{param.question.strip()} — {value}")
+    return "\n".join(lines)
+
+
+def _resolve_trend_model(choice: str, config: Config) -> tuple[str, str]:
+    lowered = (choice or "").strip().lower()
+    if lowered == "sora":
+        model = (config.sora_model_video or "sora").strip() or "sora"
+        return "sora", model
+    model = (config.gemini_model_video or config.default_video_model or "").strip()
+    if not model:
+        model = "veo-3.0-generate-001"
+    return "veo", model
+
+
+async def _generate_trend_caption(
+    chat_client: Optional[OpenAIChatClient],
+    *,
+    preset: TrendPreset,
+    scenario: str,
+) -> Optional[str]:
+    if chat_client is None:
+        return None
+    try:
+        prompt = i18n.t("trend.caption.prompt", title=preset.title, scenario=scenario or "—")
+        return await chat_client.generate_reply(
+            prompt,
+            system_prompt=i18n.t("trend.caption.system"),
+        )
+    except Exception:
+        log.exception("Failed to generate trend caption via ChatGPT")
+        return None
+
 def _build_tarot_interpretation(
     tarot_type: str, question: str, cards: Sequence[Mapping[str, object]]
 ) -> str:
@@ -1945,6 +2077,219 @@ async def tarot_question_handler(
         i18n.t("tarot.finish"),
         reply_markup=_main_keyboard(config),
     )
+    await state.finish()
+
+
+async def trend_menu(
+    message: Message,
+    state: FSMContext,
+    db: Database,
+    config: Config,
+) -> None:
+    await state.finish()
+    await TrendStates.choosing_trend.set()
+    await _ensure_user(message, db)
+    await message.answer(i18n.t("trend.intro"), reply_markup=ReplyKeyboardRemove())
+    await message.answer(
+        i18n.t("trend.presets.hint"),
+        reply_markup=_build_trend_presets_keyboard(),
+    )
+
+
+async def trend_select_callback_handler(
+    callback: CallbackQuery, state: FSMContext, config: Config
+) -> None:
+    payload = (callback.data or "").strip()
+    message = callback.message
+    if not message:
+        await safe_callback_answer(callback)
+        return
+    if payload == "trend_select:back":
+        await safe_callback_answer(callback)
+        await state.finish()
+        try:
+            await message.edit_reply_markup()
+        except TelegramAPIError:
+            pass
+        await _send_main_menu(message, config)
+        return
+    if not payload.startswith("trend_select:"):
+        await safe_callback_answer(callback)
+        return
+    trend_id = payload.split(":", 1)[1]
+    preset = _trend_preset_by_id(trend_id)
+    if preset is None:
+        await safe_callback_answer(callback)
+        return
+    await safe_callback_answer(callback)
+    await state.update_data(
+        trend_id=preset.id,
+        trend_answers={},
+        trend_question_index=0,
+    )
+    await TrendStates.choosing_model.set()
+    body = f"{preset.title}\n\n{preset.description}".strip()
+    try:
+        await message.edit_text(body, reply_markup=_build_trend_model_keyboard())
+    except TelegramAPIError:
+        await message.answer(body, reply_markup=_build_trend_model_keyboard())
+
+
+async def trend_model_callback_handler(
+    callback: CallbackQuery, state: FSMContext, config: Config
+) -> None:
+    payload = (callback.data or "").strip()
+    message = callback.message
+    if not message:
+        await safe_callback_answer(callback)
+        return
+    if payload == "trend_model:back":
+        await safe_callback_answer(callback)
+        await TrendStates.choosing_trend.set()
+        await state.update_data(model_choice=None)
+        try:
+            await message.edit_text(
+                i18n.t("trend.presets.hint"),
+                reply_markup=_build_trend_presets_keyboard(),
+            )
+        except TelegramAPIError:
+            await message.answer(
+                i18n.t("trend.presets.hint"),
+                reply_markup=_build_trend_presets_keyboard(),
+            )
+        return
+    if not payload.startswith("trend_model:"):
+        await safe_callback_answer(callback)
+        return
+    choice = payload.split(":", 1)[1]
+    data = await state.get_data()
+    preset = _trend_preset_by_id(str(data.get("trend_id") or ""))
+    if preset is None:
+        await safe_callback_answer(callback)
+        await state.finish()
+        await _send_main_menu(message, config)
+        return
+    await safe_callback_answer(callback)
+    await TrendStates.answering_params.set()
+    await state.update_data(model_choice=choice, trend_question_index=0, trend_answers={})
+    question = _format_trend_question(preset, 0)
+    try:
+        await message.edit_text(question)
+    except TelegramAPIError:
+        await message.answer(question)
+
+
+async def trend_answers_handler(
+    message: Message,
+    state: FSMContext,
+    db: Database,
+    job_queue: JobQueue,
+    config: Config,
+    chat_client: Optional[OpenAIChatClient],
+) -> None:
+    user_text = (message.text or "").strip()
+    if not user_text:
+        await message.answer(i18n.t("trend.question.invalid"))
+        return
+    data = await state.get_data()
+    preset = _trend_preset_by_id(str(data.get("trend_id") or ""))
+    if preset is None:
+        await message.answer(i18n.t("trend.status.failed"), reply_markup=_main_keyboard(config))
+        await state.finish()
+        return
+    model_choice = str(data.get("model_choice") or "")
+    question_index = int(data.get("trend_question_index") or 0)
+    answers: Dict[str, str] = dict(data.get("trend_answers") or {})
+    if question_index >= len(preset.params):
+        await message.answer(i18n.t("trend.status.failed"), reply_markup=_main_keyboard(config))
+        await state.finish()
+        return
+    param = preset.params[question_index]
+    answers[param.key] = user_text
+    question_index += 1
+    if question_index < len(preset.params):
+        await state.update_data(trend_answers=answers, trend_question_index=question_index)
+        await message.answer(_format_trend_question(preset, question_index))
+        return
+
+    user_id = await _ensure_user(message, db)
+    price_credits = _trend_price_credits(config)
+    balance = await db.get_user_credits(user_id)
+    if balance < price_credits:
+        await message.answer(
+            i18n.t("trend.status.not_enough", credits=format_credits(price_credits))
+        )
+        await _send_payment_showcase(message.bot, message.chat.id, config)
+        await state.finish()
+        return
+    deducted = await db.deduct_credit(user_id, price_credits)
+    if not deducted:
+        await message.answer(
+            i18n.t("trend.status.not_enough", credits=format_credits(price_credits))
+        )
+        await _send_payment_showcase(message.bot, message.chat.id, config)
+        await state.finish()
+        return
+
+    scenario = _build_trend_scenario(preset, answers)
+    prompt = _compose_trend_prompt(preset, answers, model_choice)
+    if not prompt:
+        await message.answer(i18n.t("trend.status.failed"), reply_markup=_main_keyboard(config))
+        await state.finish()
+        return
+
+    await message.answer(i18n.t("trend.status.preparing"))
+    caption = await _generate_trend_caption(chat_client, preset=preset, scenario=scenario)
+    if caption:
+        await message.answer(i18n.t("trend.status.caption"))
+    else:
+        caption = ""
+
+    provider, model_name = _resolve_trend_model(model_choice, config)
+    aspect_ratio = ASPECT_RATIO_OPTIONS["vertical"]
+    size = _resolve_video_size(aspect_ratio, DEFAULT_HD_ENABLED)
+    provider_settings = {
+        "duration": DEFAULT_VIDEO_DURATION,
+        "duration_seconds": DEFAULT_VIDEO_DURATION,
+        "aspect_ratio": aspect_ratio,
+        "hd": DEFAULT_HD_ENABLED,
+    }
+    job_extra = {
+        "trend": {
+            "id": preset.id,
+            "title": preset.title,
+            "answers": answers,
+            "prompt": prompt,
+            "caption": caption,
+            "scenario": scenario,
+            "model_choice": model_choice,
+        }
+    }
+    corr_id = str(uuid.uuid4())
+    try:
+        await job_queue.submit(
+            user_id=user_id,
+            prompt=prompt,
+            size=size,
+            model=model_name,
+            corr_id=corr_id,
+            username=message.from_user.username if message.from_user else None,
+            provider=provider,
+            settings=provider_settings,
+            credits_cost=price_credits,
+            extra=job_extra,
+        )
+    except Exception:
+        log.exception("Failed to submit trend job corr_id=%s", corr_id)
+        try:
+            await db.add_credits(user_id, price_credits)
+        except Exception:
+            log.exception("Failed to refund credits after trend submit failure")
+        await message.answer(i18n.t("trend.status.failed"), reply_markup=_main_keyboard(config))
+        await state.finish()
+        return
+
+    await message.answer(i18n.t("trend.status.submitted"), reply_markup=_main_keyboard(config))
     await state.finish()
 
 
@@ -3282,6 +3627,26 @@ async def _send_job_update(
             job=job,
             text=summary_text,
         )
+        extra_payload = getattr(job, "extra", {}) or {}
+        trend_meta = extra_payload.get("trend") if isinstance(extra_payload, dict) else None
+        if isinstance(trend_meta, dict):
+            caption_text = str(trend_meta.get("caption") or "").strip()
+            scenario_text = str(trend_meta.get("scenario") or "").strip()
+            if caption_text:
+                await dp.bot.send_message(
+                    job.user_id,
+                    i18n.t("trend.caption.ready", caption=escape_html(caption_text)),
+                    parse_mode="HTML",
+                )
+            else:
+                await dp.bot.send_message(job.user_id, i18n.t("trend.caption.unavailable"))
+            if scenario_text:
+                await dp.bot.send_message(
+                    job.user_id,
+                    i18n.t("trend.scenario.ready", scenario=format_prompt(scenario_text)),
+                    parse_mode="HTML",
+                )
+            extra_payload.pop("trend", None)
         increment_metric("deliver_success_total")
         if archive:
             payload = _build_archive_payload_from_sent(job, sent_info)
@@ -6694,6 +7059,13 @@ def register_handlers(
         content_types=["text"],
     )
     dp.register_message_handler(
+        lambda message, state: trend_answers_handler(
+            message, state, db, job_queue, config, chatgpt_client
+        ),
+        state=TrendStates.answering_params,
+        content_types=["text"],
+    )
+    dp.register_message_handler(
         lambda message: tarot_choose_type_text_handler(message),
         lambda message: (message.text or "") not in MAIN_MENU_BUTTONS and not message.is_command(),
         state=TarotStates.choosing_type,
@@ -6716,6 +7088,12 @@ def register_handlers(
             message, state, config, chatgpt_client
         ),
         state=ChatGPTState.awaiting_input,
+        content_types=["text"],
+    )
+    dp.register_message_handler(
+        lambda message, state: trend_menu(message, state, db, config),
+        lambda message: (message.text or "").strip() == i18n.t("buttons.trends"),
+        state="*",
         content_types=["text"],
     )
 
@@ -6779,6 +7157,16 @@ def register_handlers(
     dp.register_callback_query_handler(
         lambda call, state: tarot_type_callback_handler(call, state, config),
         lambda call: call.data and call.data.startswith("tarot_"),
+        state="*",
+    )
+    dp.register_callback_query_handler(
+        lambda call, state: trend_select_callback_handler(call, state, config),
+        lambda call: call.data and call.data.startswith("trend_select"),
+        state="*",
+    )
+    dp.register_callback_query_handler(
+        lambda call, state: trend_model_callback_handler(call, state, config),
+        lambda call: call.data and call.data.startswith("trend_model"),
         state="*",
     )
     dp.register_callback_query_handler(
