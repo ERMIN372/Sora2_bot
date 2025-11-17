@@ -82,6 +82,12 @@ CantTalkWithBot = getattr(
 )
 
 from archive import ArchivePayload, ArchivePublisher
+from auto_styles import (
+    AUTO_STYLES_PAGE1,
+    AUTO_STYLES_PAGE2,
+    AutoStyle,
+    get_auto_style,
+)
 from config import (
     Config,
     PRODUCT_PRICING_UI,
@@ -225,6 +231,35 @@ MAIN_MENU_BUTTONS = {
     i18n.t("buttons.trends"),
 }
 
+TREND_MENU_TITLE = (
+    "🚀 Тренды\n\n"
+    "Выберите направление, в котором хотите сгенерировать изображение."
+)
+TREND_AUTO_BUTTON = "🚗 Авто"
+TREND_BACK_BUTTON = "⬅️ Назад"
+AUTO_STYLES_INTRO = (
+    "🚗 Авто-стили\n\n"
+    "Выбери, как хочешь прокачать свою тачку: просто нажми стиль, "
+    "загрузишь фото — бот всё сам подставит в промпт."
+)
+AUTO_STYLE_PHOTO_PROMPT = (
+    "{style_title}\n\n"
+    "Пришли фото своей машины (желательно сбоку или 3/4 спереди).\n"
+    "Бот сам соберёт промпт и сгенерирует изображение."
+)
+AUTO_STYLE_READY_TEXT = (
+    "Готово 👌\nЕсли хочешь попробовать другой стиль — снова зайди в «Тренды → Авто»."
+)
+AUTO_STYLES_NEXT_PAGE = "➡️ Ещё авто-стили"
+AUTO_STYLES_PREV_PAGE = "⬅️ Назад к авто-стилям"
+AUTO_STYLES_ROOT_BACK_TRENDS = "⬅️ В меню трендов"
+AUTO_STYLES_ROOT_BACK_NANO = "⬅️ Назад к выбору режима"
+AUTO_STYLES_MANUAL_PROMPT = "✏️ Свой текстовый промпт"
+AUTO_STYLES_AUTO_PROMPT = "🚗 Авто-стили"
+AUTO_PROMPT_CHOICE_TEXT = (
+    "Как будем генерировать изображение?\n\nВыберите один из вариантов:"
+)
+
 _PRO_REQUEST_PATTERN = re.compile(
     r"\b(?:veo(?:[-\s]?2)?[-\s]*pro|veo2pro|model\s*[:=]?\s*pro|pro-?версия|pro version)\b",
     re.IGNORECASE,
@@ -255,6 +290,14 @@ class GenerationStates(StatesGroup):
     image_mode = State()
     text_prompt = State()
     photo_prompt = State()
+
+
+class AutoStyleStates(StatesGroup):
+    """States for navigating auto-style flows (trends and Nano Banana)."""
+
+    trends_menu = State()
+    choosing_styles = State()
+    choosing_prompt_mode = State()
 
 
 class ChatGPTState(StatesGroup):
@@ -630,6 +673,7 @@ class OrderContext:
     duration_seconds: Optional[int] = None
     hd: bool = False
     price_rub: Decimal = Decimal("0")
+    extra: Optional[Dict[str, Any]] = None
 
     def key(self) -> str:
         parts = [
@@ -643,6 +687,7 @@ class OrderContext:
             str(self.duration_seconds or 0),
             "hd" if self.hd else "sd",
             str(self.price_rub),
+            json.dumps(self.extra, sort_keys=True) if self.extra else "",
         ]
         return "|".join(parts)
 
@@ -1340,6 +1385,97 @@ def _back_button(target: str) -> InlineKeyboardButton:
 
 def _build_back_keyboard(target: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[[_back_button(target)]])
+
+
+def _trends_keyboard() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text=TREND_AUTO_BUTTON)],
+            [KeyboardButton(text=TREND_BACK_BUTTON)],
+        ],
+        resize_keyboard=True,
+    )
+
+
+def _build_auto_prompt_choice_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=AUTO_STYLES_AUTO_PROMPT, callback_data="auto_prompt_mode:auto"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text=AUTO_STYLES_MANUAL_PROMPT,
+                    callback_data="auto_prompt_mode:text",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text=TREND_BACK_BUTTON, callback_data="auto_prompt_mode:back"
+                )
+            ],
+        ]
+    )
+
+
+def _auto_styles_back_label(source: str) -> str:
+    return (
+        AUTO_STYLES_ROOT_BACK_TRENDS
+        if source == "trends"
+        else AUTO_STYLES_ROOT_BACK_NANO
+    )
+
+
+def _build_auto_styles_keyboard(page: int, *, source: str) -> InlineKeyboardMarkup:
+    rows: List[List[InlineKeyboardButton]] = []
+    styles: List[AutoStyle]
+    if page == 1:
+        styles = AUTO_STYLES_PAGE1
+    else:
+        styles = AUTO_STYLES_PAGE2
+    for style in styles:
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=style.title, callback_data=f"auto_style:{style.id}"
+                )
+            ]
+        )
+    if page == 1:
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=AUTO_STYLES_NEXT_PAGE, callback_data="auto_style:page2"
+                )
+            ]
+        )
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=_auto_styles_back_label(source),
+                    callback_data="auto_style:back",
+                )
+            ]
+        )
+    else:
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=AUTO_STYLES_PREV_PAGE, callback_data="auto_style:page1"
+                )
+            ]
+        )
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=_auto_styles_back_label(source),
+                    callback_data="auto_style:back",
+                )
+            ]
+        )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def _build_video_settings_keyboard(
@@ -2323,6 +2459,7 @@ def _create_order(
     model_label: str,
     include_size: bool,
     image_file_id: Optional[str] = None,
+    extra: Optional[Dict[str, Any]] = None,
 ) -> OrderContext:
     size = session.last_size if include_size else ""
     aspect_ratio = session.last_aspect_ratio if include_size else None
@@ -2354,6 +2491,7 @@ def _create_order(
         duration_seconds=duration_seconds,
         hd=hd_enabled,
         price_rub=price_rub,
+        extra=extra,
     )
 
 
@@ -2964,7 +3102,7 @@ async def _launch_order(
     )
 
     provider_settings: Dict[str, Any] = {}
-    job_meta: Dict[str, Any] = {}
+    job_meta: Dict[str, Any] = dict(order.extra or {})
     if order.category == "video":
         if order.duration_seconds:
             provider_settings["duration"] = order.duration_seconds
@@ -3045,6 +3183,10 @@ async def _launch_order(
                 )
                 return
             await callback.message.answer(i18n.t("flow.nano_image_done"))
+            if job_meta.get("auto_style"):
+                await _send_auto_style_ready(
+                    callback.message.bot, callback.message.chat.id
+                )
             await _release_lock("inline_completed", "completed")
             return
         if (job_record.status or "").lower() == "completed" and task_label == "image_generate":
@@ -3064,6 +3206,10 @@ async def _launch_order(
                     await callback.message.answer(i18n.t("status.delivery_generic"))
                 else:
                     await callback.message.answer(i18n.t("status.completed_photo"))
+                    if job_meta.get("auto_style"):
+                        await _send_auto_style_ready(
+                            callback.message.bot, callback.message.chat.id
+                        )
                 return
             else:
                 idempotency_key = f"{idempotency_key}:{uuid.uuid4().hex}"
@@ -3628,6 +3774,8 @@ async def _send_job_update(
             text=summary_text,
         )
         extra_payload = getattr(job, "extra", {}) or {}
+        if isinstance(extra_payload, dict) and extra_payload.get("auto_style"):
+            await _send_auto_style_ready(dp.bot, job.user_id)
         trend_meta = extra_payload.get("trend") if isinstance(extra_payload, dict) else None
         if isinstance(trend_meta, dict):
             caption_text = str(trend_meta.get("caption") or "").strip()
@@ -4830,6 +4978,195 @@ async def generate_image_menu(
     )
 
 
+# --- Auto-style flows: trends entry and Nano Banana reuse ---
+
+
+async def _ensure_auto_style_context(state: FSMContext, config: Config) -> Optional[ImageModelOption]:
+    option = _default_image_model_option(config)
+    if option is None:
+        return None
+    await state.update_data(
+        flow_type="image",
+        model=option.model,
+        provider=option.provider,
+        model_label=option.label,
+        include_size=False,
+        product=_resolve_product_key("image", option.provider, option.model),
+        mode="photo",
+    )
+    return option
+
+
+async def _open_auto_styles_menu(
+    *,
+    message: Message,
+    state: FSMContext,
+    config: Config,
+    source: str,
+) -> None:
+    option = await _ensure_auto_style_context(state, config)
+    if option is None:
+        await message.answer(i18n.t("errors.image_generation_disabled"))
+        await state.finish()
+        await _send_main_menu(message, config)
+        return
+    await state.update_data(auto_style_source=source, auto_style_id=None)
+    await AutoStyleStates.choosing_styles.set()
+    keyboard = _build_auto_styles_keyboard(1, source=source)
+    try:
+        await message.edit_text(AUTO_STYLES_INTRO, reply_markup=keyboard)
+    except Exception:
+        await message.answer(AUTO_STYLES_INTRO, reply_markup=keyboard)
+
+
+async def _prompt_auto_style_photo(
+    *, message: Message, state: FSMContext, style: AutoStyle
+) -> None:
+    await state.update_data(auto_style_id=style.id)
+    await GenerationStates.photo_prompt.set()
+    await message.answer(
+        AUTO_STYLE_PHOTO_PROMPT.format(style_title=style.title),
+        reply_markup=ReplyKeyboardRemove(),
+    )
+
+
+async def _return_to_trends_menu(message: Message, config: Config, state: FSMContext) -> None:
+    await AutoStyleStates.trends_menu.set()
+    await message.answer(TREND_MENU_TITLE, reply_markup=_trends_keyboard())
+
+
+async def _send_auto_prompt_mode_choice(message: Message) -> None:
+    keyboard = _build_auto_prompt_choice_keyboard()
+    try:
+        await message.edit_text(AUTO_PROMPT_CHOICE_TEXT, reply_markup=keyboard)
+    except Exception:
+        await message.answer(AUTO_PROMPT_CHOICE_TEXT, reply_markup=keyboard)
+
+
+async def _send_auto_style_ready(bot: Bot, chat_id: int) -> None:
+    await bot.send_message(chat_id, AUTO_STYLE_READY_TEXT)
+
+
+async def trends_entry_menu(
+    message: Message, state: FSMContext, db: Database, config: Config
+) -> None:
+    await state.finish()
+    await AutoStyleStates.trends_menu.set()
+    await message.answer(TREND_MENU_TITLE, reply_markup=_trends_keyboard())
+
+
+async def trends_menu_handler(
+    message: Message, state: FSMContext, config: Config
+) -> None:
+    choice = (message.text or "").strip()
+    if choice == TREND_AUTO_BUTTON:
+        await _open_auto_styles_menu(
+            message=message, state=state, config=config, source="trends"
+        )
+        return
+    if choice == TREND_BACK_BUTTON:
+        await state.finish()
+        await _send_main_menu(message, config)
+        return
+    await message.answer(TREND_MENU_TITLE, reply_markup=_trends_keyboard())
+
+
+async def auto_prompt_mode_callback_handler(
+    callback: CallbackQuery, state: FSMContext, config: Config
+) -> None:
+    await safe_callback_answer(callback)
+    payload = (callback.data or "").split(":", maxsplit=1)[-1]
+    state_data = await state.get_data()
+    model = state_data.get("model")
+    provider = state_data.get("provider")
+    model_label = state_data.get("model_label")
+    include_size = bool(state_data.get("include_size"))
+    product = _resolve_product_key("image", provider, model, state_data.get("product"))
+    user = callback.from_user
+    session = SESSION_MANAGER.get(user.id) if user else None
+    if model is None or provider is None or model_label is None:
+        option = await _ensure_auto_style_context(state, config)
+        if option is None:
+            await callback.message.answer(i18n.t("errors.image_generation_disabled"))
+            await state.finish()
+            await _send_main_menu(callback.message, config)
+            return
+        model = option.model
+        provider = option.provider
+        model_label = option.label
+        product = _resolve_product_key("image", provider, model, state_data.get("product"))
+    if session is None:
+        return
+    if payload == "auto":
+        await _open_auto_styles_menu(
+            message=callback.message, state=state, config=config, source="nano"
+        )
+        return
+    if payload == "text":
+        await state.update_data(auto_style_id=None, auto_style_source=None)
+        await GenerationStates.photo_prompt.set()
+        await _send_generation_prompt(
+            callback.message,
+            session=session,
+            category="image",
+            mode="photo",
+            model_label=model_label,
+            include_size=include_size,
+            config=config,
+            provider=provider,
+            product=product,
+            model=model,
+        )
+        return
+    if payload == "back":
+        await GenerationStates.image_mode.set()
+        prompt_text = _image_mode_prompt_text(provider, model, model_label)
+        keyboard = _build_mode_keyboard("image")
+        try:
+            await callback.message.edit_text(
+                prompt_text, reply_markup=keyboard, parse_mode="MarkdownV2"
+            )
+        except Exception:
+            await callback.message.answer(
+                prompt_text, reply_markup=keyboard, parse_mode="MarkdownV2"
+            )
+
+
+async def auto_style_callback_handler(
+    callback: CallbackQuery, state: FSMContext, config: Config
+) -> None:
+    await safe_callback_answer(callback)
+    payload = (callback.data or "").split(":", maxsplit=1)[-1]
+    state_data = await state.get_data()
+    source = (state_data.get("auto_style_source") or "trends").strip()
+    if payload == "page1":
+        keyboard = _build_auto_styles_keyboard(1, source=source)
+        try:
+            await callback.message.edit_reply_markup(reply_markup=keyboard)
+        except Exception:
+            await callback.message.answer(AUTO_STYLES_INTRO, reply_markup=keyboard)
+        return
+    if payload == "page2":
+        keyboard = _build_auto_styles_keyboard(2, source=source)
+        try:
+            await callback.message.edit_reply_markup(reply_markup=keyboard)
+        except Exception:
+            await callback.message.answer(AUTO_STYLES_INTRO, reply_markup=keyboard)
+        return
+    if payload == "back":
+        if source == "trends":
+            await _return_to_trends_menu(callback.message, config, state)
+        else:
+            await AutoStyleStates.choosing_prompt_mode.set()
+            await _send_auto_prompt_mode_choice(callback.message)
+        return
+    style = get_auto_style(payload)
+    if style is None:
+        await safe_callback_answer(callback, "Стиль недоступен", show_alert=True)
+        return
+    await _prompt_auto_style_photo(message=callback.message, state=state, style=style)
+
+
 async def help_button(
     message: Message, db: Database, state: FSMContext, config: Config
 ) -> None:
@@ -4912,6 +5249,23 @@ async def handle_text_input(
     )
 
 
+async def handle_non_photo_reply(
+    message: Message, state: FSMContext, config: Config
+) -> None:
+    state_data = await state.get_data()
+    auto_style = get_auto_style(state_data.get("auto_style_id"))
+    if auto_style:
+        await message.answer(
+            AUTO_STYLE_PHOTO_PROMPT.format(style_title=auto_style.title),
+            reply_markup=ReplyKeyboardRemove(),
+        )
+    else:
+        await message.answer(
+            "Пожалуйста, пришлите фото, чтобы продолжить.",
+            reply_markup=ReplyKeyboardRemove(),
+        )
+
+
 async def handle_photo_input(
     message: Message,
     state: FSMContext,
@@ -4950,32 +5304,48 @@ async def handle_photo_input(
         config=config,
     )
     product = _resolve_product_key(category, provider, model, state_data.get("product"))
+    auto_style_id = state_data.get("auto_style_id")
+    auto_style = get_auto_style(auto_style_id)
     if not message.photo:
-        is_admin = _is_admin(user_id, config)
-        await _send_generation_prompt(
-            message,
-            session=session,
-            category=category,
-            mode="photo",
-            model_label=model_label,
-            include_size=include_size,
-            config=config,
-            provider=provider,
-            product=product,
-            model=model,
-            is_admin=is_admin,
-        )
+        if auto_style:
+            await message.answer(
+                AUTO_STYLE_PHOTO_PROMPT.format(style_title=auto_style.title),
+                reply_markup=ReplyKeyboardRemove(),
+            )
+        else:
+            is_admin = _is_admin(user_id, config)
+            await _send_generation_prompt(
+                message,
+                session=session,
+                category=category,
+                mode="photo",
+                model_label=model_label,
+                include_size=include_size,
+                config=config,
+                provider=provider,
+                product=product,
+                model=model,
+                is_admin=is_admin,
+            )
         return
     largest = max(message.photo, key=lambda item: item.file_size or 0)
     raw_caption = (message.caption or "").strip()
     caption = raw_caption
-    if _detect_pro_request(raw_caption):
-        await _notify_pro_unavailable(message)
-        caption = _strip_pro_directives(raw_caption)
+    if auto_style:
+        prompt_text = auto_style.prompt
+        order_extra: Optional[Dict[str, Any]] = {
+            "auto_style": {"id": auto_style.id, "title": auto_style.title}
+        }
+    else:
+        if _detect_pro_request(raw_caption):
+            await _notify_pro_unavailable(message)
+            caption = _strip_pro_directives(raw_caption)
+        prompt_text = caption
+        order_extra = None
     order = _create_order(
         category=category,
         flow="photo",
-        prompt=caption,
+        prompt=prompt_text,
         config=config,
         session=session,
         model=model,
@@ -4984,6 +5354,7 @@ async def handle_photo_input(
         model_label=model_label,
         include_size=include_size,
         image_file_id=largest.file_id,
+        extra=order_extra,
     )
     await state.finish()
     await _show_confirmation_and_balance(
@@ -5234,6 +5605,12 @@ async def image_mode_callback_handler(
         include_size=False,
         product=product,
     )
+    provider_key = (provider or "").lower()
+    label_key = (model_label or "").lower()
+    if mode == "photo" and ("gemini" in provider_key or "banana" in label_key):
+        await AutoStyleStates.choosing_prompt_mode.set()
+        await _send_auto_prompt_mode_choice(callback.message)
+        return
     target_state = GenerationStates.text_prompt if mode == "text" else GenerationStates.photo_prompt
     await target_state.set()
     try:
@@ -7047,6 +7424,12 @@ def register_handlers(
         state=GenerationStates.text_prompt,
     )
     dp.register_message_handler(
+        lambda message, state: handle_non_photo_reply(message, state, config),
+        lambda message: not message.photo,
+        state=GenerationStates.photo_prompt,
+        content_types=ContentType.ANY,
+    )
+    dp.register_message_handler(
         lambda message, state: handle_photo_input(message, state, db, config),
         state=GenerationStates.photo_prompt,
         content_types=["photo"],
@@ -7091,10 +7474,15 @@ def register_handlers(
         content_types=["text"],
     )
     dp.register_message_handler(
-        lambda message, state: trend_menu(message, state, db, config),
+        lambda message, state: trends_entry_menu(message, state, db, config),
         lambda message: (message.text or "").strip() == i18n.t("buttons.trends"),
         state="*",
         content_types=["text"],
+    )
+    dp.register_message_handler(
+        lambda message, state: trends_menu_handler(message, state, config),
+        state=AutoStyleStates.trends_menu,
+        content_types=[ContentType.TEXT],
     )
 
     dp.register_callback_query_handler(
@@ -7115,6 +7503,11 @@ def register_handlers(
     dp.register_callback_query_handler(
         lambda call, state: image_mode_callback_handler(call, state, config),
         lambda call: call.data and call.data.startswith("image:mode:"),
+        state="*",
+    )
+    dp.register_callback_query_handler(
+        lambda call, state: auto_prompt_mode_callback_handler(call, state, config),
+        lambda call: call.data and call.data.startswith("auto_prompt_mode:"),
         state="*",
     )
     dp.register_callback_query_handler(
@@ -7167,6 +7560,11 @@ def register_handlers(
     dp.register_callback_query_handler(
         lambda call, state: trend_model_callback_handler(call, state, config),
         lambda call: call.data and call.data.startswith("trend_model"),
+        state="*",
+    )
+    dp.register_callback_query_handler(
+        lambda call, state: auto_style_callback_handler(call, state, config),
+        lambda call: call.data and call.data.startswith("auto_style:"),
         state="*",
     )
     dp.register_callback_query_handler(
