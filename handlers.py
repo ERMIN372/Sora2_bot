@@ -144,6 +144,7 @@ from tarot_data import draw_cards
 from tarot_telegram import send_card
 from utils import build_inline_data_from_telegram_file
 import yookassa_client
+from news_admin import register_news_admin_handlers
 
 
 # Поддерживаемые соотношения сторон
@@ -7224,6 +7225,8 @@ def register_handlers(
             error_reporter,
         ),
     )
+
+    register_news_admin_handlers(dp)
 
     dp.register_message_handler(
         lambda message, state: start_command(message, db, state, config),
