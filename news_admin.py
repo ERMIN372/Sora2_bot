@@ -93,7 +93,18 @@ async def approve_draft_callback(callback_query: types.CallbackQuery) -> None:
         await callback_query.answer("Черновик не найден", show_alert=True)
         return
 
-    set_draft_status(draft_id, "approved")
+    if draft.get("status") == "approved":
+        await callback_query.answer("Уже опубликовано", show_alert=True)
+        if callback_query.message and callback_query.message.reply_markup:
+            try:
+                await callback_query.message.edit_reply_markup(reply_markup=None)
+            except Exception:
+                log.debug(
+                    "Failed to remove inline keyboard for already approved draft %s",
+                    draft_id,
+                    exc_info=True,
+                )
+        return
 
     if NEWS_CHANNEL_ID is None:
         log.warning("Cannot publish draft %s: NEWS_CHANNEL_ID is not configured", draft_id)
@@ -112,13 +123,14 @@ async def approve_draft_callback(callback_query: types.CallbackQuery) -> None:
             text=draft["text"],
         )
 
+    set_draft_status(draft_id, "approved")
     await callback_query.answer("Пост опубликован")
 
     if callback_query.message:
         try:
             await callback_query.message.edit_text(
                 f"{callback_query.message.text}\n\n✅ Опубликовано",
-                reply_markup=callback_query.message.reply_markup,
+                reply_markup=None,
             )
         except Exception:
             log.debug("Failed to edit admin message for draft %s", draft_id, exc_info=True)
