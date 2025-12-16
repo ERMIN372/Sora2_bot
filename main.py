@@ -14,7 +14,12 @@ from aiogram.contrib.fsm_storage.memory import MemoryStorage
 from fastapi import FastAPI
 import uvicorn
 
-from app_server import YooKassaProcessor, create_app, poll_pending_payments
+from app_server import (
+    YooKassaProcessor,
+    app as fastapi_app,
+    create_app,
+    poll_pending_payments,
+)
 from archive import ArchivePublisher
 from config import CFG, Config, load_config
 from db import Database
@@ -47,6 +52,8 @@ logging.getLogger("aiogram").setLevel(logging.DEBUG)
 logging.getLogger("uvicorn.error").setLevel(logging.INFO)
 logging.getLogger("uvicorn.access").setLevel(logging.INFO)
 log = logging.getLogger(__name__)
+
+app = fastapi_app
 
 if not isinstance(getattr(logging, _LOG_LEVEL_NAME, None), int):
     log.warning("Unknown LOG_LEVEL %s, defaulting to INFO", _LOG_LEVEL_NAME)
