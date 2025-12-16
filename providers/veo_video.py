@@ -875,12 +875,21 @@ class VeoVideoClient(BaseProviderClient):
         try:
             refreshed = await asyncio.to_thread(self._client.operations.get, operation)
         except _genai_errors.APIError as exc:  # pragma: no cover - network guard
+            status_code = getattr(exc, "code", None)
+            if status_code is None:
+                status_code = getattr(getattr(exc, "response", None), "status_code", None)
+            status_code = int(status_code or 500)
+            error_status = getattr(exc, "status", None)
+            provider_message = str(getattr(exc, "response", exc))
             raise ProviderAPIError(
                 provider=self.provider_name,
-                status_code=getattr(exc, "code", 500) or 500,
+                status_code=status_code,
                 message=str(exc),
-                error_type=getattr(exc, "status", None),
-                provider_message=str(getattr(exc, "response", exc)),
+                error_type=error_status or None,
+                error_code=getattr(exc, "code", None),
+                provider_message=provider_message,
+                retryable=status_code not in {403},
+                status=status_code,
             ) from exc
         duration_ms = int((time.perf_counter() - start) * 1000)
         log.info(
