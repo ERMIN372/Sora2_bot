@@ -14,7 +14,7 @@ import re
 import time
 import uuid
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Mapping, Optional, Tuple
 
@@ -1379,12 +1379,36 @@ class JobQueue:
 
     async def _recover_pending_jobs(self) -> None:
         pending = await self._db.list_pending_jobs(limit=100)
+        stale_cutoff = datetime.utcnow() - timedelta(hours=12)
+        stale_skipped = 0
+        epoch = datetime.utcfromtimestamp(0)
         for job in pending:
             asset_kind = (
                 ASSET_KIND_IMAGE
                 if (job.content_type or "").strip().lower() == "image"
                 else ASSET_KIND_VIDEO
             )
+            model_lower = (job.model or "").strip().lower()
+            has_timestamp = bool(job.created_at and job.created_at > epoch)
+            if (
+                model_lower.startswith("veo")
+                and has_timestamp
+                and job.created_at < stale_cutoff
+            ):
+                message = "Veo operation not accessible; marked failed on startup"
+                log.warning(
+                    "Marking stale Veo pending job as failed job_id=%s created_at=%s",
+                    job.id,
+                    job.created_at,
+                )
+                await self._db.update_job(
+                    job.id,
+                    "failed",
+                    video_id=job.video_id,
+                    error=message,
+                )
+                stale_skipped += 1
+                continue
             await self.enqueue(
                 job_id=job.id,
                 user_id=job.user_id,
@@ -1402,6 +1426,8 @@ class JobQueue:
             )
         if pending:
             log.info("Recovered %s pending jobs", len(pending))
+        if stale_skipped:
+            log.info("Skipped %s stale Veo pending jobs", stale_skipped)
 
     async def _notify(self, job: GenerationJobRecord) -> None:
         for callback in self._notification_callbacks.values():
@@ -1496,6 +1522,82 @@ class JobQueue:
                 )
                 provider_job_id = poll_target
             except ProviderAPIError as exc:
+                error_code_upper = (exc.error_code or exc.error_type or "").upper()
+                non_retryable = {403}
+                is_permission_denied = exc.status_code in non_retryable or error_code_upper == "PERMISSION_DENIED"
+                is_veo_poll = is_veo_provider and task_type == ASSET_TASK_RETRIEVE
+                if is_permission_denied and is_veo_poll:
+                    terminal_reason = "provider_forbidden"
+                    terminal_message = "operation not accessible; stop retry"
+                    log.warning(
+                        "poll_terminal job_id=%s corr_id=%s provider=%s operation_id=%s status_code=%s message=%s",
+                        pending.job_id,
+                        pending.corr_id,
+                        provider_key,
+                        poll_target,
+                        exc.status_code,
+                        terminal_message,
+                    )
+                    self._debug_event(
+                        "jobs.poll.error",
+                        job_id=pending.job_id,
+                        corr_id=pending.corr_id,
+                        provider=provider_key,
+                        status_code=exc.status_code,
+                        error_type=exc.error_type,
+                        error_code=exc.error_code,
+                    )
+                    log_event(
+                        level="WARNING",
+                        event="poll_terminal",
+                        corr_id=pending.corr_id,
+                        job_id=pending.job_id,
+                        user_id=pending.user_id,
+                        username=pending.username,
+                        model=pending.model,
+                        provider=provider_key,
+                        size=pending.size,
+                        status_code=exc.status_code,
+                        error_type=exc.error_type,
+                        error_code=exc.error_code,
+                        error_msg_short=terminal_message,
+                        duration_ms=exc.duration_ms,
+                        extra={
+                            "operation_id": poll_target,
+                            "provider_message": exc.provider_message,
+                            "gemini_key_mask": key_mask or None,
+                            "asset_kind": asset_kind,
+                        },
+                    )
+                    try:
+                        await self._db.update_job(
+                            pending.job_id,
+                            "failed",
+                            video_id=pending.video_id,
+                            error=terminal_message,
+                        )
+                    except Exception:
+                        log.exception("Failed to mark job %s as failed", pending.job_id)
+                    refunded = False
+                    try:
+                        await self._db.add_credits(
+                            pending.user_id, self._config.generation_cost_credits
+                        )
+                        refunded = True
+                        increment_metric("refunds_total")
+                        increment_metric("refund_total")
+                    except Exception:
+                        log.exception("Refunding credits failed for job %s", pending.job_id)
+                    job_extra.setdefault("reason", terminal_reason)
+                    job_extra["reason_message"] = terminal_message
+                    job_extra["provider_message"] = exc.provider_message
+                    increment_metric("veo_failed_total", tags={"reason": terminal_reason})
+                    await self._release_gate(
+                        pending,
+                        reason=terminal_reason,
+                        status="failed",
+                    )
+                    return
                 log.warning(
                     "Provider polling failed job_id=%s corr_id=%s provider=%s status=%s error_type=%s error_code=%s message=%s",
                     pending.job_id,
