@@ -591,7 +591,10 @@ def _telegram_router(dp: Dispatcher, bot: Bot) -> APIRouter:
             log.exception("Webhook: invalid JSON body", extra={"raw": raw[:1000]})
             return Response(status_code=200)
 
-        log.debug("Webhook: update received", extra={"update_json": data})
+        log.info(
+            "tg.webhook.hit",
+            extra={"update_id": data.get("update_id"), "keys": list(data.keys())},
+        )
 
         try:
             if hasattr(types.Update, "to_object"):
@@ -621,7 +624,10 @@ def _telegram_router(dp: Dispatcher, bot: Bot) -> APIRouter:
 
             await dp.process_update(update)
         except Exception:
-            log.exception("Webhook: handler crashed", extra={"update_json": data})
+            log.exception(
+                "Webhook: handler crashed",
+                extra={"update_json": data, "update_id": data.get("update_id")},
+            )
             return Response(status_code=200)
 
         return Response(status_code=200)
@@ -631,6 +637,10 @@ def _telegram_router(dp: Dispatcher, bot: Bot) -> APIRouter:
 
 def _create_base_app() -> FastAPI:
     app = FastAPI(title="Sora2 Bot API")
+
+    @app.get("/health", include_in_schema=False)
+    async def health() -> Dict[str, bool]:
+        return {"ok": True}
 
     @app.get("/healthz", include_in_schema=False)
     async def healthz() -> Dict[str, bool]:
