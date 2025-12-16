@@ -76,6 +76,8 @@ ASSET_KIND_VIDEO = "video"
 ASSET_KIND_IMAGE = "image"
 
 _DOWNLOAD_MAX_ATTEMPTS = 3
+_POLL_MAX_ATTEMPTS = 5
+_POLL_BACKOFF_BASE = 1.5
 
 _IMAGE_ARTIFACTS_DIR = Path("attached_assets") / "images"
 
@@ -1352,6 +1354,10 @@ class JobQueue:
             corr_id,
             user_id,
         )
+        poll_tasks = {ASSET_TASK_RETRIEVE, IMAGE_TASK_RETRIEVE, VIDEO_TASK_RETRIEVE}
+        max_attempts_value = max_attempts
+        if max_attempts_value <= 0 and task_type in poll_tasks:
+            max_attempts_value = _POLL_MAX_ATTEMPTS
         await self._queue.put(
             PendingJob(
                 job_id=job_id,
@@ -1373,7 +1379,7 @@ class JobQueue:
                 video_id=video_id,
                 asset_id=asset_id,
                 attempt=attempt,
-                max_attempts=max_attempts,
+                max_attempts=max_attempts_value,
             )
         )
 
@@ -1454,6 +1460,8 @@ class JobQueue:
         provider_job_id = pending.provider_job_id or pending.job_id
         task_type = pending.task_type or ASSET_TASK_RETRIEVE
         asset_kind = (pending.asset_kind or ASSET_KIND_VIDEO).strip().lower()
+        attempt = max(0, pending.attempt or 0)
+        max_attempts = pending.max_attempts or _POLL_MAX_ATTEMPTS
         if asset_kind not in {ASSET_KIND_VIDEO, ASSET_KIND_IMAGE}:
             asset_kind = ASSET_KIND_VIDEO
         key_mask = self._gemini_key_mask if provider_hint.startswith(("veo", "gemini")) else ""
@@ -1498,6 +1506,57 @@ class JobQueue:
             else:
                 key_mask = ""
             poll_target = pending.video_id or provider_job_id
+
+            async def _schedule_retry(provider_key: str) -> None:
+                if attempt + 1 >= max_attempts:
+                    final_message = "poll retries exhausted"
+                    log.warning(
+                        "Polling attempts exhausted job_id=%s corr_id=%s provider=%s attempts=%s",
+                        pending.job_id,
+                        pending.corr_id,
+                        provider_key,
+                        max_attempts,
+                    )
+                    try:
+                        await self._db.update_job(
+                            pending.job_id,
+                            "failed",
+                            video_id=pending.video_id,
+                            error=final_message,
+                        )
+                    except Exception:
+                        log.exception("Failed to mark job %s as failed", pending.job_id)
+                    await self._release_gate(
+                        pending,
+                        reason="poll_retry_exhausted",
+                        status="failed",
+                    )
+                    return
+
+                delay = self._poll_interval_seconds() * (_POLL_BACKOFF_BASE ** attempt)
+                delay = min(delay, 60.0)
+                await asyncio.sleep(delay)
+                await self.enqueue(
+                    job_id=pending.job_id,
+                    user_id=pending.user_id,
+                    prompt=pending.prompt,
+                    corr_id=pending.corr_id,
+                    size=pending.size,
+                    model=pending.model,
+                    provider=provider_key,
+                    username=pending.username,
+                    original_prompt=pending.original_prompt,
+                    sanitized_prompt=pending.sanitized_prompt,
+                    auto_sanitized=pending.auto_sanitized,
+                    preflight_reason=pending.preflight_reason,
+                    preflight_scope=pending.preflight_scope,
+                    task_type=pending.task_type or ASSET_TASK_RETRIEVE,
+                    asset_kind=asset_kind,
+                    provider_job_id=provider_job_id,
+                    video_id=pending.video_id,
+                    attempt=attempt + 1,
+                    max_attempts=max_attempts,
+                )
             try:
                 log.debug(
                     "Polling provider job job_id=%s provider_job=%s provider=%s corr_id=%s",
@@ -1639,26 +1698,7 @@ class JobQueue:
                     duration_ms=exc.duration_ms,
                     extra=error_extra,
                 )
-                await asyncio.sleep(self._poll_interval_seconds())
-                await self.enqueue(
-                    job_id=pending.job_id,
-                    user_id=pending.user_id,
-                    prompt=pending.prompt,
-                    corr_id=pending.corr_id,
-                    size=pending.size,
-                    model=pending.model,
-                    provider=provider_key,
-                    username=pending.username,
-                    original_prompt=pending.original_prompt,
-                    sanitized_prompt=pending.sanitized_prompt,
-                    auto_sanitized=pending.auto_sanitized,
-                    preflight_reason=pending.preflight_reason,
-                    preflight_scope=pending.preflight_scope,
-                    task_type=pending.task_type or ASSET_TASK_RETRIEVE,
-                    asset_kind=asset_kind,
-                    provider_job_id=provider_job_id,
-                    video_id=pending.video_id,
-                )
+                await _schedule_retry(provider_key)
                 return
             except Exception as exc:  # pragma: no cover - defensive network guard
                 log.exception("Unexpected error while polling job %s", pending.job_id)
@@ -1684,26 +1724,7 @@ class JobQueue:
                     error_msg_short=str(exc),
                     extra={"gemini_key_mask": key_mask or None},
                 )
-                await asyncio.sleep(self._poll_interval_seconds())
-                await self.enqueue(
-                    job_id=pending.job_id,
-                    user_id=pending.user_id,
-                    prompt=pending.prompt,
-                    corr_id=pending.corr_id,
-                    size=pending.size,
-                    model=pending.model,
-                    provider=provider_key,
-                    username=pending.username,
-                    original_prompt=pending.original_prompt,
-                    sanitized_prompt=pending.sanitized_prompt,
-                    auto_sanitized=pending.auto_sanitized,
-                    preflight_reason=pending.preflight_reason,
-                    preflight_scope=pending.preflight_scope,
-                    task_type=pending.task_type or ASSET_TASK_RETRIEVE,
-                    asset_kind=asset_kind,
-                    provider_job_id=provider_job_id,
-                    video_id=pending.video_id,
-                )
+                await _schedule_retry(provider_key)
                 return
             provider_data: Dict[str, Any] = {}
             if isinstance(result.data, dict):

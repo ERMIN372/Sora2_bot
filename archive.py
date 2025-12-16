@@ -99,6 +99,7 @@ class ArchivePublisher:
         self._admin_checked = False
         self._can_publish = False
         self._bot_id: Optional[int] = None
+        self._missing_channel_logged = False
 
     def schedule(self, payload: ArchivePayload) -> None:
         if not payload.corr_id:
@@ -130,6 +131,11 @@ class ArchivePublisher:
     async def _publish(self, payload: ArchivePayload) -> None:
         corr_id = payload.corr_id
         if not self._channel_id:
+            if not self._missing_channel_logged:
+                log.warning(
+                    "Archive channel is not configured; skipping publications",
+                )
+                self._missing_channel_logged = True
             log.debug("Archive channel is not configured; skipping corr_id=%s", corr_id)
             await self._log_attempt(payload, archive_status="skipped", error_short="no_channel")
             return

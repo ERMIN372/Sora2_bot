@@ -85,6 +85,7 @@ Veo и изображений через Google Gemini. Он управляет 
 | `PRICE_ONE_RUB`, `PRICE_FIVE_RUB`, `PRICE_TEN_RUB`, `PRICE_THIRTY_RUB` | Стоимость пакетов кредитов в рублях. |
 | `SUBSCRIPTION_CHAT_ID` | (Необязательно) ID канала/чата для проверки подписки и выдачи бонуса. |
 | `YOOKASSA_POLL_INTERVAL` | Интервал (в секундах) фонового опроса платежей YooKassa. |
+| `ARCHIVE_CHANNEL_ID` | Канал/чат для архивных публикаций: числовой ID (например, `-100123...`) или `@username`. |
 
 ### Google Sheets setup
 

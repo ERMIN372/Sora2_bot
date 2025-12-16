@@ -56,6 +56,7 @@ else:
     log.debug("Logging configured level=%s", logging.getLevelName(_LOG_LEVEL))
 
 app: FastAPI | None = None
+_ASGI_STATE: "ApplicationState | None" = None
 
 
 @dataclass
@@ -293,7 +294,7 @@ async def _configure_webhook(state: ApplicationState) -> bool:
         log.exception("Failed to configure Telegram webhook at %s", CFG.WEBHOOK_URL)
         return False
 
-    log.info("Webhook configured at %s", CFG.WEBHOOK_URL)
+    log.info("webhook_set url=%s", CFG.WEBHOOK_URL)
     return True
 
 
@@ -420,11 +421,30 @@ if __name__ != "__main__":
 
     @app.on_event("startup")
     async def _asgi_startup() -> None:  # pragma: no cover - uvicorn lifecycle
-        await _startup(_ASGI_STATE, mode="webhook")
+        if _ASGI_STATE is None:
+            return
+        mode = (CFG.BOT_MODE or "webhook").lower()
+        await _startup(_ASGI_STATE, mode=mode)
+
+        if mode != "webhook":
+            log.info("Webhook setup skipped because BOT_MODE=%s", mode)
+            return
+
+        if not _is_valid_webhook_host(CFG.WEBHOOK_HOST):
+            log.warning(
+                "WEBHOOK_HOST is empty or invalid; webhook setup skipped and bot will not receive updates"
+            )
+            return
+
+        configured = await _configure_webhook(_ASGI_STATE)
+        if not configured:
+            log.warning("Webhook setup failed; bot may be unreachable via webhook")
 
     @app.on_event("shutdown")
     async def _asgi_shutdown() -> None:  # pragma: no cover - uvicorn lifecycle
-        await _shutdown(_ASGI_STATE, mode="webhook")
+        if _ASGI_STATE is None:
+            return
+        await _shutdown(_ASGI_STATE, mode=(CFG.BOT_MODE or "webhook").lower())
 
 
 if __name__ == "__main__":
