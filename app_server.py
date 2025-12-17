@@ -584,6 +584,7 @@ def _telegram_router(dp: Dispatcher, bot: Bot) -> APIRouter:
                 log.warning("Webhook: bad secret token")
                 return Response(status_code=200)
 
+        remote = request.client.host if request.client else "unknown"
         raw = await request.body()
         try:
             data = json.loads(raw.decode("utf-8"))
@@ -593,7 +594,11 @@ def _telegram_router(dp: Dispatcher, bot: Bot) -> APIRouter:
 
         log.info(
             "tg.webhook.hit",
-            extra={"update_id": data.get("update_id"), "keys": list(data.keys())},
+            extra={
+                "remote": remote,
+                "update_id": data.get("update_id"),
+                "keys": list(data.keys()),
+            },
         )
 
         try:
