@@ -283,7 +283,7 @@ async def _configure_webhook(state: ApplicationState) -> bool:
     webhook_task = asyncio.create_task(
         state.bot.set_webhook(
             CFG.WEBHOOK_URL,
-            secret_token=CFG.TELEGRAM_SECRET_TOKEN or None,
+            secret_token=CFG.TG_WEBHOOK_SECRET or None,
             drop_pending_updates=True,
             allowed_updates=ALLOWED_UPDATES,
         )

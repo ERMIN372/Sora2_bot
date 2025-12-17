@@ -24,7 +24,7 @@ from services import gsheets_ref
 import yookassa_client
 
 log = logging.getLogger(__name__)
-WEBHOOK_SECRET = os.getenv("TELEGRAM_WEBHOOK_SECRET", "")
+WEBHOOK_SECRET = CFG.TG_WEBHOOK_SECRET
 
 YOOKASSA_IP_RANGES = [
     ip_network("185.71.76.0/27"),

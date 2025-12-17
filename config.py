@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from dataclasses import dataclass, field
 from decimal import ROUND_CEILING, ROUND_HALF_UP, Decimal
 from typing import Dict, Iterable, List, Mapping, Optional, Tuple
@@ -836,7 +837,7 @@ class RuntimeConfig:
     WEBHOOK_HOST: str
     WEBHOOK_PATH: str
     WEBHOOK_URL: str
-    TELEGRAM_SECRET_TOKEN: str
+    TG_WEBHOOK_SECRET: str
     HOST: str
     PORT: int
 
@@ -858,7 +859,17 @@ def _load_runtime_config() -> RuntimeConfig:
     webhook_host = webhook_host_raw.rstrip("/")
     webhook_path = _normalise_path(os.getenv("WEBHOOK_PATH", "/tg/webhook").strip() or "/tg/webhook")
     webhook_url = f"{webhook_host}{webhook_path}" if webhook_host else webhook_path
-    secret_token = os.getenv("TELEGRAM_SECRET_TOKEN", "").strip()
+    raw_secret = os.getenv("TG_WEBHOOK_SECRET", "").strip()
+    if not raw_secret:
+        raw_secret = os.getenv("TELEGRAM_SECRET_TOKEN", "").strip()
+    webhook_secret = ""
+    if raw_secret:
+        if re.fullmatch(r"^[A-Za-z0-9_-]{1,256}$", raw_secret):
+            webhook_secret = raw_secret
+        else:
+            log.warning(
+                "TG_WEBHOOK_SECRET does not match ^[A-Za-z0-9_-]{1,256}$; secret token will be ignored",
+            )
     host = os.getenv("HOST", "0.0.0.0") or "0.0.0.0"
     port = _get_env_int("PORT", 8080)
 
@@ -871,9 +882,13 @@ def _load_runtime_config() -> RuntimeConfig:
             log.warning(
                 "WEBHOOK_HOST is empty while BOT_MODE=webhook; falling back to polling is expected",
             )
-        if not secret_token:
+        if raw_secret and not webhook_secret:
             log.warning(
-                "TELEGRAM_SECRET_TOKEN is empty while BOT_MODE=webhook; webhook setup may fail",
+                "TG_WEBHOOK_SECRET is invalid while BOT_MODE=webhook; webhook will be set without secret token",
+            )
+        if not raw_secret:
+            log.warning(
+                "TG_WEBHOOK_SECRET is empty while BOT_MODE=webhook; webhook will be set without secret token",
             )
 
     return RuntimeConfig(
@@ -881,7 +896,7 @@ def _load_runtime_config() -> RuntimeConfig:
         WEBHOOK_HOST=webhook_host,
         WEBHOOK_PATH=webhook_path,
         WEBHOOK_URL=webhook_url,
-        TELEGRAM_SECRET_TOKEN=secret_token,
+        TG_WEBHOOK_SECRET=webhook_secret,
         HOST=host,
         PORT=port,
     )
