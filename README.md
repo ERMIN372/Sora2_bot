@@ -48,7 +48,7 @@ Veo и изображений через Google Gemini. Он управляет 
 | `BOT_MODE` | Режим запуска бота: `polling` или `webhook`. |
 | `WEBHOOK_HOST` | Публичный HTTPS-хост, на который Telegram будет отправлять вебхуки. |
 | `WEBHOOK_PATH` | Путь Telegram вебхука (например, `/tg/webhook`). |
-| `TELEGRAM_SECRET_TOKEN` | Секрет, проверяемый в заголовке `X-Telegram-Bot-Api-Secret-Token`. |
+| `TG_WEBHOOK_SECRET` | Секрет, проверяемый в заголовке `X-Telegram-Bot-Api-Secret-Token` и передаваемый при установке вебхука. Должен соответствовать `^[A-Za-z0-9_-]{1,256}$`. |
 | `HOST` | Адрес, на котором Uvicorn слушает локальные подключения (обычно `0.0.0.0`). |
 | `PORT` | Порт HTTP-сервера FastAPI/Uvicorn. |
 | `GEMINI_API_VERSION` | Версия API Gemini, используемая SDK (по умолчанию `v1`). |
