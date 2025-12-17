@@ -424,6 +424,11 @@ if __name__ != "__main__":
         if _ASGI_STATE is None:
             return
         mode = (CFG.BOT_MODE or "webhook").lower()
+        if mode == "polling":
+            log.warning(
+                "ASGI startup: BOT_MODE=polling is not supported; keeping webhook handlers active",
+            )
+            mode = "webhook"
         await _startup(_ASGI_STATE, mode=mode)
 
         if mode != "webhook":
