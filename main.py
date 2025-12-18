@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import logging
 import os
 from dataclasses import dataclass, field
@@ -41,14 +42,46 @@ import yookassa_client
 _LOG_LEVEL_NAME = os.getenv("LOG_LEVEL", "INFO").upper()
 _LOG_LEVEL = getattr(logging, _LOG_LEVEL_NAME, None)
 _LOG_FORMAT = "%(asctime)s %(levelname)s [%(name)s:%(lineno)d] %(message)s"
+_LOG_DATEFMT = "%Y-%m-%dT%H:%M:%S%z"
 
 if not isinstance(_LOG_LEVEL, int):
     _LOG_LEVEL = logging.INFO
 
-logging.basicConfig(level=_LOG_LEVEL, format=_LOG_FORMAT, datefmt="%Y-%m-%d %H:%M:%S")
-logging.getLogger("aiogram").setLevel(logging.DEBUG)
-logging.getLogger("uvicorn.error").setLevel(logging.INFO)
-logging.getLogger("uvicorn.access").setLevel(logging.INFO)
+
+class JsonFormatter(logging.Formatter):
+    def format(self, record: logging.LogRecord) -> str:  # type: ignore[override]
+        payload = {
+            "timestamp": self.formatTime(record, self.datefmt),
+            "level": record.levelname,
+            "logger": record.name,
+            "message": record.getMessage(),
+            "line": record.lineno,
+        }
+        if record.exc_info:
+            payload["exception"] = self.formatException(record.exc_info)
+        if record.funcName:
+            payload["function"] = record.funcName
+        return json.dumps(payload, ensure_ascii=False)
+
+
+def _configure_logging() -> None:
+    handler = logging.StreamHandler()
+    if os.getenv("LOG_JSON", "true").lower() in {"1", "true", "yes"}:
+        formatter: logging.Formatter = JsonFormatter(datefmt=_LOG_DATEFMT)
+    else:
+        formatter = logging.Formatter(_LOG_FORMAT, datefmt=_LOG_DATEFMT)
+    handler.setFormatter(formatter)
+
+    root_logger = logging.getLogger()
+    root_logger.handlers = [handler]
+    root_logger.setLevel(_LOG_LEVEL)
+    logging.captureWarnings(True)
+    logging.getLogger("aiogram").setLevel(logging.DEBUG)
+    logging.getLogger("uvicorn.error").setLevel(logging.INFO)
+    logging.getLogger("uvicorn.access").setLevel(logging.INFO)
+
+
+_configure_logging()
 log = logging.getLogger(__name__)
 
 ALLOWED_UPDATES: List[str] = ["message", "callback_query"]
@@ -60,6 +93,35 @@ else:
 
 app: FastAPI | None = None
 _ASGI_STATE: "ApplicationState | None" = None
+_SENTRY_INITIALIZED = False
+
+
+def _init_sentry(config: Config) -> None:
+    global _SENTRY_INITIALIZED
+    if _SENTRY_INITIALIZED:
+        return
+    dsn = os.getenv("SENTRY_DSN", "").strip()
+    if not dsn:
+        log.info("Sentry disabled: no SENTRY_DSN provided")
+        return
+    try:
+        import sentry_sdk
+    except Exception:
+        log.warning("SENTRY_DSN is set but sentry-sdk is not available")
+        return
+
+    traces_sample_rate = 0.0
+    try:
+        traces_sample_rate = float(os.getenv("SENTRY_TRACES_SAMPLE_RATE", "0.0"))
+    except ValueError:
+        traces_sample_rate = 0.0
+    sentry_sdk.init(
+        dsn=dsn,
+        environment=config.environment or "dev",
+        traces_sample_rate=traces_sample_rate,
+    )
+    _SENTRY_INITIALIZED = True
+    log.info("Sentry initialised")
 
 
 @dataclass
@@ -437,6 +499,7 @@ async def _run_webhook(state: ApplicationState) -> bool:
 
 def _build_asgi_state() -> ApplicationState:
     config = load_config()
+    _init_sentry(config)
     ensure_gemini_key_logged(
         config,
         context="bot_main",
@@ -487,6 +550,7 @@ if __name__ == "__main__":
     def main() -> None:
         args = _parse_args()
         config = load_config()
+        _init_sentry(config)
         ensure_gemini_key_logged(
             config,
             context="bot_main",

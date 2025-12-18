@@ -4,6 +4,7 @@ redis>=5.0.0
 python-dotenv
 yookassa
 fastapi
+prometheus-client>=0.20.0
 uvicorn[standard]>=0.23,<0.31
 gspread
 google-auth
@@ -11,5 +12,6 @@ google-genai==1.46.0
 tenacity
 openai>=1.23.0
 asyncpg
+sentry-sdk>=2.0.0
 
 httpx>=0.26.0

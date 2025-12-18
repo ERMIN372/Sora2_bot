@@ -21,6 +21,7 @@ from typing import Any, Awaitable, Callable, Dict, List, Mapping, Optional, Tupl
 from config import Config
 from db import DatabaseInterface, ErrorLogRecord, GenerationJobRecord
 from moderation import classify_safety_response, policy_message, render_error_json
+from monitoring.metrics import job_failed, job_finished, job_started, record_job_enqueued
 from observability import increment_metric, log_event
 from services.gemini_key import current_key_mask, ensure_gemini_key_logged
 from services.error_reporter import ErrorReporter
@@ -1382,6 +1383,12 @@ class JobQueue:
                 max_attempts=max_attempts_value,
             )
         )
+        record_job_enqueued(
+            task_type=task_type,
+            provider=provider_key,
+            queue_depth=self._queue.qsize(),
+            concurrency=self._config.jobs_concurrency,
+        )
 
     async def _recover_pending_jobs(self) -> None:
         pending = await self._db.list_pending_jobs(limit=100)
@@ -2296,6 +2303,8 @@ class JobQueue:
     ) -> None:
         if not self._gate:
             return
+        status_value = status or reason
+        setattr(pending, "metrics_status", status_value)
         try:
             await self._gate.release(
                 user_id=pending.user_id,
@@ -2948,31 +2957,42 @@ class JobQueue:
 
     async def _process_job(self, pending: PendingJob) -> None:
         task_type = pending.task_type or ASSET_TASK_RETRIEVE
-        if task_type == VIDEO_TASK_DOWNLOAD:
-            await self._handle_video_download(pending)
-            return
-        if task_type in {VIDEO_TASK_CREATE, VIDEO_TASK_REMIX}:
-            stage = "create" if task_type == VIDEO_TASK_CREATE else "remix"
-            provider_key = pending.provider or pending.model
-            log_event(
-                level="INFO",
-                event=stage,
-                corr_id=pending.corr_id,
-                job_id=pending.job_id,
-                user_id=pending.user_id,
-                username=pending.username,
-                model=pending.model,
-                provider=provider_key,
-                size=pending.size,
-                extra={
-                    "task_type": task_type,
-                    "video_id": pending.video_id,
-                },
-            )
-        if task_type == IMAGE_TASK_GENERATE:
-            await self._handle_image_generate(pending)
-            return
-        await self._handle_asset_retrieve(pending)
+        provider_label = pending.provider or pending.model
+        job_started(provider=provider_label)
+        status_label = "success"
+        try:
+            if task_type == VIDEO_TASK_DOWNLOAD:
+                await self._handle_video_download(pending)
+                return
+            if task_type in {VIDEO_TASK_CREATE, VIDEO_TASK_REMIX}:
+                stage = "create" if task_type == VIDEO_TASK_CREATE else "remix"
+                provider_key = pending.provider or pending.model
+                log_event(
+                    level="INFO",
+                    event=stage,
+                    corr_id=pending.corr_id,
+                    job_id=pending.job_id,
+                    user_id=pending.user_id,
+                    username=pending.username,
+                    model=pending.model,
+                    provider=provider_key,
+                    size=pending.size,
+                    extra={
+                        "task_type": task_type,
+                        "video_id": pending.video_id,
+                    },
+                )
+            if task_type == IMAGE_TASK_GENERATE:
+                await self._handle_image_generate(pending)
+                return
+            await self._handle_asset_retrieve(pending)
+        except Exception:
+            status_label = "error"
+            job_failed(task_type=task_type, provider=provider_label)
+            raise
+        finally:
+            status_value = getattr(pending, "metrics_status", status_label)
+            job_finished(task_type=task_type, provider=provider_label, status=status_value)
 
 
 __all__ = ["JobQueue", "hydrate_image_artifacts", "IMAGE_TASK_GENERATE", "IMAGE_TASK_RETRIEVE"]
