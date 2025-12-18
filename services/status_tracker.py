@@ -14,7 +14,7 @@ from aiogram.utils import exceptions as tg_exceptions
 from observability import increment_metric, log_event
 
 if TYPE_CHECKING:  # pragma: no cover
-    from db import Database, GenerationJobRecord
+    from db import DatabaseInterface, GenerationJobRecord
 
 
 _DEFAULT_PHRASES: Sequence[str] = (
@@ -76,7 +76,7 @@ class StatusMessageManager:
         self,
         *,
         bot: Bot,
-        db: "Database",
+        db: "DatabaseInterface",
         job: "GenerationJobRecord",
     ) -> _StatusState:
         state = self._states.get(job.id)
@@ -135,7 +135,7 @@ class StatusMessageManager:
         self,
         *,
         bot: Bot,
-        db: "Database",
+        db: "DatabaseInterface",
         job: "GenerationJobRecord",
     ) -> None:
         state = await self.ensure_started(bot=bot, db=db, job=job)
@@ -159,7 +159,7 @@ class StatusMessageManager:
         self,
         *,
         bot: Bot,
-        db: "Database",
+        db: "DatabaseInterface",
         job: "GenerationJobRecord",
         text: str,
     ) -> None:
@@ -171,7 +171,7 @@ class StatusMessageManager:
         self,
         *,
         bot: Bot,
-        db: "Database",
+        db: "DatabaseInterface",
         job: "GenerationJobRecord",
         text: str,
         schedule_deletion: bool = True,
@@ -191,7 +191,7 @@ class StatusMessageManager:
         self,
         *,
         bot: Bot,
-        db: "Database",
+        db: "DatabaseInterface",
         job: "GenerationJobRecord",
         text: str,
         terminal_state: str = "failed",
@@ -222,7 +222,7 @@ class StatusMessageManager:
     async def _maybe_rotate(
         self,
         bot: Bot,
-        db: "Database",
+        db: "DatabaseInterface",
         job: "GenerationJobRecord",
         state: _StatusState,
     ) -> None:
@@ -255,7 +255,7 @@ class StatusMessageManager:
     async def _edit_text(
         self,
         bot: Bot,
-        db: "Database",
+        db: "DatabaseInterface",
         job: "GenerationJobRecord",
         state: _StatusState,
         text: str,
@@ -308,7 +308,7 @@ class StatusMessageManager:
         self,
         *,
         bot: Bot,
-        db: "Database",
+        db: "DatabaseInterface",
         job: "GenerationJobRecord",
         state: _StatusState,
         text: str,

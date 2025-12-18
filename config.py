@@ -350,6 +350,12 @@ class Config:
     sora_requests_per_minute: int = 60
     gemini_requests_per_minute: int = 120
     default_video_model: str = "veo-3.0-generate-001"
+    database_url: str = ""
+    postgres_enabled: bool = False
+    postgres_pool_min_size: int = 1
+    postgres_pool_max_size: int = 10
+    dual_write_enabled: bool = False
+    dual_write_primary: str = "postgres"
     database_path: str = "./bot.db"
     jobs_concurrency: int = 2
     max_jobs_per_user: int = 3
@@ -399,6 +405,7 @@ class Config:
     veo_operation_idle_timeout_seconds: float = 120.0
     debug_gemini: bool = False
     debug_sora: bool = False
+    redis_url: Optional[str] = None
 
     @property
     def yookassa_enabled(self) -> bool:
@@ -528,7 +535,7 @@ class Config:
     def aiogram_redis_url(self) -> Optional[str]:
         """Optional Redis URL for rate limiting or FSM storage."""
 
-        return os.getenv("AIROGRAM_REDIS_URL")
+        return self.redis_url
 
 
 def _get_env_int(key: str, default: int) -> int:
@@ -786,11 +793,36 @@ def load_config() -> Config:
         else:
             default_video_model = ""
     database_path = os.getenv("DATABASE_PATH", Config.database_path)
-    google_sheet_id = os.getenv("GOOGLE_SHEET_ID")
-    if not google_sheet_id:
-        raise RuntimeError("GOOGLE_SHEET_ID environment variable is required")
-    if not os.getenv("GOOGLE_SA_JSON_BASE64"):
-        raise RuntimeError("GOOGLE_SA_JSON_BASE64 environment variable is required")
+    database_url = env_str("DATABASE_URL", Config.database_url)
+    postgres_enabled = _get_env_bool("POSTGRES_ENABLED", bool(database_url))
+    dual_write_enabled = _get_env_bool("DUAL_WRITE_ENABLED", Config.dual_write_enabled)
+    if dual_write_enabled:
+        postgres_enabled = True
+    if postgres_enabled and not database_url:
+        raise RuntimeError("POSTGRES_ENABLED is true but DATABASE_URL is missing")
+    dual_write_primary_raw = env_str("DUAL_WRITE_PRIMARY", Config.dual_write_primary)
+    dual_write_primary = dual_write_primary_raw.lower() or Config.dual_write_primary
+    if dual_write_primary not in {"postgres", "sheets"}:
+        log.warning(
+            "Invalid DUAL_WRITE_PRIMARY=%s, falling back to 'postgres'",
+            dual_write_primary_raw,
+        )
+        dual_write_primary = "postgres"
+    postgres_pool_min_size = _get_env_int(
+        "POSTGRES_POOL_MIN_SIZE", Config.postgres_pool_min_size
+    )
+    postgres_pool_max_size = _get_env_int(
+        "POSTGRES_POOL_MAX_SIZE", Config.postgres_pool_max_size
+    )
+    redis_url = env_str("REDIS_URL", os.getenv("AIROGRAM_REDIS_URL", "")) or None
+    google_sheet_id = os.getenv("GOOGLE_SHEET_ID", "")
+    google_sa_json = os.getenv("GOOGLE_SA_JSON_BASE64", "")
+    sheets_required = not postgres_enabled or dual_write_enabled
+    if sheets_required:
+        if not google_sheet_id:
+            raise RuntimeError("GOOGLE_SHEET_ID environment variable is required")
+        if not google_sa_json:
+            raise RuntimeError("GOOGLE_SA_JSON_BASE64 environment variable is required")
     users_sheet = os.getenv("GS_USERS_SHEET", Config.gs_users_sheet)
     payments_sheet = os.getenv("GS_PAYMENTS_SHEET", Config.gs_payments_sheet)
     jobs_sheet = os.getenv("GS_JOBS_SHEET", Config.gs_jobs_sheet)
@@ -836,6 +868,12 @@ def load_config() -> Config:
         ),
         default_video_model=default_video_model,
         database_path=database_path,
+        database_url=database_url,
+        postgres_enabled=postgres_enabled,
+        postgres_pool_min_size=postgres_pool_min_size,
+        postgres_pool_max_size=postgres_pool_max_size,
+        dual_write_enabled=dual_write_enabled,
+        dual_write_primary=dual_write_primary,
         google_sheet_id=google_sheet_id,
         gs_users_sheet=users_sheet,
         gs_payments_sheet=payments_sheet,
@@ -878,6 +916,7 @@ def load_config() -> Config:
         ),
         debug_gemini=debug_gemini,
         debug_sora=debug_sora,
+        redis_url=redis_url,
     )
 
 

@@ -9,7 +9,7 @@ from datetime import datetime
 from typing import Dict, Iterable, Optional
 
 from config import load_config
-from db import Database
+from db import DatabaseInterface, create_database
 
 log = logging.getLogger(__name__)
 
@@ -27,7 +27,9 @@ def _now_iso() -> str:
     return datetime.utcnow().replace(microsecond=0).isoformat()
 
 
-async def audit_fix_credits(db: Database, *, allowed_packages: Dict[str, int], dry_run: bool) -> None:
+async def audit_fix_credits(
+    db: DatabaseInterface, *, allowed_packages: Dict[str, int], dry_run: bool
+) -> None:
     payments = await db.list_payments(provider="yookassa")
     allowed_values = set(allowed_packages.values())
     totals_by_user = defaultdict(int)
@@ -155,7 +157,7 @@ async def audit_fix_credits(db: Database, *, allowed_packages: Dict[str, int], d
 async def _run(dry_run: bool) -> None:
     config = load_config()
     logging.basicConfig(level=logging.INFO)
-    db = Database()
+    db = create_database(config)
     await db.init()
     try:
         allowed = {package.package_id: package.credits_int for package in config.credit_packages}

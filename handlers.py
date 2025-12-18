@@ -96,7 +96,9 @@ from config import (
     TOPUP_UI_PACKS,
     UI_MODEL_LABELS,
 )
-from db import Database, ErrorLogRecord, GenerationJobRecord
+from db import DatabaseInterface, ErrorLogRecord, GenerationJobRecord
+
+Database = DatabaseInterface
 from generation_gate import GateDecision, GenerationRequestGate, normalize_prompt
 from i18n import SafeText, escape_html, format_credits, format_prompt, i18n
 from jobs import (

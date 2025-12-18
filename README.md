@@ -63,6 +63,11 @@ Veo и изображений через Google Gemini. Он управляет 
 | `OPENAI_API_VERSION_VIDEO` | Значение параметра `api-version` для Enterprise/ Azure-совместимых развёртываний. |
 | `OPENAI_BETA_HEADER` | Заголовок `OpenAI-Beta` для включения Sora 2 (по умолчанию `video=1`). |
 | `DATABASE_PATH` | (Опционально) Путь к старой базе SQLite для скрипта миграции. |
+| `DATABASE_URL` | Строка подключения PostgreSQL (например, `postgresql://user:pass@host:5432/db`). При наличии включает Postgres-бэкенд. |
+| `POSTGRES_ENABLED` | Явно включает работу через PostgreSQL (`true`/`false`), если нужно независимо от `DATABASE_URL`. |
+| `POSTGRES_POOL_MIN_SIZE`, `POSTGRES_POOL_MAX_SIZE` | Границы пула соединений `asyncpg` (по умолчанию 1 и 10). |
+| `DUAL_WRITE_ENABLED` | Включает параллельную запись в Google Sheets и PostgreSQL для миграционного периода. |
+| `DUAL_WRITE_PRIMARY` | Какой бэкенд считается основным при dual-write (`postgres` или `sheets`, по умолчанию `postgres`). |
 | `GOOGLE_SHEET_ID` | Идентификатор Google-таблицы, которая служит основным хранилищем данных. |
 | `GOOGLE_SA_JSON_BASE64` | JSON сервис-аккаунта Google в Base64, используемый для доступа к таблице Google Sheets. |
 | `GS_USERS_SHEET`, `GS_PAYMENTS_SHEET`, `GS_JOBS_SHEET` | Названия листов для пользователей, платежей и задач (по умолчанию `users`, `payments`, `jobs`). |
@@ -74,7 +79,8 @@ Veo и изображений через Google Gemini. Он управляет 
 | `PROVIDER_TIMEOUT_S` | Общий тайм-аут (в секундах) для HTTP-клиента провайдера, применяется и к OpenAI Video API. |
 | `REQUEST_RETRIES` | Количество повторных попыток при неудачных запросах к API. |
 | `RETRY_BACKOFF` | Множитель экспоненциальной паузы между повторными попытками. |
-| `AIROGRAM_REDIS_URL` | Необязательный URL подключения к Redis для FSM или ограничения скорости. |
+| `REDIS_URL` | URL подключения к Redis для FSM или ограничения скорости (альтернатива `AIROGRAM_REDIS_URL`). |
+| `AIROGRAM_REDIS_URL` | Необязательный URL подключения к Redis для FSM или ограничения скорости (устаревшая переменная, совместимость). |
 | `RATE_LIMITS` | (Необязательно) строка `команда:лимит:период` через запятую, например `video_create:5:60,models:10:60`. |
 | `YOOKASSA_SHOP_ID` | Идентификатор магазина YooKassa. |
 | `YOOKASSA_SECRET_KEY` | Секретный ключ YooKassa. |
@@ -102,6 +108,26 @@ Veo и изображений через Google Gemini. Он управляет 
    `GS_USERS_SHEET`, `GS_PAYMENTS_SHEET`, `GS_JOBS_SHEET`. Если оставить их
    пустыми, будут использованы значения по умолчанию (`users`, `payments`,
    `jobs`).
+
+### Миграция на PostgreSQL
+
+1. Создайте базу данных PostgreSQL и примените первичную схему:
+   ```bash
+   psql "$DATABASE_URL" -f migrations/001_initial_schema.sql
+   ```
+2. Убедитесь, что заданы `DATABASE_URL`, `GOOGLE_SHEET_ID` и
+   `GOOGLE_SA_JSON_BASE64` (для чтения исходных данных). Временно включите
+   dual-write, если хотите параллельно вести учёт в таблицах:
+   ```bash
+   export DUAL_WRITE_ENABLED=true
+   export DUAL_WRITE_PRIMARY=postgres
+   ```
+3. Выполните перенос данных из Google Sheets:
+   ```bash
+   python scripts/migrate_from_sheets.py
+   ```
+4. Запустите бота с `POSTGRES_ENABLED=true` (или просто оставьте
+   `DATABASE_URL`) — приложение автоматически выберет Postgres-бэкенд.
 
 **Советы**
 

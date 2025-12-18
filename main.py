@@ -18,7 +18,7 @@ import redis.asyncio as redis_asyncio
 from app_server import YooKassaProcessor, create_app, poll_pending_payments
 from archive import ArchivePublisher
 from config import CFG, Config, load_config
-from db import Database
+from db import DatabaseInterface, create_database
 from generation_gate import GenerationRequestGate
 from handlers import register_handlers
 from jobs import JobQueue
@@ -67,7 +67,7 @@ class ApplicationState:
     config: Config
     bot: Bot
     dp: Dispatcher
-    db: Database
+    db: DatabaseInterface
     job_queue: JobQueue
     gate: GenerationRequestGate
     app: FastAPI
@@ -95,7 +95,7 @@ def _init_application(config: Config) -> ApplicationState:
     bot = Bot(token=config.bot_token, parse_mode="HTML")
     dp = Dispatcher(bot, storage=MemoryStorage())
     redis_client: Optional[redis_asyncio.Redis] = None
-    db = Database()
+    db = create_database(config)
     gate = GenerationRequestGate()
     error_reporter = ErrorReporter(bot=bot, config=config)
     providers: Dict[str, BaseProviderClient] = {}
