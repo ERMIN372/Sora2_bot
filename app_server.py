@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import hmac
 import json
 import logging
 import os
@@ -487,6 +489,26 @@ def _is_ip_allowed(ip: Optional[str]) -> bool:
     return any(ip_obj in network for network in YOOKASSA_IP_RANGES)
 
 
+def _validate_yookassa_signature(
+    body: bytes, signature_header: str | None, secret_key: Optional[str]
+) -> bool:
+    if not secret_key:
+        return False
+    candidate = (signature_header or "").strip()
+    if not candidate:
+        return False
+    if "=" in candidate:
+        prefix, provided = candidate.split("=", 1)
+        if prefix.lower() != "sha256":
+            provided = candidate
+    else:
+        provided = candidate
+    if not provided:
+        return False
+    digest = hmac.new(secret_key.encode("utf-8"), body, hashlib.sha256).hexdigest()
+    return hmac.compare_digest(digest, provided)
+
+
 async def poll_pending_payments(processor: YooKassaProcessor, interval: int) -> None:
     """Background task to poll pending YooKassa payments."""
 
@@ -516,7 +538,9 @@ def _yookassa_router(
     router = APIRouter()
 
     @router.post(config.yookassa_webhook_path)
-    async def webhook(request: Request) -> Response:
+    async def webhook(
+        request: Request, x_yookassa_signature: str | None = Header(default=None)
+    ) -> Response:
         if processor is None:
             return Response(status_code=503)
         remote = request.client.host if request.client else "unknown"
@@ -524,8 +548,14 @@ def _yookassa_router(
         if not config.yookassa_test_mode and not _is_ip_allowed(remote):
             log.warning("Rejected YooKassa webhook from unauthorized IP %s", remote)
             return Response(status_code=403)
+        body = await request.body()
+        if not _validate_yookassa_signature(
+            body, x_yookassa_signature, config.yookassa_secret_key
+        ):
+            log.warning("Rejected YooKassa webhook with invalid signature from %s", remote)
+            return Response(status_code=401)
         try:
-            payload = await request.json()
+            payload = json.loads(body.decode("utf-8"))
         except Exception:
             log.exception("Failed to parse YooKassa webhook body")
             return Response(status_code=400)
