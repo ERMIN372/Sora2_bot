@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Mapping, Optional, Tuple
 
 from config import Config
-from db import Database, ErrorLogRecord, GenerationJobRecord
+from db import DatabaseInterface, ErrorLogRecord, GenerationJobRecord
 from moderation import classify_safety_response, policy_message, render_error_json
 from observability import increment_metric, log_event
 from services.gemini_key import current_key_mask, ensure_gemini_key_logged
@@ -505,7 +505,7 @@ class JobQueue:
     def __init__(
         self,
         *,
-        db: Database,
+        db: DatabaseInterface,
         providers: Dict[str, BaseProviderClient],
         default_provider: str,
         config: Config,

@@ -38,7 +38,7 @@ Unauthorized = aiogram_exceptions.Unauthorized
 CantTalkWithBot = getattr(aiogram_exceptions, "CantTalkWithBot", TelegramAPIError)
 
 from config import Config
-from db import ArchiveLogRecord, Database
+from db import ArchiveLogRecord, DatabaseInterface
 from observability import log_event
 from telegram_files import BufferedInputFile
 
@@ -88,7 +88,7 @@ class ArchivePayload:
 class ArchivePublisher:
     """Best-effort publisher that mirrors generation results to an archive channel."""
 
-    def __init__(self, *, bot: Bot, config: Config, db: Database) -> None:
+    def __init__(self, *, bot: Bot, config: Config, db: DatabaseInterface) -> None:
         self._bot = bot
         self._config = config
         self._db = db

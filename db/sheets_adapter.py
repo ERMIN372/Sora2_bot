@@ -1,222 +1,29 @@
-"""Database helpers implemented on top of Google Sheets."""
 from __future__ import annotations
 
 import json
 import logging
-from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Awaitable, Callable, Dict, Iterable, List, Optional
 
 import gsheets_db
 
+from .interface import DatabaseInterface
+from .models import (
+    ArchiveLogRecord,
+    ErrorLogRecord,
+    GenerationJobRecord,
+    User,
+    job_from_mapping,
+    normalise_job_status,
+    parse_metadata,
+    user_from_mapping,
+)
 
 log = logging.getLogger(__name__)
 
 
-@dataclass
-class User:
-    telegram_id: int
-    credits: int
-    bonus_granted: bool
-    created_at: datetime
-    updated_at: datetime
-    notes: str = ""
-    economy_v2: bool = False
-
-
-@dataclass
-class GenerationJobRecord:
-    id: str
-    user_id: int
-    prompt: str
-    status: str
-    video_url: Optional[str]
-    video_id: Optional[str]
-    error: Optional[str]
-    created_at: datetime
-    updated_at: datetime
-    image_file_id: Optional[str] = None
-    sora_req_id: Optional[str] = None
-    size: Optional[str] = None
-    seconds: Optional[int] = None
-    model: Optional[str] = None
-    cost_credits: Optional[int] = None
-    username: Optional[str] = None
-    corr_id: Optional[str] = None
-    idempotency_key: Optional[str] = None
-    content_type: str = "video"
-    status_message_id: Optional[int] = None
-    status_message_index: int = 0
-    status_message_updated_at: Optional[datetime] = None
-    operation_name: Optional[str] = None
-    file_url: Optional[str] = None
-    extra: Dict[str, Any] = field(default_factory=dict)
-
-
-@dataclass
-class ErrorLogRecord:
-    ts: datetime
-    user_id: int
-    username: Optional[str]
-    corr_id: Optional[str]
-    job_id: Optional[str]
-    model: Optional[str]
-    size: Optional[str]
-    status_code: Optional[int]
-    error_type: Optional[str]
-    error_msg_short: str
-    refunded: bool
-    preflight_blocked: bool = False
-    preflight_reason: str = ""
-    auto_sanitized: bool = False
-    sanitized_prompt: Optional[str] = None
-    error_scope: Optional[str] = None
-    error_json: Optional[str] = None
-    job_status: Optional[str] = None
-    reason: Optional[str] = None
-    provider_error_code: Optional[str] = None
-    provider_error_message: Optional[str] = None
-    stage: str = "submit"
-
-
-@dataclass
-class ArchiveLogRecord:
-    ts: datetime
-    corr_id: str
-    archive_status: str
-    channel_id: Optional[int]
-    message_id: Optional[int]
-    content_type: str
-    model_name: Optional[str]
-    username: Optional[str]
-    caption_len: int
-    file_size: int
-    attempts: int
-    error_short: Optional[str]
-    user_id: Optional[int] = None
-    duration_seconds: Optional[int] = None
-
-
-def _parse_datetime(value: str) -> datetime:
-    if not value:
-        return datetime.utcfromtimestamp(0)
-    try:
-        return datetime.fromisoformat(value)
-    except ValueError:
-        return datetime.utcfromtimestamp(0)
-
-
-def _user_from_dict(data: Dict[str, Any]) -> User:
-    return User(
-        telegram_id=int(data.get("user_id", 0)),
-        credits=int(data.get("credits", 0)),
-        bonus_granted=bool(data.get("bonus_granted")),
-        created_at=_parse_datetime(data.get("created_at", "")),
-        updated_at=_parse_datetime(data.get("updated_at", "")),
-        notes=str(data.get("notes", "")) if data.get("notes") is not None else "",
-        economy_v2=bool(int(data.get("economy_v2", 0) or 0)),
-    )
-
-
-def _job_from_dict(data: Dict[str, Any]) -> GenerationJobRecord:
-    video_url = data.get("video_url") or None
-    file_url = data.get("file_url") or None
-    error = data.get("error") or None
-    image_file_id = data.get("image_file_id") or None
-    sora_req_id = data.get("sora_req_id") or None
-    size = data.get("size") or None
-    seconds_value = data.get("seconds")
-    try:
-        seconds = int(seconds_value) if seconds_value not in (None, "") else None
-    except (TypeError, ValueError):
-        seconds = None
-    model = data.get("model") or None
-    cost_raw = data.get("cost_credits")
-    try:
-        cost_credits = int(cost_raw) if cost_raw not in (None, "") else None
-    except (TypeError, ValueError):
-        cost_credits = None
-    idempotency_key = data.get("idempotency_key") or None
-    status_message_id_raw = data.get("status_message_id")
-    try:
-        status_message_id = (
-            int(status_message_id_raw)
-            if status_message_id_raw not in (None, "")
-            else None
-        )
-    except (TypeError, ValueError):
-        status_message_id = None
-    status_message_index_raw = data.get("status_message_index")
-    try:
-        status_message_index = (
-            int(status_message_index_raw)
-            if status_message_index_raw not in (None, "")
-            else 0
-        )
-    except (TypeError, ValueError):
-        status_message_index = 0
-    status_message_updated_raw = data.get("status_message_updated_at") or ""
-    status_message_updated_at = _parse_datetime(status_message_updated_raw)
-    content_type = str(data.get("content_type") or "video")
-    operation_name = data.get("operation_name") or None
-    metadata = _parse_metadata(data.get("metadata"))
-    return GenerationJobRecord(
-        id=str(data.get("job_id", "")),
-        user_id=int(data.get("user_id", 0)),
-        prompt=str(data.get("prompt", "")),
-        status=str(data.get("status", "")),
-        video_url=video_url,
-        video_id=data.get("video_id") or None,
-        error=error,
-        created_at=_parse_datetime(data.get("created_at", "")),
-        updated_at=_parse_datetime(data.get("updated_at", "")),
-        image_file_id=image_file_id,
-        sora_req_id=sora_req_id,
-        size=size,
-        seconds=seconds,
-        model=model,
-        cost_credits=cost_credits,
-        username=str(data.get("username", "")) or None,
-        corr_id=str(data.get("corr_id", "")) or None,
-        idempotency_key=idempotency_key,
-        content_type=content_type or "video",
-        status_message_id=status_message_id,
-        status_message_index=status_message_index,
-        status_message_updated_at=status_message_updated_at,
-        operation_name=operation_name,
-        file_url=file_url,
-        extra=dict(metadata),
-    )
-
-
-def _normalise_job_status(status: str) -> str:
-    status_lower = (status or "").lower()
-    if status_lower in {"queued", "running", "completed", "failed"}:
-        return status_lower
-    if status_lower in {"processing", "pending", "in_progress"}:
-        return "running"
-    if status_lower in {"errored", "error"}:
-        return "failed"
-    return status_lower or "queued"
-
-
-def _parse_metadata(value: Optional[str]) -> Dict[str, Any]:
-    if not value:
-        return {}
-    try:
-        parsed = json.loads(value)
-        if isinstance(parsed, dict):
-            return parsed
-    except json.JSONDecodeError:
-        pass
-    return {"raw": value}
-
-
-class Database:
-    """Thin proxy to the Google Sheets data access layer."""
-
-    def __init__(self, *_: Any, **__: Any) -> None:
-        """Signature kept for compatibility; configuration is read from env."""
+class SheetsDatabase(DatabaseInterface):
+    """Google Sheets-backed implementation of :class:`DatabaseInterface`."""
 
     async def init(self) -> None:
         await gsheets_db.init()
@@ -245,7 +52,7 @@ class Database:
                 first_name=first_name,
                 last_name=last_name,
             )
-        return _user_from_dict(data)
+        return user_from_mapping(data)
 
     async def sync_user_profile(
         self,
@@ -288,6 +95,9 @@ class Database:
     async def mark_bonus_granted(self, telegram_id: int) -> None:
         await gsheets_db.mark_bonus_granted(telegram_id)
 
+    async def mark_economy_v2(self, telegram_id: int) -> None:
+        await gsheets_db.mark_economy_v2(telegram_id)
+
     async def count_active_jobs(self, user_id: int) -> int:
         return await gsheets_db.count_jobs_by_status(user_id, ("queued", "running"))
 
@@ -314,8 +124,7 @@ class Database:
         return migrated
 
     async def backfill_user_profiles(
-        self,
-        fetcher: Callable[[int], Awaitable[Optional[Dict[str, Optional[str]]]]],
+        self, fetcher: Callable[[int], Awaitable[Optional[Dict[str, Optional[str]]]]]
     ) -> None:
         try:
             await gsheets_db.backfill_user_profiles(fetcher)
@@ -369,7 +178,7 @@ class Database:
         record_type: str = "payment",
         ref_payment_id: Optional[str] = None,
     ) -> None:
-        metadata_dict = metadata if metadata is not None else _parse_metadata(payload)
+        metadata_dict = metadata if metadata is not None else parse_metadata(payload)
         username_value = username
         if username_value is None:
             try:
@@ -414,7 +223,7 @@ class Database:
         ref_payment_id: Optional[str] = None,
     ) -> None:
         record = await gsheets_db.get_payment_by_ext(provider, ext_id)
-        existing_metadata = _parse_metadata(record.get("metadata") if record else None)
+        existing_metadata = parse_metadata(record.get("metadata") if record else None)
         if metadata is not None:
             incoming = metadata
             existing_metadata.update(incoming)
@@ -439,18 +248,22 @@ class Database:
 
     async def list_payments_by_status(
         self,
+        status: str,
         *,
-        provider: str,
-        statuses: Iterable[str],
-        limit: int = 50,
+        created_after: Optional[str] = None,
+        created_before: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
-        return await gsheets_db.list_payments_by_status(provider=provider, statuses=statuses, limit=limit)
+        return await gsheets_db.list_payments_by_status(
+            status,
+            created_after=created_after,
+            created_before=created_before,
+        )
 
     async def get_payment_by_order_id(self, provider: str, order_id: str) -> Optional[Dict[str, Any]]:
         return await gsheets_db.get_payment_by_order_id(provider, order_id)
 
     async def list_payments(self, provider: Optional[str] = None) -> List[Dict[str, Any]]:
-        return await gsheets_db.list_payments(provider=provider)
+        return await gsheets_db.list_payments(provider)
 
     async def set_user_credits(self, telegram_id: int, value: int) -> int:
         return await gsheets_db.set_user_credits(telegram_id, value)
@@ -467,30 +280,27 @@ class Database:
             job.id,
             job.user_id,
             job.prompt,
-            job.image_file_id,
-            job.size or "",
-            job.seconds or 0,
-            job.model or "",
-            job.cost_credits or 0,
-            job.corr_id,
+            image_file_id=job.image_file_id,
+            sora_req_id=job.sora_req_id,
+            size=job.size,
+            seconds=job.seconds,
+            model=job.model,
+            cost_credits=job.cost_credits,
             username=job.username,
+            corr_id=job.corr_id,
+            status=normalise_job_status(job.status),
+            idempotency_key=job.idempotency_key,
             content_type=job.content_type,
-            idempotency_key=job.idempotency_key or "",
-            operation_name=job.operation_name,
-            file_url=job.file_url,
-            video_id=job.video_id,
             metadata=job.extra,
         )
 
     async def find_job_by_idempotency_key(
         self, idempotency_key: str
     ) -> Optional[GenerationJobRecord]:
-        if not idempotency_key:
+        data = await gsheets_db.get_job_by_idempotency_key(idempotency_key)
+        if not data:
             return None
-        record = await gsheets_db.get_job_by_idempotency_key(idempotency_key)
-        if not record:
-            return None
-        return _job_from_dict(record)
+        return job_from_mapping(data)
 
     async def update_job(
         self,
@@ -498,15 +308,15 @@ class Database:
         status: str,
         *,
         video_url: Optional[str] = None,
+        video_id: Optional[str] = None,
         file_url: Optional[str] = None,
         operation_name: Optional[str] = None,
-        video_id: Optional[str] = None,
         error: Optional[str] = None,
         status_message_id: Optional[int] = None,
         status_message_index: Optional[int] = None,
         status_message_updated_at: Optional[datetime] = None,
     ) -> None:
-        normalised_status = _normalise_job_status(status)
+        normalised_status = normalise_job_status(status)
         updates: Dict[str, Any] = {}
         if video_url is not None:
             updates["video_url"] = video_url
@@ -542,19 +352,26 @@ class Database:
             updates["status_message_index"] = status_message_index
         if status_message_updated_at is not None:
             updates["status_message_updated_at"] = status_message_updated_at.isoformat()
-        normalised_status = _normalise_job_status(status) if status is not None else ""
+        normalised_status = normalise_job_status(status) if status is not None else ""
         await gsheets_db.update_job_status(job_id, normalised_status, **updates)
 
     async def list_pending_jobs(self, *, limit: int) -> List[GenerationJobRecord]:
         jobs = await gsheets_db.list_jobs_by_status(["queued", "running"])
-        pending = [_job_from_dict(job) for job in jobs]
+        pending = [job_from_mapping(job) for job in jobs]
         return pending[:limit]
 
     async def get_job(self, job_id: str) -> Optional[GenerationJobRecord]:
         data = await gsheets_db.get_job(job_id)
         if not data:
             return None
-        return _job_from_dict(data)
+        return job_from_mapping(data)
+
+    async def list_jobs_by_status(self, statuses: Iterable[str]) -> List[Dict[str, Any]]:
+        return await gsheets_db.list_jobs_by_status(statuses)
+
+    # ------------------------------------------------------------------
+    # Error log
+    # ------------------------------------------------------------------
 
     async def log_error_record(self, record: ErrorLogRecord) -> bool:
         try:
@@ -587,6 +404,10 @@ class Database:
             return False
         return True
 
+    # ------------------------------------------------------------------
+    # Archive log
+    # ------------------------------------------------------------------
+
     async def archive_was_sent(self, corr_id: str) -> bool:
         if not corr_id:
             return False
@@ -618,10 +439,4 @@ class Database:
             log.warning("Failed to append archive log corr_id=%s", record.corr_id, exc_info=True)
 
 
-__all__ = [
-    "Database",
-    "User",
-    "GenerationJobRecord",
-    "ErrorLogRecord",
-    "ArchiveLogRecord",
-]
+__all__ = ["SheetsDatabase"]

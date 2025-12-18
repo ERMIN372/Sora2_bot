@@ -19,7 +19,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.types import ASGIApp
 
 from config import CFG, Config
-from db import Database
+from db import DatabaseInterface
 from handlers import resend_pending_order
 from i18n import format_credits, i18n
 from services import gsheets_ref
@@ -68,7 +68,7 @@ class BodySizeLimitMiddleware(BaseHTTPMiddleware):
 class YooKassaProcessor:
     """Reconcile YooKassa payments with the local database."""
 
-    def __init__(self, *, db: Database, config: Config, bot: Bot) -> None:
+    def __init__(self, *, db: DatabaseInterface, config: Config, bot: Bot) -> None:
         self._db = db
         self._config = config
         self._bot = bot
@@ -699,7 +699,7 @@ def _create_base_app() -> FastAPI:
 
 # [FASTAPI_APP_FACTORY]
 def create_app(
-    *, config: Config, dp: Dispatcher, bot: Bot, db: Database
+    *, config: Config, dp: Dispatcher, bot: Bot, db: DatabaseInterface
 ) -> tuple[FastAPI, Optional[YooKassaProcessor]]:
     processor: Optional[YooKassaProcessor] = None
     if config.yookassa_enabled and config.public_base_url:
