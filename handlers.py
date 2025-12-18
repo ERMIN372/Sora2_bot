@@ -101,6 +101,7 @@ from db import DatabaseInterface, ErrorLogRecord, GenerationJobRecord
 Database = DatabaseInterface
 from generation_gate import GateDecision, GenerationRequestGate, normalize_prompt
 from i18n import SafeText, escape_html, format_credits, format_prompt, i18n
+from monitoring.metrics import observe_handler
 from jobs import (
     JobQueue,
     VIDEO_TASK_CREATE,
@@ -4830,19 +4831,29 @@ def _build_archive_payload_from_sent(
 async def start_command(
     message: Message, db: Database, state: FSMContext, config: Config
 ) -> None:
-    payload = ""
+    success = True
     try:
-        payload = message.get_args()
-    except AttributeError:
         payload = ""
-    if payload:
         try:
-            await _process_referral_payload(message, payload)
-        except Exception:
-            log.exception("Failed to process referral payload for user=%s", message.from_user.id if message.from_user else "?")
-    await state.finish()
-    await _ensure_user(message, db)
-    await _send_main_menu(message, config)
+            payload = message.get_args()
+        except AttributeError:
+            payload = ""
+        if payload:
+            try:
+                await _process_referral_payload(message, payload)
+            except Exception:
+                log.exception(
+                    "Failed to process referral payload for user=%s",
+                    message.from_user.id if message.from_user else "?",
+                )
+        await state.finish()
+        await _ensure_user(message, db)
+        await _send_main_menu(message, config)
+    except Exception:
+        success = False
+        raise
+    finally:
+        observe_handler("start_command", success=success)
 
 
 def _render_help_text(config: Config) -> str:
@@ -4857,11 +4868,18 @@ def _render_help_text(config: Config) -> str:
 async def help_command(
     message: Message, db: Database, state: FSMContext, config: Config
 ) -> None:
-    await _ensure_user(message, db)
-    await message.answer(
-        _render_help_text(config),
-        reply_markup=_build_help_keyboard(config),
-    )
+    success = True
+    try:
+        await _ensure_user(message, db)
+        await message.answer(
+            _render_help_text(config),
+            reply_markup=_build_help_keyboard(config),
+        )
+    except Exception:
+        success = False
+        raise
+    finally:
+        observe_handler("help_command", success=success)
 
 
 async def chatgpt_menu(
@@ -6371,7 +6389,7 @@ async def video_models_command(
     await message.answer("\n".join(lines))
 
 
-async def video_create_command(
+async def _video_create_command_impl(
     message: Message,
     db: Database,
     job_queue: JobQueue,
@@ -6531,7 +6549,31 @@ async def video_create_command(
             await message.answer("Отброшенные параметры: " + ", ".join(filtered_fields))
 
 
-async def video_remix_command(
+async def video_create_command(
+    message: Message,
+    db: Database,
+    job_queue: JobQueue,
+    config: Config,
+    *,
+    openai_video_client: Optional[OpenAIVideoClient] = None,
+) -> None:
+    success = True
+    try:
+        return await _video_create_command_impl(
+            message,
+            db,
+            job_queue,
+            config,
+            openai_video_client=openai_video_client,
+        )
+    except Exception:
+        success = False
+        raise
+    finally:
+        observe_handler("video_create_command", success=success)
+
+
+async def _video_remix_command_impl(
     message: Message,
     db: Database,
     job_queue: JobQueue,
@@ -6670,6 +6712,30 @@ async def video_remix_command(
     if deducted and credits_cost > 0:
         lines.append(i18n.t("video.common.credits_deducted", credits=credits_cost))
     await message.answer("\n".join(lines))
+
+
+async def video_remix_command(
+    message: Message,
+    db: Database,
+    job_queue: JobQueue,
+    config: Config,
+    *,
+    openai_video_client: Optional[OpenAIVideoClient] = None,
+) -> None:
+    success = True
+    try:
+        return await _video_remix_command_impl(
+            message,
+            db,
+            job_queue,
+            config,
+            openai_video_client=openai_video_client,
+        )
+    except Exception:
+        success = False
+        raise
+    finally:
+        observe_handler("video_remix_command", success=success)
 
 
 async def video_list_command(

@@ -22,6 +22,7 @@ from config import CFG, Config
 from db import DatabaseInterface
 from handlers import resend_pending_order
 from i18n import format_credits, i18n
+from monitoring.metrics import router as metrics_router
 from services import gsheets_ref
 import yookassa_client
 
@@ -686,6 +687,7 @@ def _create_base_app() -> FastAPI:
         return {"ok": True, "service": "sora2-bot", "mode": "webhook"}
 
     app.add_middleware(BodySizeLimitMiddleware, max_body_size=MAX_REQUEST_SIZE)
+    app.include_router(metrics_router)
 
     @app.on_event("startup")
     async def _startup_bg() -> None:

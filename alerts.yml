@@ -1,0 +1,33 @@
+groups:
+  - name: sora2-bot
+    rules:
+      - alert: ActiveJobsHigh
+        expr: sum(active_jobs_count) > 50
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Очередь задач переполнена"
+          description: "Количество активных задач превышает 50." 
+
+      - alert: JobErrorRateHigh
+        expr: |
+          sum(rate(job_errors_total[5m]))
+            /
+          clamp_min(sum(rate(jobs_completed_total[5m])), 1)
+          > 0.1
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Высокая доля ошибок задач"
+          description: "Отношение ошибок к завершенным задачам превышает 10% за 10 минут."
+
+      - alert: WorkerPoolExhausted
+        expr: increase(job_pool_exhausted_total[5m]) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Пул воркеров исчерпан"
+          description: "Очередь задач превышает размер пула воркеров."

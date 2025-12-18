@@ -193,6 +193,17 @@ python main.py --mode webhook
 дренируется, сетевые сессии закрываются, вебхук Telegram удаляется, а соединения с
 базой данных освобождаются.
 
+### Контейнеризация и мониторинг
+
+- Локальный стек можно поднять через `docker-compose.yml` — в нём предусмотрены
+  сервисы бота, PostgreSQL, Redis и Prometheus с healthcheck’ами и томами для
+  данных (`pgdata`, `redis-data`, `prometheus-data`, `bot-data`).
+- Endpoint `/metrics` отдаёт метрики Prometheus (включая `active_jobs_count`,
+  `job_errors_total`, `jobs_completed_total` и др.). Prometheus конфигурируется
+  файлом `prometheus.yml` (alerts в `alerts.yml`).
+- Для визуализации можно подключить Grafana к Prometheus и импортировать
+  дашборд с графиками активных задач, ошибок и заполнения очереди.
+
 ### Ограничение скорости команд
 
 - Если задан `AIROGRAM_REDIS_URL`, для всех пользователей включается Redis-бэкенд
