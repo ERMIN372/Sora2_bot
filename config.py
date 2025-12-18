@@ -187,6 +187,23 @@ DEFAULT_PRODUCTS: Dict[str, Decimal] = {
 for alias, target in PRODUCT_PRICE_ALIASES.items():
     DEFAULT_PRODUCTS[alias] = DEFAULT_PRODUCTS[target]
 
+
+@dataclass(frozen=True)
+class RateLimitRule:
+    """Represents a rate limit rule for a command."""
+
+    limit: int
+    period: int
+
+
+DEFAULT_COMMAND_RATE_LIMITS: Mapping[str, RateLimitRule] = {
+    "video_create": RateLimitRule(limit=5, period=60),
+    "video_remix": RateLimitRule(limit=5, period=60),
+    "video_models": RateLimitRule(limit=10, period=60),
+    "video_get": RateLimitRule(limit=3, period=60),
+    "models": RateLimitRule(limit=10, period=60),
+}
+
 @dataclass(frozen=True)
 class CreditPackage:
     """A bundle of credits sold for a fixed price in rubles with bonus support."""
@@ -342,6 +359,9 @@ class Config:
     provider_timeout_s: float = 60.0
     request_retries: int = 3
     retry_backoff: float = 2.0
+    command_rate_limits: Mapping[str, "RateLimitRule"] = field(
+        default_factory=lambda: dict(DEFAULT_COMMAND_RATE_LIMITS)
+    )
     yookassa_shop_id: Optional[str] = None
     yookassa_secret_key: Optional[str] = None
     yookassa_test_mode: bool = True
@@ -539,6 +559,37 @@ def _get_env_decimal(key: str, default: Decimal) -> Decimal:
         return Decimal(value)
     except Exception as exc:  # pragma: no cover - defensive
         raise RuntimeError(f"Environment variable {key!r} must be a decimal number") from exc
+
+
+def _parse_rate_limits(raw: Optional[str]) -> Dict[str, RateLimitRule]:
+    """Parse comma-separated rate limits from the environment."""
+
+    if raw is None:
+        return dict(DEFAULT_COMMAND_RATE_LIMITS)
+    result: Dict[str, RateLimitRule] = {}
+    for chunk in raw.split(","):
+        if not chunk.strip():
+            continue
+        parts = [item.strip() for item in chunk.split(":")]
+        if len(parts) != 3:
+            log.warning(
+                "Invalid RATE_LIMITS entry %s; expected command:limit:period", chunk
+            )
+            continue
+        name, limit_raw, period_raw = parts
+        try:
+            limit = int(limit_raw)
+            period = int(period_raw)
+        except ValueError:
+            log.warning("Invalid RATE_LIMITS numbers for command=%s", name)
+            continue
+        if limit <= 0 or period <= 0:
+            log.warning("RATE_LIMITS must be positive values command=%s", name)
+            continue
+        result[name.lower()] = RateLimitRule(limit=limit, period=period)
+    if not result:
+        return dict(DEFAULT_COMMAND_RATE_LIMITS)
+    return result
 
 
 def _get_env_bool(key: str, default: bool) -> bool:
@@ -804,6 +855,7 @@ def load_config() -> Config:
         provider_timeout_s=provider_timeout_s,
         request_retries=_get_env_int("REQUEST_RETRIES", Config.request_retries),
         retry_backoff=_get_env_float("RETRY_BACKOFF", Config.retry_backoff),
+        command_rate_limits=_parse_rate_limits(os.getenv("RATE_LIMITS")),
         yookassa_shop_id=os.getenv("YOOKASSA_SHOP_ID"),
         yookassa_secret_key=os.getenv("YOOKASSA_SECRET_KEY"),
         yookassa_test_mode=_get_env_bool("YOOKASSA_TEST_MODE", Config.yookassa_test_mode),
@@ -911,6 +963,7 @@ __all__ = [
     "Config",
     "RuntimeConfig",
     "CFG",
+    "RateLimitRule",
     "load_config",
     "env_str",
     "env_float",

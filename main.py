@@ -13,6 +13,7 @@ from aiogram import Bot, Dispatcher, executor
 from aiogram.contrib.fsm_storage.memory import MemoryStorage
 from fastapi import FastAPI
 import uvicorn
+import redis.asyncio as redis_asyncio
 
 from app_server import YooKassaProcessor, create_app, poll_pending_payments
 from archive import ArchivePublisher
@@ -22,6 +23,8 @@ from generation_gate import GenerationRequestGate
 from handlers import register_handlers
 from jobs import JobQueue
 from healthcheck import run_startup_healthcheck
+from middleware.admin_check import AdminCheckMiddleware
+from middleware.rate_limit import RateLimitMiddleware
 from providers import (
     BaseProviderClient,
     GeminiImageClient,
@@ -75,6 +78,7 @@ class ApplicationState:
     archive_publisher: Optional[ArchivePublisher] = None
     error_reporter: Optional[ErrorReporter] = None
     openai_chat_client: Optional[OpenAIChatClient] = None
+    redis: Optional[redis_asyncio.Redis] = None
 
 
 def _parse_args() -> argparse.Namespace:
@@ -90,6 +94,7 @@ def _parse_args() -> argparse.Namespace:
 def _init_application(config: Config) -> ApplicationState:
     bot = Bot(token=config.bot_token, parse_mode="HTML")
     dp = Dispatcher(bot, storage=MemoryStorage())
+    redis_client: Optional[redis_asyncio.Redis] = None
     db = Database()
     gate = GenerationRequestGate()
     error_reporter = ErrorReporter(bot=bot, config=config)
@@ -201,6 +206,21 @@ def _init_application(config: Config) -> ApplicationState:
         openai_video_client=openai_video_client,
     )
 
+    dp.middleware.setup(AdminCheckMiddleware(config.admin_ids))
+    redis_url = config.aiogram_redis_url
+    if redis_url:
+        redis_client = redis_asyncio.from_url(
+            redis_url,
+            encoding="utf-8",
+            decode_responses=True,
+        )
+        dp.middleware.setup(
+            RateLimitMiddleware(
+                redis_client,
+                limits=config.command_rate_limits,
+            )
+        )
+
     local_app, yookassa_processor = create_app(config=config, dp=dp, bot=bot, db=db)
 
     return ApplicationState(
@@ -215,6 +235,7 @@ def _init_application(config: Config) -> ApplicationState:
         archive_publisher=archive_publisher,
         error_reporter=error_reporter,
         openai_chat_client=chat_client,
+        redis=redis_client,
     )
 
 
@@ -317,6 +338,16 @@ async def _shutdown(state: ApplicationState, *, mode: str) -> None:
     await state.bot.session.close()
 
     await state.db.close()
+
+    if state.redis:
+        try:
+            close_fn = getattr(state.redis, "aclose", None)
+            if callable(close_fn):
+                await close_fn()
+            else:
+                await state.redis.close()
+        except Exception:  # pragma: no cover - defensive cleanup
+            log.warning("Failed to close Redis connection", exc_info=True)
 
     if state.uvicorn_server:
         state.uvicorn_server.should_exit = True
