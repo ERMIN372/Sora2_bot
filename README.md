@@ -94,6 +94,47 @@ Veo и изображений через Google Gemini. Он управляет 
 | `YOOKASSA_POLL_INTERVAL` | Интервал (в секундах) фонового опроса платежей YooKassa. |
 | `ARCHIVE_CHANNEL_ID` | Канал/чат для архивных публикаций: числовой ID (например, `-100123...`) или `@username`. |
 
+## Хранение и данные: Google Sheets, PostgreSQL и Redis
+
+- **Google Sheets** остаётся исходным источником данных (users/payments/jobs) и используется как минимум в режиме dual-write. Для работы с таблицами требуются `GOOGLE_SHEET_ID` и `GOOGLE_SA_JSON_BASE64`.
+- **PostgreSQL** включается, если заданы `DATABASE_URL` или `POSTGRES_ENABLED=true`. При включённом dual-write Postgres становится обязательным, даже если основным источником остаётся Google Sheets.
+- **Redis** используется для FSM/лимитов (`REDIS_URL` или `AIROGRAM_REDIS_URL`). Он не хранит бизнес-данные, но нужен для rate-limit и устойчивой обработки состояний.
+
+Минимальная проверка подключения:
+
+```bash
+psql "$DATABASE_URL" -c 'select now()'
+redis-cli -u "$REDIS_URL" ping
+```
+
+### Dual-write и переключение на PostgreSQL
+
+- Включите параллельную запись в оба хранилища на миграционный период:
+  ```bash
+  export DUAL_WRITE_ENABLED=true
+  export DUAL_WRITE_PRIMARY=postgres  # или sheets для обратной проверки
+  ```
+- В режиме dual-write чтение идёт из `DUAL_WRITE_PRIMARY`, а запись дублируется в оба бэкенда. Ошибки вторичного бэкенда логируются, но не блокируют основной путь.
+- После валидации данных можно отключить Google Sheets, убрав `DUAL_WRITE_ENABLED` и оставив `POSTGRES_ENABLED=true` (или просто `DATABASE_URL`).
+- Для обратного переключения на таблицы достаточно установить `DUAL_WRITE_PRIMARY=sheets` или временно выключить Postgres, если это dev-стенд.
+
+## Миграции и обновление схемы PostgreSQL
+
+1. Примените первичную схему:
+   ```bash
+   psql "$DATABASE_URL" -f migrations/001_initial_schema.sql
+   ```
+   или через docker-compose:
+   ```bash
+   docker compose exec postgres psql -U sora -d sora -f /app/migrations/001_initial_schema.sql
+   ```
+2. Для новых миграций добавляйте нумерованные SQL-файлы в каталог `migrations/` и применяйте их в порядке версий (`psql -f ...`).
+3. Проверяйте наличие таблиц после миграции:
+   ```bash
+   psql "$DATABASE_URL" -c '\dt'
+   ```
+4. При неудаче миграции откатите транзакцию (все файлы обёрнуты в `BEGIN/COMMIT`) и повторите после исправления.
+
 ### Google Sheets setup
 
 1. Создайте пустую Google-таблицу и скопируйте её идентификатор из URL в
@@ -128,6 +169,10 @@ Veo и изображений через Google Gemini. Он управляет 
    ```
 4. Запустите бота с `POSTGRES_ENABLED=true` (или просто оставьте
    `DATABASE_URL`) — приложение автоматически выберет Postgres-бэкенд.
+
+Если хотите вернуться к Google Sheets после проверки Postgres, установите
+`DUAL_WRITE_PRIMARY=sheets` и временно отключите `POSTGRES_ENABLED` (для dev) или
+параллельно прогоните smoke-тесты чтения/записи, сравнив данные в листах и БД.
 
 **Советы**
 
@@ -193,16 +238,31 @@ python main.py --mode webhook
 дренируется, сетевые сессии закрываются, вебхук Telegram удаляется, а соединения с
 базой данных освобождаются.
 
-### Контейнеризация и мониторинг
+## Docker Compose
 
-- Локальный стек можно поднять через `docker-compose.yml` — в нём предусмотрены
-  сервисы бота, PostgreSQL, Redis и Prometheus с healthcheck’ами и томами для
-  данных (`pgdata`, `redis-data`, `prometheus-data`, `bot-data`).
-- Endpoint `/metrics` отдаёт метрики Prometheus (включая `active_jobs_count`,
-  `job_errors_total`, `jobs_completed_total` и др.). Prometheus конфигурируется
-  файлом `prometheus.yml` (alerts в `alerts.yml`).
-- Для визуализации можно подключить Grafana к Prometheus и импортировать
-  дашборд с графиками активных задач, ошибок и заполнения очереди.
+В репозитории есть `docker-compose.yml` для локального стенда (бот, PostgreSQL,
+Redis, Prometheus).
+
+Основные команды:
+
+```bash
+docker compose up -d            # запуск
+docker compose logs -f bot      # просмотр логов бота
+docker compose exec bot bash    # доступ внутрь контейнера
+docker compose down             # остановка со снятием сети
+```
+
+Примечания:
+
+- Бот читает `.env` из корня. Для Postgres и Redis параметры также прописаны в compose.
+- Миграции можно применять из контейнера бота: `docker compose exec bot psql "$DATABASE_URL" -f migrations/001_initial_schema.sql`.
+- Данные сохраняются в томах `pgdata`, `redis-data`, `prometheus-data`, `bot-data`. Удаление `docker volume rm ...` очистит их.
+
+## Метрики и алерты
+
+- FastAPI экспонирует `/metrics` (Prometheus) с метриками очереди, ошибок и латентности провайдеров (например, `active_jobs_count`, `job_errors_total`).
+- `prometheus.yml` уже настроен на сбор с `bot:8080`; алерты хранятся в `alerts.yml` (например, на рост ошибок генерации).
+- Подключите Grafana к Prometheus (порт 9090) и импортируйте дашборды с основными метриками: активные задания, ретраи, задержки выдачи.
 
 ### Ограничение скорости команд
 
