@@ -312,6 +312,8 @@ class SheetsDatabase(DatabaseInterface):
         file_url: Optional[str] = None,
         operation_name: Optional[str] = None,
         error: Optional[str] = None,
+        image_file_id: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
         status_message_id: Optional[int] = None,
         status_message_index: Optional[int] = None,
         status_message_updated_at: Optional[datetime] = None,
@@ -328,6 +330,10 @@ class SheetsDatabase(DatabaseInterface):
             updates["video_id"] = video_id
         if error is not None:
             updates["error"] = error
+        if image_file_id is not None:
+            updates["image_file_id"] = image_file_id
+        if metadata is not None:
+            updates["metadata"] = metadata
         if status_message_id is not None:
             updates["status_message_id"] = status_message_id
         if status_message_index is not None:

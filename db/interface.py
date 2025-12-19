@@ -184,6 +184,8 @@ class DatabaseInterface(abc.ABC):
         file_url: Optional[str] = None,
         operation_name: Optional[str] = None,
         error: Optional[str] = None,
+        image_file_id: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
         status_message_id: Optional[int] = None,
         status_message_index: Optional[int] = None,
         status_message_updated_at: Optional[datetime] = None,

@@ -527,6 +527,7 @@ class JobQueue:
         if self._debug_enabled and log.getEffectiveLevel() > logging.DEBUG:
             log.setLevel(logging.DEBUG)
         self._error_reporter = error_reporter
+        self._db_log_jobs = bool(getattr(config, "db_log_jobs", True))
         self._gemini_key_mask = ensure_gemini_key_logged(
             config,
             context="job_queue",
@@ -574,6 +575,45 @@ class JobQueue:
             message = str(details)
         logger = log.info if self._debug_enabled else log.debug
         logger("%s %s", name, message)
+
+    async def _safe_log_error_record(self, record: ErrorLogRecord, *, context: str) -> None:
+        try:
+            await self._db.log_error_record(record)
+        except Exception:
+            log.warning("Failed to persist error log context=%s", context, exc_info=True)
+
+    async def _persist_job_record(self, record: GenerationJobRecord, *, stage: str) -> None:
+        if not self._db_log_jobs:
+            return
+        try:
+            await self._db.create_job(record)
+        except Exception:
+            log.exception("Failed to persist job record job_id=%s stage=%s", record.id, stage)
+            error_record = ErrorLogRecord(
+                ts=datetime.utcnow(),
+                user_id=record.user_id,
+                username=record.username,
+                corr_id=record.corr_id,
+                job_id=record.id,
+                model=record.model,
+                size=record.size,
+                status_code=None,
+                error_type="db_log_failed",
+                error_msg_short=f"job_create_failed:{stage}",
+                refunded=False,
+                preflight_blocked=False,
+                preflight_reason="",
+                auto_sanitized=False,
+                sanitized_prompt=record.prompt,
+                error_scope="db",
+                error_json="",
+                job_status=record.status,
+                reason="db_log_failed",
+                provider_error_code=None,
+                provider_error_message=None,
+                stage=stage,
+            )
+            await self._safe_log_error_record(error_record, context="persist_job_record")
 
     def get_provider(self, key: Optional[str]) -> Optional[BaseProviderClient]:
         if not key:
@@ -1064,6 +1104,7 @@ class JobQueue:
                 )
                 if extras_payload:
                     record.extra.update(extras_payload)
+            await self._persist_job_record(record, stage="submit_inline")
             log_event(
                 level="INFO",
                 event="request",
@@ -1116,7 +1157,7 @@ class JobQueue:
         )
         if extras_payload:
             record.extra.update(extras_payload)
-        await self._db.create_job(record)
+        await self._persist_job_record(record, stage="submit")
         asset_kind = ASSET_KIND_IMAGE if content_type_value == "image" else ASSET_KIND_VIDEO
         task_type = IMAGE_TASK_GENERATE if asset_kind == ASSET_KIND_IMAGE else ASSET_TASK_RETRIEVE
         await self.enqueue(
@@ -1269,7 +1310,7 @@ class JobQueue:
             seconds_override = _extract_duration_seconds(extras_payload)
             if seconds_override is not None:
                 record.seconds = seconds_override
-        await self._db.create_job(record)
+        await self._persist_job_record(record, stage="external_submit")
         await self.enqueue(
             job_id=job_id,
             user_id=user_id,

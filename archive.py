@@ -93,6 +93,7 @@ class ArchivePublisher:
         self._config = config
         self._db = db
         self._channel_id = config.archive_channel_id
+        self._enabled = bool(getattr(config, "archive_enabled", True))
         self._lock = asyncio.Lock()
         self._inflight: set[str] = set()
         self._sent_cache: set[str] = set()
@@ -102,6 +103,13 @@ class ArchivePublisher:
         self._missing_channel_logged = False
 
     def schedule(self, payload: ArchivePayload) -> None:
+        if not self._enabled:
+            log.info(
+                "Archive publication disabled; skipping corr_id=%s content_type=%s",
+                payload.corr_id,
+                payload.content_type,
+            )
+            return
         if not payload.corr_id:
             log.debug("Skipping archive publish without corr_id")
             return
@@ -130,6 +138,14 @@ class ArchivePublisher:
 
     async def _publish(self, payload: ArchivePayload) -> None:
         corr_id = payload.corr_id
+        if not self._enabled:
+            log.debug("Archive publish disabled corr_id=%s", corr_id)
+            await self._log_attempt(
+                payload,
+                archive_status="skipped",
+                error_short="disabled",
+            )
+            return
         if not self._channel_id:
             if not self._missing_channel_logged:
                 log.warning(
