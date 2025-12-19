@@ -76,6 +76,7 @@ class YooKassaProcessor:
         self.credits_credited_total = 0
         self.credits_refused_total = 0
         self.duplicate_webhooks_total = 0
+        self._payment_locks: dict[str, asyncio.Lock] = {}
 
     async def process_payment(self, payment, *, source: str) -> None:
         metadata = self._extract_metadata(payment)
@@ -83,6 +84,23 @@ class YooKassaProcessor:
         if payment_id is None:
             log.warning("Incomplete YooKassa payment payload from %s without id", source)
             return
+        lock = self._payment_locks.setdefault(payment_id, asyncio.Lock())
+        async with lock:
+            await self._process_payment_locked(
+                payment=payment,
+                payment_id=payment_id,
+                metadata=metadata,
+                source=source,
+            )
+
+    async def _process_payment_locked(
+        self,
+        *,
+        payment,
+        payment_id: str,
+        metadata: Dict[str, Any],
+        source: str,
+    ) -> None:
         status = getattr(payment, "status", "") or ""
         paid = bool(getattr(payment, "paid", False))
         amount_obj = getattr(payment, "amount", None)
@@ -108,6 +126,8 @@ class YooKassaProcessor:
             or ""
         )
         existing = await self._db.get_payment_by_ext("yookassa", payment_id)
+        existing_metadata = self._parse_metadata_field(existing.get("metadata") if existing else None)
+        metadata = {**existing_metadata, **metadata}
         user_id_int = self._resolve_user_id(metadata, existing)
         if not user_id_int:
             log.warning(
@@ -174,9 +194,17 @@ class YooKassaProcessor:
             )
             return
 
-        if existing and existing.get("status") == "succeeded":
+        already_processed = bool(
+            existing
+            and (
+                existing.get("status") == "succeeded"
+                or existing.get("processed_at")
+                or existing_metadata.get("credits_added")
+            )
+        )
+        if already_processed:
             self.duplicate_webhooks_total += 1
-            log.info("Duplicate success webhook for payment %s", payment_id)
+            log.info("Duplicate success webhook for payment %s (source=%s)", payment_id, source)
             await self._db.update_payment_status_by_ext(
                 "yookassa",
                 payment_id,
@@ -274,20 +302,32 @@ class YooKassaProcessor:
 
     async def poll_pending_once(self) -> None:
         pending = await self._db.list_payments_by_status(
-            provider="yookassa", statuses=("pending", "waiting_for_capture")
+            ("pending", "waiting_for_capture"),
+            provider="yookassa",
+            limit=200,
         )
         if not pending:
             return
-        log.debug("Polling %s pending YooKassa payments", len(pending))
+        log.info("YooKassa poller found %s pending payments", len(pending))
         for record in pending:
             payment_id = record.get("ext_id")
             if not payment_id:
                 continue
             try:
                 payment = await asyncio.to_thread(yookassa_client.get_payment, payment_id)
-            except Exception:  # pragma: no cover - network interaction
-                log.exception("Failed to refresh YooKassa payment %s", payment_id)
+            except Exception as exc:  # pragma: no cover - network interaction
+                error_details = yookassa_client.describe_error(exc)
+                suffix = f" ({error_details})" if error_details else ""
+                log.exception("Failed to refresh YooKassa payment %s%s", payment_id, suffix)
                 continue
+            status = getattr(payment, "status", None) or "unknown"
+            paid_flag = getattr(payment, "paid", None)
+            log.info(
+                "YooKassa poller status id=%s status=%s paid=%s",
+                payment_id,
+                status,
+                paid_flag,
+            )
             await self.process_payment(payment, source="poller")
 
     async def _notify_success(self, user_id: int, items: int) -> None:
@@ -408,6 +448,21 @@ class YooKassaProcessor:
             return dict(metadata)
         except Exception:  # pragma: no cover - defensive
             return {}
+
+    @staticmethod
+    def _parse_metadata_field(metadata: Any) -> Dict[str, Any]:
+        if not metadata:
+            return {}
+        if isinstance(metadata, dict):
+            return dict(metadata)
+        if isinstance(metadata, str):
+            try:
+                parsed = json.loads(metadata)
+            except json.JSONDecodeError:
+                return {}
+            if isinstance(parsed, dict):
+                return parsed
+        return {}
 
     def _amount_to_cop(self, amount_obj) -> int:
         if not amount_obj:
