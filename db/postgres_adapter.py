@@ -415,22 +415,40 @@ class PostgresDatabase(DatabaseInterface):
 
     async def list_payments_by_status(
         self,
-        status: str,
+        statuses: str | Iterable[str],
         *,
-        created_after: Optional[str] = None,
-        created_before: Optional[str] = None,
+        provider: Optional[str] = None,
+        created_after: Optional[str | datetime] = None,
+        created_before: Optional[str | datetime] = None,
+        limit: int = 100,
     ) -> List[Dict[str, Any]]:
         pool = self._require_pool()
-        conditions = ["status = $1"]
-        params: List[Any] = [status]
+        if isinstance(statuses, str):
+            status_values = [statuses]
+        else:
+            status_values = list(statuses)
+        if not status_values:
+            return []
+        params: List[Any] = []
+        conditions: List[str] = []
+
+        params.append(status_values)
+        conditions.append("status = ANY($%d)" % len(params))
+        if provider:
+            params.append(provider)
+            conditions.append("provider = $%d" % len(params))
         if created_after:
-            conditions.append("created_at >= $%d" % (len(params) + 1))
             params.append(created_after)
+            conditions.append("created_at >= $%d" % len(params))
         if created_before:
-            conditions.append("created_at <= $%d" % (len(params) + 1))
             params.append(created_before)
-        where_clause = " AND ".join(conditions)
+            conditions.append("created_at <= $%d" % len(params))
+
+        where_clause = " AND ".join(conditions) if conditions else "TRUE"
         query = f"SELECT * FROM payments WHERE {where_clause} ORDER BY created_at DESC"
+        if limit:
+            params.append(limit)
+            query += " LIMIT $%d" % len(params)
         async with pool.acquire() as conn:
             rows = await conn.fetch(query, *params)
         return [dict(row) for row in rows]

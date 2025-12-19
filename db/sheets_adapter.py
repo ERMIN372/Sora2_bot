@@ -248,15 +248,19 @@ class SheetsDatabase(DatabaseInterface):
 
     async def list_payments_by_status(
         self,
-        status: str,
+        statuses: str | Iterable[str],
         *,
-        created_after: Optional[str] = None,
-        created_before: Optional[str] = None,
+        provider: Optional[str] = None,
+        created_after: Optional[str | datetime] = None,
+        created_before: Optional[str | datetime] = None,
+        limit: int = 100,
     ) -> List[Dict[str, Any]]:
         return await gsheets_db.list_payments_by_status(
-            status,
+            statuses=statuses,
+            provider=provider,
             created_after=created_after,
             created_before=created_before,
+            limit=limit,
         )
 
     async def get_payment_by_order_id(self, provider: str, order_id: str) -> Optional[Dict[str, Any]]:

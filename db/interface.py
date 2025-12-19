@@ -137,10 +137,12 @@ class DatabaseInterface(abc.ABC):
     @abc.abstractmethod
     async def list_payments_by_status(
         self,
-        status: str,
+        statuses: str | Iterable[str],
         *,
-        created_after: Optional[str] = None,
-        created_before: Optional[str] = None,
+        provider: Optional[str] = None,
+        created_after: Optional[str | datetime] = None,
+        created_before: Optional[str | datetime] = None,
+        limit: int = 100,
     ) -> List[Dict[str, Any]]:
         raise NotImplementedError
 

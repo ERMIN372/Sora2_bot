@@ -59,11 +59,16 @@ def _build_metadata(package: CreditPackage, user_id: int, idemp: str) -> Dict[st
     }
 
 
-def create_payment(package: CreditPackage, user_id: int, description: str) -> Dict[str, Any]:
+def create_payment(
+    package: CreditPackage,
+    user_id: int,
+    description: str,
+    idempotency_key: str | None = None,
+) -> Dict[str, Any]:
     """Create a YooKassa payment and return identifiers and confirmation URL."""
 
     config = _require_config()
-    idemp = str(uuid.uuid4())
+    idemp = idempotency_key or str(uuid.uuid4())
     metadata = _build_metadata(package, user_id, idemp)
     amount_value = (Decimal(package.price_kopeks) / Decimal(100)).quantize(Decimal("0.01"))
     body: Dict[str, Any] = {
@@ -86,9 +91,11 @@ def create_payment(package: CreditPackage, user_id: int, description: str) -> Di
             ],
         }
     payment = _create_payment(body, idemp)
+    confirmation_url = payment.confirmation.confirmation_url
+    metadata = {**metadata, "confirmation_url": confirmation_url}
     return {
         "payment_id": payment.id,
-        "confirmation_url": payment.confirmation.confirmation_url,
+        "confirmation_url": confirmation_url,
         "status": payment.status,
         "order_id": idemp,
         "metadata": metadata,
@@ -114,4 +121,36 @@ def _create_payment(body: Dict[str, Any], idemp: str):
     return Payment.create(body, idemp)
 
 
-__all__ = ["init", "create_payment", "get_payment", "build_return_url"]
+def describe_error(exc: Exception, *, max_length: int = 500) -> str:
+    """Extract HTTP status/body details from YooKassa SDK exceptions."""
+
+    status_code = getattr(exc, "status_code", None) or getattr(exc, "http_code", None)
+    response = getattr(exc, "body", None) or getattr(exc, "response", None)
+    response_text = ""
+    if response is not None:
+        response_text = (
+            getattr(response, "text", None)
+            or getattr(response, "content", None)
+            or getattr(response, "body", None)
+            or getattr(response, "message", None)
+        )
+        if not response_text and isinstance(response, (dict, list)):
+            response_text = str(response)
+        if isinstance(response_text, bytes):
+            try:
+                response_text = response_text.decode("utf-8", errors="ignore")
+            except Exception:
+                response_text = str(response_text)
+    if not response_text:
+        response_text = getattr(exc, "message", "") if hasattr(exc, "message") else ""
+    if response_text and len(response_text) > max_length:
+        response_text = f"{response_text[:max_length]}...[truncated]"
+    parts = []
+    if status_code is not None:
+        parts.append(f"status={status_code}")
+    if response_text:
+        parts.append(f"body={response_text}")
+    return " ".join(parts)
+
+
+__all__ = ["init", "create_payment", "get_payment", "build_return_url", "describe_error"]

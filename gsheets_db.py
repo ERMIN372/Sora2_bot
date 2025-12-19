@@ -9,7 +9,7 @@ import os
 import asyncio
 import copy
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from decimal import ROUND_HALF_UP, Decimal
 from typing import Any, Awaitable, Callable, Dict, Iterable, List, Optional, Set, Tuple
 
@@ -269,6 +269,20 @@ def _decode_service_account() -> Dict[str, Any]:
 
 def _now() -> str:
     return datetime.utcnow().replace(microsecond=0).isoformat()
+
+
+def _coerce_datetime(value: Any) -> Optional[datetime]:
+    if isinstance(value, datetime):
+        return value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
+    if isinstance(value, str):
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed
+    return None
 
 
 def _column_letter(idx: int) -> str:
@@ -1082,21 +1096,31 @@ async def get_payment_by_ext(provider: str, ext_id: str) -> Optional[Dict[str, A
 
 
 async def list_payments_by_status(
+    statuses: str | Iterable[str],
     *,
-    provider: str,
-    statuses: Iterable[str],
+    provider: Optional[str] = None,
+    created_after: Optional[str] = None,
+    created_before: Optional[str] = None,
     limit: int = 50,
 ) -> List[Dict[str, Any]]:
     state = await _ensure_payments_state()
-    statuses_set = {status for status in statuses}
+    status_values = [statuses] if isinstance(statuses, str) else list(statuses)
+    statuses_set = {status for status in status_values}
     if not statuses_set:
         return []
     results: List[Dict[str, Any]] = []
+    created_after_dt = _coerce_datetime(created_after) if created_after else None
+    created_before_dt = _coerce_datetime(created_before) if created_before else None
     async with state.lock:
         for record in state.rows.values():
-            if record.get("provider") != provider:
+            if provider and record.get("provider") != provider:
                 continue
             if record.get("status") not in statuses_set:
+                continue
+            created_dt = _coerce_datetime(record.get("created_at"))
+            if created_after_dt and created_dt and created_dt < created_after_dt:
+                continue
+            if created_before_dt and created_dt and created_dt > created_before_dt:
                 continue
             results.append(dict(record))
     results.sort(key=lambda item: item.get("created_at", ""))

@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 import re
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Literal, Mapping, Optional, Sequence, Set, Tuple
 
@@ -2849,6 +2849,153 @@ async def _send_payment_showcase(bot: Bot, chat_id: int, config: Config) -> None
     else:
         body = f"{text}\n\n{i18n.t('payment.unavailable')}"
         await bot.send_message(chat_id, body.strip())
+
+
+PAYMENT_REUSE_WINDOW_MINUTES = 15
+PAYMENT_DEBOUNCE_SECONDS = 3
+_PENDING_PAYMENT_LOCKS: dict[int, asyncio.Lock] = {}
+_PENDING_PAYMENT_LAST_ATTEMPT: dict[int, float] = {}
+
+
+def _get_payment_lock(user_id: int) -> asyncio.Lock:
+    lock = _PENDING_PAYMENT_LOCKS.get(user_id)
+    if lock is None:
+        lock = asyncio.Lock()
+        _PENDING_PAYMENT_LOCKS[user_id] = lock
+    return lock
+
+
+def _coerce_int(value: Any) -> Optional[int]:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _parse_payment_metadata(raw: Any) -> Dict[str, Any]:
+    if not raw:
+        return {}
+    if isinstance(raw, dict):
+        return dict(raw)
+    if isinstance(raw, str):
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            return {}
+        if isinstance(parsed, dict):
+            return parsed
+    return {}
+
+
+def _extract_confirmation_url(metadata: Dict[str, Any]) -> Optional[str]:
+    confirmation = metadata.get("confirmation_url") or metadata.get("confirmationUrl")
+    if isinstance(confirmation, str) and confirmation.startswith("http"):
+        return confirmation
+    return None
+
+
+def _parse_created_at(value: Any) -> Optional[datetime]:
+    if isinstance(value, datetime):
+        if value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value
+    if isinstance(value, str):
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed
+    return None
+
+
+def _compute_payment_idempotency_key(user_id: int, amount_cp: int) -> str:
+    window_seconds = max(1, PAYMENT_REUSE_WINDOW_MINUTES * 60)
+    window_bucket = int(time.time() // window_seconds)
+    return f"pay:{user_id}:{amount_cp}:{window_bucket}"
+
+
+async def _fetch_confirmation_url(payment_id: str) -> Optional[str]:
+    try:
+        payment = await asyncio.to_thread(yookassa_client.get_payment, payment_id)
+    except Exception as exc:  # pragma: no cover - network interaction
+        details = yookassa_client.describe_error(exc)
+        suffix = f" ({details})" if details else ""
+        log.exception("Failed to fetch existing YooKassa payment %s%s", payment_id, suffix)
+        return None
+    confirmation = getattr(payment, "confirmation", None)
+    if confirmation is None:
+        return None
+    url = getattr(confirmation, "confirmation_url", None) or getattr(confirmation, "url", None)
+    if url:
+        log.info(
+            "Reusing YooKassa payment %s status=%s paid=%s",
+            payment_id,
+            getattr(payment, "status", None),
+            getattr(payment, "paid", None),
+        )
+    return url
+
+
+async def _find_recent_pending_payment(
+    *,
+    db: Database,
+    user_id: int,
+    amount_cp: int,
+    window_minutes: int = PAYMENT_REUSE_WINDOW_MINUTES,
+) -> tuple[Optional[Dict[str, Any]], Optional[str]]:
+    cutoff = datetime.now(timezone.utc) - timedelta(minutes=window_minutes)
+    pending = await db.list_payments_by_status(
+        ("pending", "waiting_for_capture"),
+        provider="yookassa",
+        created_after=cutoff,
+        limit=200,
+    )
+    for record in pending:
+        record_user = _coerce_int(record.get("user_id"))
+        if record_user != user_id:
+            continue
+        record_amount = _coerce_int(record.get("amount_cp"))
+        if record_amount != amount_cp:
+            continue
+        created_at = _parse_created_at(record.get("created_at"))
+        if created_at and created_at < cutoff:
+            continue
+        metadata = _parse_payment_metadata(record.get("metadata"))
+        confirmation_url = _extract_confirmation_url(metadata)
+        if confirmation_url:
+            return record, confirmation_url
+        payment_id = record.get("ext_id")
+        if payment_id:
+            confirmation_url = await _fetch_confirmation_url(str(payment_id))
+            if confirmation_url:
+                merged_metadata = {**metadata, "confirmation_url": confirmation_url}
+                await db.update_payment_status_by_ext(
+                    "yookassa",
+                    str(payment_id),
+                    record.get("status") or "pending",
+                    metadata=merged_metadata,
+                    idempotency_key=record.get("idempotency_key") or None,
+                    package_id=record.get("package_id") or None,
+                    purchased_credits=_coerce_int(record.get("purchased_credits")),
+                )
+                return record, confirmation_url
+    return None, None
+
+
+async def _send_payment_link(message: Message, confirmation_url: str) -> None:
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=i18n.t("buttons.payment_open"),
+                    url=confirmation_url,
+                )
+            ]
+        ]
+    )
+    await message.answer(i18n.t("payment.store.instructions"), reply_markup=keyboard)
 
 
 async def _handle_not_enough_credits(message: Message, config: Config, session: UserSession) -> None:
@@ -5973,64 +6120,81 @@ async def payment_callback_handler(
         last_name=user.last_name,
     )
 
-    description = f"Video generation {package.credits_int} credits"
-    try:
-        payment = await asyncio.to_thread(
-            yookassa_client.create_payment,
-            package,
-            user.id,
-            description,
+    amount_cp = package.price_kopeks
+    user_id = user.id
+    lock = _get_payment_lock(user_id)
+    async with lock:
+        now = time.monotonic()
+        last_attempt = _PENDING_PAYMENT_LAST_ATTEMPT.get(user_id)
+        if last_attempt and now - last_attempt < PAYMENT_DEBOUNCE_SECONDS:
+            log.info("Debouncing YooKassa payment callback for user=%s", user_id)
+        _PENDING_PAYMENT_LAST_ATTEMPT[user_id] = now
+
+        recent_payment, existing_url = await _find_recent_pending_payment(
+            db=db,
+            user_id=user_id,
+            amount_cp=amount_cp,
         )
-    except Exception:  # pragma: no cover - external API
-        log.exception("Failed to create YooKassa payment")
-        await callback.message.answer(i18n.t("payment.creation_failed"))
-        return
+        if existing_url:
+            log.info(
+                "Reusing pending YooKassa payment %s for user=%s amount_cp=%s",
+                (recent_payment or {}).get("ext_id"),
+                user_id,
+                amount_cp,
+            )
+            await _send_payment_link(callback.message, existing_url)
+            return
 
-    confirmation_url = payment.get("confirmation_url")
-    payment_id = payment.get("payment_id")
-    metadata_raw = payment.get("metadata", "{}")
-    metadata = metadata_raw if isinstance(metadata_raw, str) else str(metadata_raw)
-    if not confirmation_url or not payment_id:
-        await callback.message.answer(i18n.t("payment.link_failed"))
-        return
+        description = f"Video generation {package.credits_int} credits"
+        idempotency_key = _compute_payment_idempotency_key(user_id, amount_cp)
+        try:
+            payment = await asyncio.to_thread(
+                yookassa_client.create_payment,
+                package,
+                user_id,
+                description,
+                idempotency_key,
+            )
+        except Exception as exc:  # pragma: no cover - external API
+            details = yookassa_client.describe_error(exc)
+            suffix = f" ({details})" if details else ""
+            log.exception("Failed to create YooKassa payment%s", suffix)
+            await callback.message.answer(i18n.t("payment.creation_failed"))
+            return
 
-    status = payment.get("status", "pending") or "pending"
-    idempotency_key = payment.get("idempotency_key", "")
-    metadata = payment.get("metadata", {})
-    amount_cp = int(payment.get("amount_cp", package.price_kopeks))
-    await db.create_payment_record(
-        "yookassa",
-        payment_id,
-        user.id,
-        amount_cp,
-        package.credits_int,
-        status,
-        payload=str(description),
-        metadata=metadata,
-        idempotency_key=idempotency_key,
-        username=user.username,
-        package_id=package.package_id,
-        purchased_credits=package.credits_int,
-    )
-    log.info(
-        "Created YooKassa payment %s credits=%s amount_cp=%s net_cp=%s",
-        payment_id,
-        package.credits_int,
-        amount_cp,
-        amount_cp,
-    )
+        confirmation_url = payment.get("confirmation_url")
+        payment_id = payment.get("payment_id")
+        if not confirmation_url or not payment_id:
+            await callback.message.answer(i18n.t("payment.link_failed"))
+            return
 
-    keyboard = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text=i18n.t("buttons.payment_open"),
-                    url=confirmation_url,
-                )
-            ]
-        ]
-    )
-    await callback.message.answer(i18n.t("payment.store.instructions"), reply_markup=keyboard)
+        status = payment.get("status", "pending") or "pending"
+        metadata = _parse_payment_metadata(payment.get("metadata", {}))
+        amount_cp = _coerce_int(payment.get("amount_cp")) or amount_cp
+        await db.create_payment_record(
+            "yookassa",
+            payment_id,
+            user_id,
+            amount_cp,
+            package.credits_int,
+            status,
+            payload=str(description),
+            metadata=metadata,
+            idempotency_key=idempotency_key,
+            username=user.username,
+            package_id=package.package_id,
+            purchased_credits=package.credits_int,
+        )
+        log.info(
+            "Created YooKassa payment %s credits=%s amount_cp=%s net_cp=%s idemp=%s",
+            payment_id,
+            package.credits_int,
+            amount_cp,
+            amount_cp,
+            idempotency_key,
+        )
+
+        await _send_payment_link(callback.message, confirmation_url)
 
 
 async def menu_callback_handler(
