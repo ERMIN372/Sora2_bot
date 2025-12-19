@@ -326,6 +326,7 @@ class Config:
 
     bot_token: str
     environment: str = "dev"
+    db_log_jobs: bool = True
     gemini_api_key: str = ""
     gemini_model_text: str = "gemini-2.0-flash"
     gemini_model_text_fallback: str = "gemini-1.5-flash"
@@ -377,6 +378,7 @@ class Config:
     yookassa_send_receipts: bool = False
     subscription_chat_id: Optional[str] = None
     support_chat_id: Optional[int] = None
+    archive_enabled: bool = True
     archive_channel_id: Optional[int | str] = None
     yookassa_poll_interval: int = 60
     google_sheet_id: str = ""
@@ -783,6 +785,10 @@ def load_config() -> Config:
         or os.getenv("ENVIRONMENT")
         or Config.environment
     ).strip() or Config.environment
+    environment_lower = environment.lower()
+    db_log_jobs = _get_env_bool("DB_LOG_JOBS", True)
+    archive_enabled_default = True
+    archive_enabled = _get_env_bool("ARCHIVE_ENABLED", archive_enabled_default)
 
     default_video_model = (os.getenv("DEFAULT_VIDEO_MODEL") or "").strip()
     if not default_video_model:
@@ -903,6 +909,7 @@ def load_config() -> Config:
         yookassa_send_receipts=_get_env_bool("YOOKASSA_SEND_RECEIPTS", Config.yookassa_send_receipts),
         subscription_chat_id=os.getenv("SUBSCRIPTION_CHAT_ID"),
         support_chat_id=_get_optional_int(os.getenv("SUPPORT_CHAT_ID")),
+        archive_enabled=archive_enabled,
         archive_channel_id=_parse_chat_id(
             os.getenv("ARCHIVE_CHANNEL_ID"), env_name="ARCHIVE_CHANNEL_ID"
         ),
@@ -917,6 +924,7 @@ def load_config() -> Config:
         debug_gemini=debug_gemini,
         debug_sora=debug_sora,
         redis_url=redis_url,
+        db_log_jobs=db_log_jobs,
     )
 
 
@@ -1033,4 +1041,3 @@ class Models:
 # Apply runtime overrides derived from environment variables.
 if GEMINI_IMAGE_API_VERSION:
     RoutingCfg.MEDIA_API_VERSION = GEMINI_IMAGE_API_VERSION
-

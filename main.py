@@ -499,6 +499,16 @@ async def _run_webhook(state: ApplicationState) -> bool:
 
 def _build_asgi_state() -> ApplicationState:
     config = load_config()
+    log.info(
+        "Runtime startup environment=%s mode=%s db_log_jobs=%s archive_enabled=%s "
+        "archive_channel_configured=%s postgres_enabled=%s",
+        config.environment or "dev",
+        CFG.BOT_MODE,
+        getattr(config, "db_log_jobs", True),
+        getattr(config, "archive_enabled", True),
+        bool(config.archive_channel_id),
+        config.postgres_enabled,
+    )
     _init_sentry(config)
     ensure_gemini_key_logged(
         config,

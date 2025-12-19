@@ -2891,6 +2891,7 @@ async def _launch_order(
     job_queue: JobQueue,
     config: Config,
     gate: GenerationRequestGate,
+    archive_publisher: ArchivePublisher,
     error_reporter: ErrorReporter,
 ) -> None:
     user = callback.from_user
@@ -3186,6 +3187,36 @@ async def _launch_order(
                     refund_done=refunded,
                 )
                 return
+            sent_message = messages_sent[0]
+            photo = sent_message.photo[-1] if sent_message.photo else None
+            mime_hint = None
+            if artifacts:
+                first_asset = artifacts[0]
+                if isinstance(first_asset, dict):
+                    mime_hint = (
+                        str(first_asset.get("mime") or first_asset.get("content_type") or "")
+                        or None
+                    )
+            sent_info = SentMediaInfo(
+                message=sent_message,
+                method="photo",
+                file_id=photo.file_id if photo else "",
+                file_size=(photo.file_size or 0) if photo else 0,
+                duration_seconds=None,
+                mime_type=mime_hint or "image/png",
+                file_bytes=None,
+                filename="image.png",
+            )
+            await _persist_delivery_metadata(
+                db=db,
+                job=job_record,
+                sent=sent_info,
+                stage="inline_delivery",
+            )
+            if archive_publisher:
+                payload = _build_archive_payload_from_sent(job_record, sent_info)
+                if payload:
+                    archive_publisher.schedule(payload)
             await callback.message.answer(i18n.t("flow.nano_image_done"))
             if job_meta.get("auto_style"):
                 await _send_auto_style_ready(
@@ -3202,13 +3233,36 @@ async def _launch_order(
                     log.exception("Failed to refund credits for deduplicated image job")
                 await _release_lock("dedup_reused", "completed")
                 try:
-                    await _send_hydrated_images(
+                    messages = await _send_hydrated_images(
                         bot=callback.message.bot, user_id=user_id, artifacts=hydrated_assets
                     )
                 except Exception:
                     log.exception("Failed to deliver hydrated image artifacts", exc_info=True)
                     await callback.message.answer(i18n.t("status.delivery_generic"))
                 else:
+                    if messages:
+                        sent_message = messages[0]
+                        photo = sent_message.photo[-1] if sent_message.photo else None
+                        sent_info = SentMediaInfo(
+                            message=sent_message,
+                            method="photo",
+                            file_id=photo.file_id if photo else "",
+                            file_size=(photo.file_size or 0) if photo else 0,
+                            duration_seconds=None,
+                            mime_type="image/png",
+                            file_bytes=None,
+                            filename="image.png",
+                        )
+                        await _persist_delivery_metadata(
+                            db=db,
+                            job=job_record,
+                            sent=sent_info,
+                            stage="dedup_delivery",
+                        )
+                        if archive_publisher:
+                            payload = _build_archive_payload_from_sent(job_record, sent_info)
+                            if payload:
+                                archive_publisher.schedule(payload)
                     await callback.message.answer(i18n.t("status.completed_photo"))
                     if job_meta.get("auto_style"):
                         await _send_auto_style_ready(
@@ -3657,6 +3711,70 @@ class SentMediaInfo:
     filename: Optional[str] = None
 
 
+async def _persist_delivery_metadata(
+    *,
+    db: Database,
+    job: GenerationJobRecord,
+    sent: SentMediaInfo,
+    stage: str,
+) -> None:
+    extra = job.extra if isinstance(job.extra, dict) else {}
+    delivery_meta = extra.get("delivery") if isinstance(extra.get("delivery"), dict) else {}
+    file_id_value = sent.file_id.strip() if isinstance(sent.file_id, str) else ""
+    delivery_meta.update(
+        {
+            "tg_file_id": file_id_value,
+            "tg_message_id": getattr(sent.message, "message_id", None),
+            "method": sent.method,
+            "file_size": sent.file_size,
+            "duration_seconds": sent.duration_seconds,
+            "mime": sent.mime_type,
+            "filename": sent.filename,
+        }
+    )
+    cleaned_delivery = {key: value for key, value in delivery_meta.items() if value not in (None, "", 0)}
+    extra["delivery"] = cleaned_delivery
+    job.extra = extra
+    image_file_id = file_id_value if ((job.content_type or "video") == "image" and file_id_value) else None
+    try:
+        await db.update_job(
+            job.id,
+            job.status or "completed",
+            image_file_id=image_file_id,
+            metadata=extra,
+        )
+    except Exception:
+        log.exception("Failed to persist delivery metadata job_id=%s stage=%s", job.id, stage)
+        error_record = ErrorLogRecord(
+            ts=datetime.utcnow(),
+            user_id=job.user_id,
+            username=job.username,
+            corr_id=job.corr_id,
+            job_id=job.id,
+            model=job.model,
+            size=job.size,
+            status_code=None,
+            error_type="db_update_failed",
+            error_msg_short=f"delivery_metadata_update_failed:{stage}",
+            refunded=False,
+            preflight_blocked=False,
+            preflight_reason="",
+            auto_sanitized=False,
+            sanitized_prompt=job.prompt,
+            error_scope="db",
+            error_json="",
+            job_status=job.status,
+            reason="db_update_failed",
+            provider_error_code=None,
+            provider_error_message=None,
+            stage=stage,
+        )
+        try:
+            await db.log_error_record(error_record)
+        except Exception:
+            log.warning("Failed to log delivery metadata db error job_id=%s", job.id, exc_info=True)
+
+
 async def _send_job_update(
     dp: Dispatcher,
     job: GenerationJobRecord,
@@ -3765,6 +3883,7 @@ async def _send_job_update(
                 extra_log={"stage": "no_media_assets"},
             )
             return
+        await _persist_delivery_metadata(db=db, job=job, sent=sent_info, stage="delivery")
 
         summary_text = _format_media_summary(
             job,
@@ -5745,6 +5864,7 @@ async def order_callback_handler(
     job_queue: JobQueue,
     config: Config,
     gate: GenerationRequestGate,
+    archive_publisher: ArchivePublisher,
     error_reporter: ErrorReporter,
 ) -> None:
     await safe_callback_answer(callback)
@@ -5819,6 +5939,7 @@ async def order_callback_handler(
             job_queue=job_queue,
             config=config,
             gate=gate,
+            archive_publisher=archive_publisher,
             error_reporter=error_reporter,
         )
 
@@ -7598,7 +7719,7 @@ def register_handlers(
     )
     dp.register_callback_query_handler(
         lambda call, state: order_callback_handler(
-            call, state, db, job_queue, config, gate, error_reporter
+            call, state, db, job_queue, config, gate, archive_publisher, error_reporter
         ),
         lambda call: call.data and call.data.startswith("order:"),
         state="*",
@@ -7656,4 +7777,3 @@ __all__ = [
     "top_up_menu",
     "resend_pending_order",
 ]
-
