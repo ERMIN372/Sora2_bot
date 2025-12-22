@@ -313,6 +313,13 @@ class YooKassaProcessor:
             payment_id = record.get("ext_id")
             if not payment_id:
                 continue
+            log.info(
+                "YooKassa poller refresh ext_id=%s user=%s status=%s created_at=%s",
+                payment_id,
+                record.get("user_id"),
+                record.get("status"),
+                record.get("created_at"),
+            )
             try:
                 payment = await asyncio.to_thread(yookassa_client.get_payment, payment_id)
             except Exception as exc:  # pragma: no cover - network interaction

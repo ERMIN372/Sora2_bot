@@ -1133,7 +1133,7 @@ async def list_payments_by_status(
     provider: Optional[str] = None,
     created_after: Optional[str] = None,
     created_before: Optional[str] = None,
-    limit: int = 50,
+    limit: int = 100,
 ) -> List[Dict[str, Any]]:
     state = await _ensure_payments_state()
     status_values = [statuses] if isinstance(statuses, str) else list(statuses)
