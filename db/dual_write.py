@@ -79,6 +79,12 @@ class DualWriteDatabase(DatabaseInterface):
         await self._mirror(self._secondary.add_credits, telegram_id, amount)
         return value
 
+    async def grant_bonus_if_needed(self, telegram_id: int, bonus: int) -> Optional[int]:
+        value = await self._primary.grant_bonus_if_needed(telegram_id, bonus)
+        if value is not None:
+            await self._mirror(self._secondary.grant_bonus_if_needed, telegram_id, bonus)
+        return value
+
     async def deduct_credit(self, telegram_id: int, amount: int = 1) -> bool:
         ok = await self._primary.deduct_credit(telegram_id, amount)
         if ok:
@@ -269,6 +275,14 @@ class DualWriteDatabase(DatabaseInterface):
 
     async def list_users(self) -> List[Dict[str, Any]]:
         return await self._primary.list_users()
+
+    async def describe(self) -> Optional[Dict[str, object]]:
+        primary_info = await self._primary.describe()
+        secondary_info = await self._secondary.describe()
+        return {
+            "primary": primary_info,
+            "secondary": secondary_info,
+        }
 
     # Jobs
     async def create_job(self, job: GenerationJobRecord) -> None:

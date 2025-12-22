@@ -811,12 +811,42 @@ async def add_credits(user_id: int, delta: int) -> int:
         if new_balance < 0:
             raise ValueError("Insufficient credits")
         record["credits"] = new_balance
+        record["economy_v2"] = 1
         record["updated_at"] = _now()
         row = state.index[user_id]
         await _update_cells(
             state,
             {
                 "credits": (row, new_balance),
+                "economy_v2": (row, 1),
+                "updated_at": (row, record["updated_at"]),
+            },
+        )
+        return new_balance
+
+
+async def grant_bonus_if_needed(user_id: int, bonus: int) -> Optional[int]:
+    if bonus <= 0:
+        return None
+    state = await _ensure_users_state()
+    async with state.lock:
+        record = state.rows.get(user_id)
+        if record is None:
+            record = await _create_user_record(state, user_id)
+        if record.get("bonus_granted"):
+            return None
+        new_balance = record["credits"] + bonus
+        record["credits"] = new_balance
+        record["bonus_granted"] = 1
+        record["economy_v2"] = 1
+        record["updated_at"] = _now()
+        row = state.index[user_id]
+        await _update_cells(
+            state,
+            {
+                "credits": (row, new_balance),
+                "bonus_granted": (row, 1),
+                "economy_v2": (row, 1),
                 "updated_at": (row, record["updated_at"]),
             },
         )
@@ -851,12 +881,14 @@ async def mark_bonus_granted(user_id: int) -> None:
         if record.get("bonus_granted"):
             return
         record["bonus_granted"] = True
+        record["economy_v2"] = 1
         record["updated_at"] = _now()
         row = state.index[user_id]
         await _update_cells(
             state,
             {
                 "bonus_granted": (row, 1),
+                "economy_v2": (row, 1),
                 "updated_at": (row, record["updated_at"]),
             },
         )
@@ -1348,6 +1380,7 @@ __all__ = [
     "get_or_create_user",
     "upsert_user_profile",
     "add_credits",
+    "grant_bonus_if_needed",
     "set_user_credits",
     "mark_bonus_granted",
     "mark_economy_v2",

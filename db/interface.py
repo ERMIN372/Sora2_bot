@@ -48,6 +48,11 @@ class DatabaseInterface(abc.ABC):
         raise NotImplementedError
 
     @abc.abstractmethod
+    async def grant_bonus_if_needed(self, telegram_id: int, bonus: int) -> Optional[int]:
+        """Atomically grant *bonus* credits once per user, returning the new balance if applied."""
+        raise NotImplementedError
+
+    @abc.abstractmethod
     async def deduct_credit(self, telegram_id: int, amount: int = 1) -> bool:
         raise NotImplementedError
 
@@ -162,6 +167,11 @@ class DatabaseInterface(abc.ABC):
 
     @abc.abstractmethod
     async def list_users(self) -> List[Dict[str, Any]]:
+        raise NotImplementedError
+
+    @abc.abstractmethod
+    async def describe(self) -> Optional[Dict[str, object]]:
+        """Return optional connection diagnostics (e.g., db name, host, schema)."""
         raise NotImplementedError
 
     # Jobs

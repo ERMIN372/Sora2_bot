@@ -81,6 +81,9 @@ class SheetsDatabase(DatabaseInterface):
     async def add_credits(self, telegram_id: int, amount: int) -> int:
         return await gsheets_db.add_credits(telegram_id, amount)
 
+    async def grant_bonus_if_needed(self, telegram_id: int, bonus: int) -> Optional[int]:
+        return await gsheets_db.grant_bonus_if_needed(telegram_id, bonus)
+
     async def deduct_credit(self, telegram_id: int, amount: int = 1) -> bool:
         try:
             await gsheets_db.add_credits(telegram_id, -amount)
@@ -108,7 +111,7 @@ class SheetsDatabase(DatabaseInterface):
             user_id = int(record.get("user_id", 0))
             if not user_id:
                 continue
-            if record.get("economy_v2"):
+            if record.get("economy_v2") or record.get("bonus_granted"):
                 continue
             current = int(record.get("credits", 0))
             if current > 0:
@@ -119,6 +122,7 @@ class SheetsDatabase(DatabaseInterface):
                     "Migrated user %s credits=%s cost_multiplier=%s", user_id, current, multiplier
                 )
             await gsheets_db.mark_economy_v2(user_id)
+            await gsheets_db.mark_bonus_granted(user_id)
         if migrated:
             log.info("Credit economy migration applied to %s users", migrated)
         return migrated
@@ -274,6 +278,10 @@ class SheetsDatabase(DatabaseInterface):
 
     async def list_users(self) -> List[Dict[str, Any]]:
         return await gsheets_db.list_users()
+
+    async def describe(self) -> Optional[Dict[str, object]]:
+        log.info("Database connection: backend=gsheets")
+        return {"backend": "gsheets"}
 
     # ------------------------------------------------------------------
     # Jobs

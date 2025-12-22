@@ -140,6 +140,7 @@ class PostgresDatabase(DatabaseInterface):
                 VALUES ($1, $2, $3, $3)
                 ON CONFLICT (user_id) DO UPDATE
                 SET credits = users.credits + EXCLUDED.credits,
+                    economy_v2 = TRUE,
                     updated_at = NOW()
                 RETURNING credits
                 """,
@@ -148,6 +149,26 @@ class PostgresDatabase(DatabaseInterface):
                 _now(),
             )
         return int(value or 0)
+
+    async def grant_bonus_if_needed(self, telegram_id: int, bonus: int) -> Optional[int]:
+        if bonus <= 0:
+            return None
+        pool = self._require_pool()
+        async with pool.acquire() as conn:
+            value = await conn.fetchval(
+                """
+                UPDATE users
+                SET credits = credits + $2,
+                    bonus_granted = TRUE,
+                    economy_v2 = TRUE,
+                    updated_at = NOW()
+                WHERE user_id = $1 AND bonus_granted = FALSE
+                RETURNING credits
+                """,
+                telegram_id,
+                bonus,
+            )
+        return int(value) if value is not None else None
 
     async def deduct_credit(self, telegram_id: int, amount: int = 1) -> bool:
         pool = self._require_pool()
@@ -178,7 +199,7 @@ class PostgresDatabase(DatabaseInterface):
             await conn.execute(
                 """
                 UPDATE users
-                SET bonus_granted = TRUE, updated_at = NOW()
+                SET bonus_granted = TRUE, economy_v2 = TRUE, updated_at = NOW()
                 WHERE user_id = $1
                 """,
                 telegram_id,
@@ -211,20 +232,19 @@ class PostgresDatabase(DatabaseInterface):
     async def migrate_credit_balances(self, multiplier: int) -> int:
         pool = self._require_pool()
         async with pool.acquire() as conn:
-            count = await conn.fetchval(
-                "SELECT COUNT(*) FROM users WHERE credits > 0 AND economy_v2 = FALSE"
-            )
-            await conn.execute(
+            rows = await conn.fetch(
                 """
                 UPDATE users
-                SET credits = credits * $1,
+                SET credits = credits + (credits * ($1 - 1)),
                     economy_v2 = TRUE,
+                    bonus_granted = TRUE,
                     updated_at = NOW()
-                WHERE credits > 0 AND economy_v2 = FALSE
+                WHERE credits > 0 AND bonus_granted = FALSE AND economy_v2 = FALSE
+                RETURNING user_id
                 """,
                 multiplier,
             )
-        migrated = int(count or 0)
+        migrated = len(rows)
         if migrated:
             log.info("Credit economy migration applied to %s users", migrated)
         return migrated
@@ -312,43 +332,57 @@ class PostgresDatabase(DatabaseInterface):
             amount_cp, purchased_credits
         )
         async with pool.acquire() as conn:
-            await conn.execute(
-                """
-                INSERT INTO payments (
-                    provider, ext_id, user_id, amount_cp, items, price_rub,
-                    credits_bought, bonus_credits, bonus_pct, status,
-                    payload, metadata, created_at, updated_at, idempotency_key,
-                    username, package_id, purchased_credits, processed_at, type, ref_payment_id
+            try:
+                result = await conn.execute(
+                    """
+                    INSERT INTO payments (
+                        provider, ext_id, user_id, amount_cp, items, price_rub,
+                        credits_bought, bonus_credits, bonus_pct, status,
+                        payload, metadata, created_at, updated_at, idempotency_key,
+                        username, package_id, purchased_credits, processed_at, type, ref_payment_id
+                    )
+                    VALUES (
+                        $1, $2, $3, $4, $5, $6,
+                        $7, $8, $9, $10,
+                        $11, $12, $13, $13, $14,
+                        $15, $16, $17, $18, $19, $20
+                    )
+                    ON CONFLICT (provider, ext_id) DO NOTHING
+                    """,
+                    provider,
+                    ext_id,
+                    user_id,
+                    amount_cp,
+                    items,
+                    price_rub,
+                    credits_bought,
+                    bonus_credits,
+                    float(bonus_pct),
+                    status,
+                    payload,
+                    json.dumps(metadata_payload) if metadata_payload else None,
+                    _now(),
+                    idempotency_key or None,
+                    username,
+                    package_id,
+                    purchased_credits,
+                    processed_at,
+                    record_type,
+                    ref_payment_id,
                 )
-                VALUES (
-                    $1, $2, $3, $4, $5, $6,
-                    $7, $8, $9, $10,
-                    $11, $12, $13, $13, $14,
-                    $15, $16, $17, $18, $19, $20
+            except Exception:
+                log.exception("Failed to insert payment ext_id=%s provider=%s", ext_id, provider)
+                raise
+            else:
+                inserted = str(result).endswith("1")
+                log.info(
+                    "db.insert.ok payments ext_id=%s provider=%s user=%s status=%s inserted=%s",
+                    ext_id,
+                    provider,
+                    user_id,
+                    status,
+                    inserted,
                 )
-                ON CONFLICT (provider, ext_id) DO NOTHING
-                """,
-                provider,
-                ext_id,
-                user_id,
-                amount_cp,
-                items,
-                price_rub,
-                credits_bought,
-                bonus_credits,
-                float(bonus_pct),
-                status,
-                payload,
-                json.dumps(metadata_payload) if metadata_payload else None,
-                _now(),
-                idempotency_key or None,
-                username,
-                package_id,
-                purchased_credits,
-                processed_at,
-                record_type,
-                ref_payment_id,
-            )
 
     async def update_payment_status_by_ext(
         self,
@@ -496,6 +530,21 @@ class PostgresDatabase(DatabaseInterface):
             rows = await conn.fetch("SELECT * FROM users ORDER BY created_at ASC")
         return [dict(row) for row in rows]
 
+    async def describe(self) -> Optional[Dict[str, object]]:
+        pool = self._require_pool()
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT current_database() AS db, inet_server_addr() AS host, current_schema() AS schema"
+            )
+        info = {"database": row["db"], "host": row["host"], "schema": row["schema"]}
+        log.info(
+            "Database connection: db=%s host=%s schema=%s",
+            info["database"],
+            info["host"],
+            info["schema"],
+        )
+        return info
+
     # ------------------------------------------------------------------
     # Jobs
     # ------------------------------------------------------------------
@@ -504,51 +553,63 @@ class PostgresDatabase(DatabaseInterface):
         pool = self._require_pool()
         normalised_status = normalise_job_status(job.status)
         async with pool.acquire() as conn:
-            await conn.execute(
-                """
-                INSERT INTO jobs (
-                    job_id, user_id, prompt, status, video_url, video_id, error,
-                    created_at, updated_at, image_file_id, sora_req_id, size,
-                    seconds, model, cost_credits, username, corr_id,
-                    idempotency_key, content_type, metadata,
-                    status_message_id, status_message_index, status_message_updated_at,
-                    operation_name, file_url
+            try:
+                result = await conn.execute(
+                    """
+                    INSERT INTO jobs (
+                        job_id, user_id, prompt, status, video_url, video_id, error,
+                        created_at, updated_at, image_file_id, sora_req_id, size,
+                        seconds, model, cost_credits, username, corr_id,
+                        idempotency_key, content_type, metadata,
+                        status_message_id, status_message_index, status_message_updated_at,
+                        operation_name, file_url
+                    )
+                    VALUES (
+                        $1, $2, $3, $4, $5, $6, $7,
+                        $8, $8, $9, $10, $11,
+                        $12, $13, $14, $15, $16,
+                        $17, $18, $19,
+                        $20, $21, $22,
+                        $23, $24
+                    )
+                    ON CONFLICT (job_id) DO NOTHING
+                    """,
+                    job.id,
+                    job.user_id,
+                    job.prompt,
+                    normalised_status,
+                    job.video_url,
+                    job.video_id,
+                    job.error,
+                    _now(),
+                    job.image_file_id,
+                    job.sora_req_id,
+                    job.size,
+                    job.seconds,
+                    job.model,
+                    job.cost_credits,
+                    job.username,
+                    job.corr_id,
+                    job.idempotency_key,
+                    job.content_type,
+                    json.dumps(job.extra) if job.extra else None,
+                    job.status_message_id,
+                    job.status_message_index,
+                    job.status_message_updated_at,
+                    job.operation_name,
+                    job.file_url,
                 )
-                VALUES (
-                    $1, $2, $3, $4, $5, $6, $7,
-                    $8, $8, $9, $10, $11,
-                    $12, $13, $14, $15, $16,
-                    $17, $18, $19,
-                    $20, $21, $22,
-                    $23, $24
+            except Exception:
+                log.exception("Failed to insert job job_id=%s corr_id=%s", job.id, job.corr_id)
+                raise
+            else:
+                inserted = str(result).endswith("1")
+                log.info(
+                    "db.insert.ok jobs job_id=%s corr_id=%s inserted=%s",
+                    job.id,
+                    job.corr_id,
+                    inserted,
                 )
-                ON CONFLICT (job_id) DO NOTHING
-                """,
-                job.id,
-                job.user_id,
-                job.prompt,
-                normalised_status,
-                job.video_url,
-                job.video_id,
-                job.error,
-                _now(),
-                job.image_file_id,
-                job.sora_req_id,
-                job.size,
-                job.seconds,
-                job.model,
-                job.cost_credits,
-                job.username,
-                job.corr_id,
-                job.idempotency_key,
-                job.content_type,
-                json.dumps(job.extra) if job.extra else None,
-                job.status_message_id,
-                job.status_message_index,
-                job.status_message_updated_at,
-                job.operation_name,
-                job.file_url,
-            )
 
     async def find_job_by_idempotency_key(
         self, idempotency_key: str
@@ -713,6 +774,12 @@ class PostgresDatabase(DatabaseInterface):
             except Exception:
                 log.warning("Failed to persist error log", exc_info=True)
                 return False
+        log.info(
+            "db.insert.ok error_logs corr_id=%s job_id=%s user_id=%s",
+            record.corr_id,
+            record.job_id,
+            record.user_id,
+        )
         return True
 
     # ------------------------------------------------------------------
@@ -738,34 +805,46 @@ class PostgresDatabase(DatabaseInterface):
     async def log_archive_record(self, record: ArchiveLogRecord) -> None:
         pool = self._require_pool()
         async with pool.acquire() as conn:
-            await conn.execute(
-                """
-                INSERT INTO archive_logs (
-                    ts, corr_id, archive_status, channel_id, message_id,
-                    content_type, model_name, username, user_id, caption_len,
-                    file_size, duration_seconds, attempts, error_short
+            try:
+                result = await conn.execute(
+                    """
+                    INSERT INTO archive_logs (
+                        ts, corr_id, archive_status, channel_id, message_id,
+                        content_type, model_name, username, user_id, caption_len,
+                        file_size, duration_seconds, attempts, error_short
+                    )
+                    VALUES (
+                        $1, $2, $3, $4, $5,
+                        $6, $7, $8, $9, $10,
+                        $11, $12, $13, $14
+                    )
+                    """,
+                    record.ts.replace(microsecond=0),
+                    record.corr_id,
+                    record.archive_status,
+                    record.channel_id,
+                    record.message_id,
+                    record.content_type,
+                    record.model_name,
+                    record.username,
+                    record.user_id,
+                    record.caption_len,
+                    record.file_size,
+                    record.duration_seconds,
+                    record.attempts,
+                    record.error_short,
                 )
-                VALUES (
-                    $1, $2, $3, $4, $5,
-                    $6, $7, $8, $9, $10,
-                    $11, $12, $13, $14
+            except Exception:
+                log.exception("Failed to insert archive_log corr_id=%s", record.corr_id)
+                raise
+            else:
+                inserted = str(result).endswith("1")
+                log.info(
+                    "db.insert.ok archive_logs corr_id=%s status=%s channel_id=%s",
+                    record.corr_id,
+                    record.archive_status,
+                    record.channel_id,
                 )
-                """,
-                record.ts.replace(microsecond=0),
-                record.corr_id,
-                record.archive_status,
-                record.channel_id,
-                record.message_id,
-                record.content_type,
-                record.model_name,
-                record.username,
-                record.user_id,
-                record.caption_len,
-                record.file_size,
-                record.duration_seconds,
-                record.attempts,
-                record.error_short,
-            )
 
 
 __all__ = ["PostgresDatabase"]
