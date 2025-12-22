@@ -309,6 +309,10 @@ async def _startup(state: ApplicationState, *, mode: str) -> None:
         log.info("Webhook removed before polling starts")
 
     await state.db.init()
+    try:
+        await state.db.describe()
+    except Exception:  # pragma: no cover - defensive
+        log.warning("Failed to describe database connection", exc_info=True)
     await run_startup_healthcheck(config=state.config, mode=mode)
 
     async def _fetch_profile(user_id: int) -> Optional[Dict[str, Optional[str]]]:

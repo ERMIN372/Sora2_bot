@@ -568,6 +568,8 @@ def _validate_yookassa_signature(
 async def poll_pending_payments(processor: YooKassaProcessor, interval: int) -> None:
     """Background task to poll pending YooKassa payments."""
 
+    backoff = interval
+    max_backoff = max(interval * 5, interval + 60)
     while True:
         try:
             await processor.poll_pending_once()
@@ -575,7 +577,13 @@ async def poll_pending_payments(processor: YooKassaProcessor, interval: int) -> 
             raise
         except Exception:  # pragma: no cover - defensive
             log.exception("YooKassa pending poller error")
-        await asyncio.sleep(interval)
+            backoff = min(max_backoff, int(backoff * 2))
+        else:
+            if backoff != interval:
+                log.info("YooKassa poller recovered; backoff reset")
+            backoff = interval
+            log.info("YooKassa poller tick ok; sleeping %ss", backoff)
+        await asyncio.sleep(backoff)
 
 
 def _health_router() -> APIRouter:
