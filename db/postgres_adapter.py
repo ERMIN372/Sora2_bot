@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import logging
 from datetime import datetime, timezone
-from typing import Any, Awaitable, Callable, Dict, List, Optional
+from typing import Any, Awaitable, Callable, Dict, Iterable, List, Optional
 
 import asyncpg
 
@@ -139,7 +139,7 @@ class PostgresDatabase(DatabaseInterface):
                 INSERT INTO users (user_id, credits, created_at, updated_at)
                 VALUES ($1, $2, $3, $3)
                 ON CONFLICT (user_id) DO UPDATE
-                SET credits = users.credits + EXCLUDED.credits,
+                SET credits = COALESCE(users.credits, 0) + EXCLUDED.credits,
                     economy_v2 = TRUE,
                     updated_at = NOW()
                 RETURNING credits

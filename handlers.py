@@ -2943,6 +2943,7 @@ async def _find_recent_pending_payment(
     db: Database,
     user_id: int,
     amount_cp: int,
+    package_id: Optional[str] = None,
     window_minutes: int = PAYMENT_REUSE_WINDOW_MINUTES,
 ) -> tuple[Optional[Dict[str, Any]], Optional[str]]:
     cutoff = datetime.now(timezone.utc) - timedelta(minutes=window_minutes)
@@ -2958,6 +2959,9 @@ async def _find_recent_pending_payment(
             continue
         record_amount = _coerce_int(record.get("amount_cp"))
         if record_amount != amount_cp:
+            continue
+        record_package = (record.get("package_id") or "").strip()
+        if package_id and record_package and record_package != package_id:
             continue
         created_at = _parse_created_at(record.get("created_at"))
         if created_at and created_at < cutoff:
@@ -2996,6 +3000,17 @@ async def _send_payment_link(message: Message, confirmation_url: str) -> None:
         ]
     )
     await message.answer(i18n.t("payment.store.instructions"), reply_markup=keyboard)
+
+
+async def _mark_payment_button_created(message: Message) -> None:
+    try:
+        await message.edit_reply_markup(
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[[InlineKeyboardButton(text="⏳ Ссылка создана", callback_data="noop")]]
+            )
+        )
+    except Exception:
+        log.info("Failed to disable payment button for message_id=%s", message.message_id, exc_info=True)
 
 
 async def _handle_not_enough_credits(message: Message, config: Config, session: UserSession) -> None:
@@ -6134,6 +6149,7 @@ async def payment_callback_handler(
             db=db,
             user_id=user_id,
             amount_cp=amount_cp,
+            package_id=package.package_id,
         )
         if existing_url:
             log.info(
@@ -6142,6 +6158,7 @@ async def payment_callback_handler(
                 user_id,
                 amount_cp,
             )
+            await _mark_payment_button_created(callback.message)
             await _send_payment_link(callback.message, existing_url)
             return
 
@@ -6186,14 +6203,16 @@ async def payment_callback_handler(
             purchased_credits=package.credits_int,
         )
         log.info(
-            "Created YooKassa payment %s credits=%s amount_cp=%s net_cp=%s idemp=%s",
+            "Created YooKassa payment %s user=%s credits=%s amount_cp=%s net_cp=%s idemp=%s",
             payment_id,
+            user_id,
             package.credits_int,
             amount_cp,
             amount_cp,
             idempotency_key,
         )
 
+        await _mark_payment_button_created(callback.message)
         await _send_payment_link(callback.message, confirmation_url)
 
 
