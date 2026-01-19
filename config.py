@@ -386,6 +386,7 @@ class Config:
     gs_payments_sheet: str = "payments"
     gs_jobs_sheet: str = "jobs"
     gs_errors_sheet: str = "errors"
+    credit_migration_enabled: bool = False
     pricing: PricingConfig = field(
         default_factory=lambda: PricingConfig(
             credit_price_rub=DEFAULT_CREDIT_PRICE_RUB,
@@ -885,6 +886,9 @@ def load_config() -> Config:
         gs_payments_sheet=payments_sheet,
         gs_jobs_sheet=jobs_sheet,
         gs_errors_sheet=errors_sheet,
+        credit_migration_enabled=_get_env_bool(
+            "CREDIT_MIGRATION_ENABLED", Config.credit_migration_enabled
+        ),
         pricing=pricing,
         credit_packages=_build_credit_packages(TOP_UP_PACKAGES),
         jobs_concurrency=_get_env_int("JOBS_CONCURRENCY", Config.jobs_concurrency),

@@ -332,12 +332,15 @@ async def _startup(state: ApplicationState, *, mode: str) -> None:
         }
 
     state.background_tasks.append(asyncio.create_task(state.db.backfill_user_profiles(_fetch_profile)))
-    try:
-        migrated = await state.db.migrate_credit_balances(state.config.generation_cost_credits)
-        if migrated:
-            log.info("Migrated %s legacy user balances", migrated)
-    except Exception:  # pragma: no cover - defensive migration guard
-        log.exception("Failed to migrate legacy balances to credit economy")
+    if state.config.credit_migration_enabled:
+        try:
+            migrated = await state.db.migrate_credit_balances(state.config.generation_cost_credits)
+            if migrated:
+                log.info("Migrated %s legacy user balances", migrated)
+        except Exception:  # pragma: no cover - defensive migration guard
+            log.exception("Failed to migrate legacy balances to credit economy")
+    else:
+        log.info("Credit migration disabled on startup")
     await state.job_queue.start()
 
     if state.yookassa_processor:
