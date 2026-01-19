@@ -136,8 +136,8 @@ class PostgresDatabase(DatabaseInterface):
         async with pool.acquire() as conn:
             value = await conn.fetchval(
                 """
-                INSERT INTO users (user_id, credits, created_at, updated_at)
-                VALUES ($1, $2, $3, $3)
+                INSERT INTO users (user_id, credits, economy_v2, created_at, updated_at)
+                VALUES ($1, $2, TRUE, $3, $3)
                 ON CONFLICT (user_id) DO UPDATE
                 SET credits = COALESCE(users.credits, 0) + EXCLUDED.credits,
                     economy_v2 = TRUE,
