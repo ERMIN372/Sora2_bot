@@ -35,6 +35,25 @@ at db/postgres_adapter.py:667
 - Это позволяет сохранить существующее значение в БД вместо попытки установить NULL
 - Исправление применено к методу `update_job()`, который используется при восстановлении stale Veo jobs
 
+### 🔴 Критическая ошибка #3: UNIQUE constraint violation на idempotency_key
+**Симптомы:**
+```
+Failed to insert job job_id=...
+Retrying submission after previous failure
+```
+
+**Причина:** При повторной попытке (retry) генерации видео:
+- Gemini API возвращает **новый** `job_id` (например, `bf3pg8770np3`)
+- Но бот использует **тот же** `idempotency_key` (для отслеживания дубликатов)
+- В БД есть UNIQUE INDEX на `idempotency_key`
+- При попытке INSERT с новым `job_id` но старым `idempotency_key` → UniqueViolation
+
+**Решение:**
+- Изменен `ON CONFLICT` clause в `create_job()` с `(job_id)` на `(idempotency_key)`
+- При конфликте теперь **обновляется** существующая запись новым `job_id`
+- Это позволяет корректно обрабатывать retry с новым operation name от Gemini
+- Идемпотентность сохраняется: один `idempotency_key` = одно задание в БД
+
 ### 📝 Отсутствие документации по деплою
 **Проблема:** Не было инструкций по настройке и запуску бота, что приводило к ошибкам конфигурации.
 
@@ -78,6 +97,17 @@ at db/postgres_adapter.py:667
   - Убрано исключение для `status_message_index` и `status_message_updated_at`
   - Теперь все поля со значением `None` исключаются из UPDATE
   - Предотвращает попытку установить NULL в NOT NULL колонки
+
+### Коммит 6: `1d611bd` + `ee2f0c2` - Обновления документации
+- ✅ **PR_DESCRIPTION.md** - обновлено с деталями NOT NULL fix
+- ✅ **debug_check_user.sql** - SQL скрипт для диагностики проблем с пользователями
+
+### Коммит 7: `64e80af` - Исправление UNIQUE constraint на idempotency_key
+- ✅ **db/postgres_adapter.py** - метод `create_job()`:
+  - Изменен `ON CONFLICT (job_id) DO NOTHING` → `ON CONFLICT (idempotency_key) ...`
+  - При конфликте обновляется `job_id`, `operation_name`, `status`, `updated_at`
+  - Корректно обрабатывает retry с новым job_id от Gemini API
+  - Сохраняет идемпотентность: один ключ = одна запись
 
 ## Технические детали
 
