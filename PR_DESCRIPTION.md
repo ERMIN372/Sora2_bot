@@ -6,7 +6,7 @@
 
 ## Проблемы, которые были исправлены
 
-### 🔴 Критическая ошибка: TypeError при запуске на Railway
+### 🔴 Критическая ошибка #1: TypeError при запуске на Railway
 **Симптомы:**
 ```
 TypeError: can't compare offset-naive and offset-aware datetimes
@@ -19,6 +19,21 @@ at jobs.py:1446
 - Заменены все `datetime.utcnow()` → `datetime.now(timezone.utc)` (22 места в 6 файлах)
 - Заменены `datetime.utcfromtimestamp()` → `datetime.fromtimestamp(tz=timezone.utc)` (2 места)
 - Улучшена функция `parse_datetime()` для автоматического добавления UTC timezone к naive datetime объектам из БД
+
+### 🔴 Критическая ошибка #2: NOT NULL constraint violation
+**Симптомы:**
+```
+asyncpg.exceptions.NotNullViolationError: null value in column
+"status_message_index" of relation "jobs" violates not-null constraint
+at db/postgres_adapter.py:667
+```
+
+**Причина:** При вызове `update_job()` без параметра `status_message_index`, код пытался явно установить `NULL` в колонку с `NOT NULL` constraint. PostgreSQL не применяет `DEFAULT` значения при UPDATE с явным `NULL`.
+
+**Решение:**
+- Изменена логика в `db/postgres_adapter.py:659`: теперь поля со значением `None` полностью исключаются из UPDATE запроса
+- Это позволяет сохранить существующее значение в БД вместо попытки установить NULL
+- Исправление применено к методу `update_job()`, который используется при восстановлении stale Veo jobs
 
 ### 📝 Отсутствие документации по деплою
 **Проблема:** Не было инструкций по настройке и запуску бота, что приводило к ошибкам конфигурации.
@@ -55,7 +70,18 @@ at jobs.py:1446
   - Обрабатывает datetime объекты напрямую из PostgreSQL
   - Фиксирует `_MAX_TS_DEFAULT` как timezone-aware
 
+### Коммит 4: `75a4a59` - Добавление PR description
+- ✅ **PR_DESCRIPTION.md** - шаблон описания для pull request
+
+### Коммит 5: `6aeeed0` - Исправление NOT NULL constraint
+- ✅ **db/postgres_adapter.py** - метод `update_job()`:
+  - Убрано исключение для `status_message_index` и `status_message_updated_at`
+  - Теперь все поля со значением `None` исключаются из UPDATE
+  - Предотвращает попытку установить NULL в NOT NULL колонки
+
 ## Технические детали
+
+### Исправление #1: Timezone-aware datetime
 
 **До исправления:**
 ```python
@@ -71,6 +97,30 @@ epoch = datetime.utcfromtimestamp(0)
 stale_cutoff = datetime.now(timezone.utc) - timedelta(hours=12)
 epoch = datetime.fromtimestamp(0, tz=timezone.utc)
 # Все datetime объекты теперь timezone-aware (UTC)
+```
+
+### Исправление #2: NOT NULL constraint
+
+**До исправления:**
+```python
+# ❌ В db/postgres_adapter.py:659
+for key, value in updates.items():
+    if value is None and key not in {"status_message_index", "status_message_updated_at"}:
+        continue
+    assignments.append(f"{key} = ${len(values) + 2}")
+    values.append(value)
+# Результат: UPDATE jobs SET status_message_index = NULL → NOT NULL constraint violation
+```
+
+**После исправления:**
+```python
+# ✅ В db/postgres_adapter.py:659
+for key, value in updates.items():
+    if value is None:
+        continue
+    assignments.append(f"{key} = ${len(values) + 2}")
+    values.append(value)
+# Результат: UPDATE jobs SET status = 'failed', error = '...' → status_message_index сохраняет старое значение
 ```
 
 ## Тестирование
@@ -111,7 +161,8 @@ curl http://localhost:8080/healthz
 
 ## Связанные issues
 
-Fixes: Railway deployment crash - "TypeError: can't compare offset-naive and offset-aware datetimes"
+Fixes: Railway deployment crash #1 - "TypeError: can't compare offset-naive and offset-aware datetimes"
+Fixes: Railway deployment crash #2 - "NotNullViolationError: null value in column 'status_message_index'"
 Resolves: Отсутствие документации по деплою
 Resolves: Устаревшие метки "Veo 2" в UI
 
@@ -124,8 +175,9 @@ Resolves: Устаревшие метки "Veo 2" в UI
 ---
 
 **Статистика:**
-- 📝 8 файлов изменено
-- ➕ 273 строки добавлено (включая документацию)
-- ➖ 30 строк удалено
-- 🔧 3 коммита
+- 📝 9 файлов изменено
+- ➕ 284 строки добавлено (включая документацию)
+- ➖ 31 строк удалено
+- 🔧 5 коммитов
 - ⏱️ 22 места с timezone fixes
+- 🔒 1 место с NOT NULL constraint fix
