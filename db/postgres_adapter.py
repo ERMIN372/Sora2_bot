@@ -79,8 +79,8 @@ class PostgresDatabase(DatabaseInterface):
         async with pool.acquire() as conn:
             row = await conn.fetchrow(
                 """
-                INSERT INTO users (user_id, username, first_name, last_name, created_at, updated_at)
-                VALUES ($1, $2, $3, $4, $5, $5)
+                INSERT INTO users (user_id, username, first_name, last_name, economy_v2, created_at, updated_at)
+                VALUES ($1, $2, $3, $4, TRUE, $5, $5)
                 ON CONFLICT (user_id) DO UPDATE
                 SET username = COALESCE(EXCLUDED.username, users.username),
                     first_name = COALESCE(EXCLUDED.first_name, users.first_name),
