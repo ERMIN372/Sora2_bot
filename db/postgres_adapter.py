@@ -656,7 +656,7 @@ class PostgresDatabase(DatabaseInterface):
         assignments = []
         values: List[Any] = []
         for key, value in updates.items():
-            if value is None and key not in {"status_message_index", "status_message_updated_at"}:
+            if value is None:
                 continue
             assignments.append(f"{key} = ${len(values) + 2}")
             values.append(value)
