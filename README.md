@@ -4,6 +4,28 @@ Sora2_bot — это Telegram-бот, который подключается к
 Veo и изображений через Google Gemini. Он управляет заданиями пользователей и
 обрабатывает платежи в Telegram Stars и через YooKassa.
 
+> **⚠️ ВАЖНО:** Перед запуском бота необходимо создать файл `.env` с конфигурацией!
+> См. раздел [Быстрый старт](#быстрый-старт) или [DEPLOYMENT.md](DEPLOYMENT.md) для подробных инструкций.
+
+## Быстрый старт
+
+```bash
+# 1. Создайте файл конфигурации
+cp .env.example .env
+
+# 2. Отредактируйте .env и установите обязательные параметры:
+#    - TELEGRAM_BOT_TOKEN (получить у @BotFather)
+#    - GEMINI_API_KEY (получить на https://aistudio.google.com)
+
+# 3. Запустите через Docker Compose
+docker-compose up -d
+
+# 4. Проверьте статус
+curl http://localhost:8080/healthz
+```
+
+Подробная инструкция по развертыванию → [DEPLOYMENT.md](DEPLOYMENT.md)
+
 ## Предварительные требования
 
 - Python версии 3.10 или новее.

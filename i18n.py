@@ -445,7 +445,7 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "web.return.success": "<h1>Оплата принята</h1><p>Спасибо за покупку!</p>",
         "web.return.canceled": "<h1>Оплата отменена</h1><p>Средства не списаны.</p>",
         "web.return.pending": "<h1>Платёж обрабатывается</h1><p>Проверьте баланс позже.</p>",
-        "errors.pro_unavailable": "Pro-версия недоступна. Используется Veo 2.",
+        "errors.pro_unavailable": "Pro-версия недоступна. Используется Veo 3.",
     }
 }
 
