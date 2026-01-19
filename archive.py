@@ -5,7 +5,7 @@ import mimetypes
 import os
 import re
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Literal, Optional
 
 import aiohttp
@@ -545,7 +545,7 @@ class ArchivePublisher:
             user_part = f"{user_part} (id {payload.user_id})"
         base_model = f"Модель: {self._escape_markdown(model)}"
         base_user = f"Пользователь: {self._escape_markdown(user_part)}"
-        sent_at = payload.sent_at or datetime.utcnow()
+        sent_at = payload.sent_at or datetime.now(timezone.utc)
         timestamp = sent_at.strftime("%Y-%m-%d %H:%M UTC")
         base_time = f"Дата: {self._escape_markdown(timestamp)}"
         size_bytes = payload.resolved_file_size() or 0
@@ -658,7 +658,7 @@ class ArchivePublisher:
             },
         )
         record = ArchiveLogRecord(
-            ts=datetime.utcnow(),
+            ts=datetime.now(timezone.utc),
             corr_id=payload.corr_id,
             archive_status=archive_status,
             channel_id=self._channel_id,

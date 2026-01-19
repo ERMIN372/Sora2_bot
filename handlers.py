@@ -3099,7 +3099,7 @@ async def _launch_order(
             },
         )
         error_record = ErrorLogRecord(
-            ts=datetime.utcnow(),
+            ts=datetime.now(timezone.utc),
             user_id=user_id,
             username=user.username,
             corr_id=corr_id,
@@ -3468,7 +3468,7 @@ async def _launch_order(
             log.exception("Failed to refund credits after configuration error")
         await _release_lock("submit_failed", "provider_unavailable")
         error_record = ErrorLogRecord(
-            ts=datetime.utcnow(),
+            ts=datetime.now(timezone.utc),
             user_id=user_id,
             username=user.username,
             corr_id=corr_id,
@@ -3544,7 +3544,7 @@ async def _launch_order(
             log.exception("Failed to refund credits after Sora model unavailable")
         await _release_lock("submit_failed", "model_unavailable")
         error_record = ErrorLogRecord(
-            ts=datetime.utcnow(),
+            ts=datetime.now(timezone.utc),
             user_id=user_id,
             username=user.username,
             corr_id=corr_id,
@@ -3674,7 +3674,7 @@ async def _launch_order(
             log.exception("Failed to refund credits after submit error")
         await _release_lock("submit_failed", exc.error_type or "submit_failed")
         error_record = ErrorLogRecord(
-            ts=datetime.utcnow(),
+            ts=datetime.now(timezone.utc),
             user_id=user_id,
             username=user.username,
             corr_id=corr_id,
@@ -3779,7 +3779,7 @@ async def _launch_order(
         await _release_lock("submit_failed", "unexpected_error")
         short = _shorten(str(exc) or "Неизвестная ошибка")
         error_record = ErrorLogRecord(
-            ts=datetime.utcnow(),
+            ts=datetime.now(timezone.utc),
             user_id=user_id,
             username=user.username,
             corr_id=corr_id,
@@ -3908,7 +3908,7 @@ async def _persist_delivery_metadata(
     except Exception:
         log.exception("Failed to persist delivery metadata job_id=%s stage=%s", job.id, stage)
         error_record = ErrorLogRecord(
-            ts=datetime.utcnow(),
+            ts=datetime.now(timezone.utc),
             user_id=job.user_id,
             username=job.username,
             corr_id=job.corr_id,
@@ -4922,7 +4922,7 @@ async def _deliver_remote_media(
         file_size = downloaded.size
 
     if isinstance(job.created_at, datetime):
-        elapsed = (datetime.utcnow() - job.created_at).total_seconds()
+        elapsed = (datetime.now(timezone.utc) - job.created_at).total_seconds()
         if elapsed >= 0:
             record_timing_metric("first_frame_seconds", elapsed)
 
@@ -5012,7 +5012,7 @@ async def _handle_delivery_failure(
     else:
         provider_error_message = ""
     error_record = ErrorLogRecord(
-        ts=datetime.utcnow(),
+        ts=datetime.now(timezone.utc),
         user_id=job.user_id,
         username=job.username,
         corr_id=job.corr_id,
@@ -5103,7 +5103,7 @@ def _build_archive_payload_from_sent(
         filename=sent.filename,
         duration_seconds=duration,
         delivery_method=sent.method,
-        sent_at=datetime.utcnow(),
+        sent_at=datetime.now(timezone.utc),
         ref_file_id=ref_file_id,
     )
     return payload

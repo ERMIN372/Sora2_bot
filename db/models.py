@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from decimal import Decimal, ROUND_HALF_UP
 from typing import Any, Dict, Mapping, Optional
 
@@ -96,16 +96,23 @@ class ArchiveLogRecord:
     duration_seconds: Optional[int] = None
 
 
-_MAX_TS_DEFAULT = datetime.utcfromtimestamp(0)
+_MAX_TS_DEFAULT = datetime.fromtimestamp(0, tz=timezone.utc)
 
 
 def parse_datetime(value: Any) -> datetime:
     if not value:
         return _MAX_TS_DEFAULT
     if isinstance(value, datetime):
+        # If datetime is naive, assume UTC
+        if value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc)
         return value
     try:
-        return datetime.fromisoformat(str(value))
+        dt = datetime.fromisoformat(str(value))
+        # If parsed datetime is naive, assume UTC
+        if dt.tzinfo is None:
+            return dt.replace(tzinfo=timezone.utc)
+        return dt
     except (TypeError, ValueError):
         return _MAX_TS_DEFAULT
 

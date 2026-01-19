@@ -14,7 +14,7 @@ import re
 import time
 import uuid
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Mapping, Optional, Tuple
 
@@ -590,7 +590,7 @@ class JobQueue:
         except Exception:
             log.exception("Failed to persist job record job_id=%s stage=%s", record.id, stage)
             error_record = ErrorLogRecord(
-                ts=datetime.utcnow(),
+                ts=datetime.now(timezone.utc),
                 user_id=record.user_id,
                 username=record.username,
                 corr_id=record.corr_id,
@@ -843,7 +843,7 @@ class JobQueue:
         except Exception:
             log.exception("Refunding credits failed for timeout job %s", pending.job_id)
         error_record = ErrorLogRecord(
-            ts=datetime.utcnow(),
+            ts=datetime.now(timezone.utc),
             user_id=pending.user_id,
             username=pending.username,
             corr_id=pending.corr_id,
@@ -1062,7 +1062,7 @@ class JobQueue:
         inline_assets_payload = []
         if isinstance(submission_payload.get("inline_assets"), list):
             inline_assets_payload = submission_payload.get("inline_assets")  # type: ignore[assignment]
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         effective_cost = credits_cost or self._config.generation_cost_credits
         is_flash_inline = (
             provider_key == "gemini-image"
@@ -1284,7 +1284,7 @@ class JobQueue:
             )
             return existing
 
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         record = GenerationJobRecord(
             id=job_id,
             user_id=user_id,
@@ -1433,9 +1433,9 @@ class JobQueue:
 
     async def _recover_pending_jobs(self) -> None:
         pending = await self._db.list_pending_jobs(limit=100)
-        stale_cutoff = datetime.utcnow() - timedelta(hours=12)
+        stale_cutoff = datetime.now(timezone.utc) - timedelta(hours=12)
         stale_skipped = 0
-        epoch = datetime.utcfromtimestamp(0)
+        epoch = datetime.fromtimestamp(0, tz=timezone.utc)
         for job in pending:
             asset_kind = (
                 ASSET_KIND_IMAGE
@@ -2206,7 +2206,7 @@ class JobQueue:
                 except Exception:
                     log.exception("Refunding credits failed for job %s", pending.job_id)
                 error_record = ErrorLogRecord(
-                    ts=datetime.utcnow(),
+                    ts=datetime.now(timezone.utc),
                     user_id=pending.user_id,
                     username=pending.username,
                     corr_id=pending.corr_id,
@@ -2897,7 +2897,7 @@ class JobQueue:
             operation_snippet = str(snippet_source)[:512]
 
         error_record = ErrorLogRecord(
-            ts=datetime.utcnow(),
+            ts=datetime.now(timezone.utc),
             user_id=pending.user_id,
             username=pending.username,
             corr_id=pending.corr_id,
