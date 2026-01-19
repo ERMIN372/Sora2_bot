@@ -12,7 +12,7 @@ import re
 import time
 import zipfile
 from collections import defaultdict
-from datetime import datetime
+from datetime import datetime, timezone
 from fractions import Fraction
 from pathlib import Path
 from hashlib import sha256
@@ -363,7 +363,7 @@ def _ensure_trace_dir(path: Path) -> Optional[Path]:
 
 
 def _trace_key(prefix: str, corr_id: Optional[str]) -> str:
-    timestamp = datetime.utcnow().strftime("%Y%m%dT%H%M%S%f")
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%f")
     safe_corr = (corr_id or "no_corr").replace(os.sep, "_")[:64]
     return f"{timestamp}_{prefix}_{safe_corr}"
 
@@ -1527,7 +1527,7 @@ class GeminiGenerativeClient(BaseProviderClient):
             f":{method}" if method else None,
         )
         payload: Dict[str, Any] = {
-            "ts": datetime.utcnow().isoformat(timespec="milliseconds") + "Z",
+            "ts": datetime.now(timezone.utc).isoformat(timespec="milliseconds") + "Z",
             "event": event,
             "provider": self.provider_name,
             "environment": getattr(self, "_environment", ""),

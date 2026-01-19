@@ -7,7 +7,7 @@ import hmac
 import json
 import logging
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from ipaddress import ip_address, ip_network
 from typing import Any, Dict, Optional
@@ -492,7 +492,7 @@ class YooKassaProcessor:
 
     @staticmethod
     def _now_iso() -> str:
-        return datetime.utcnow().replace(microsecond=0).isoformat()
+        return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
     def _resolve_user_id(self, metadata: Dict[str, Any], existing: Optional[Dict[str, Any]]) -> Optional[int]:
         candidate = metadata.get("user_id")
