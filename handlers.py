@@ -3227,7 +3227,17 @@ async def _launch_order(
         },
     )
 
-    if not await db.deduct_credit(user_id, credits_cost):
+    try:
+        deducted = await db.deduct_credit(user_id, credits_cost)
+    except Exception:
+        log.exception("Critical: Failed to deduct credits for user %s", user_id)
+        await _release_lock("submit_failed", "deduction_error")
+        await callback.message.answer(
+            "Произошла ошибка при списании кредитов. Попробуйте позже."
+        )
+        return
+
+    if not deducted:
         log_event(
             level="ERROR",
             event="error",

@@ -403,6 +403,17 @@ class YooKassaProcessor:
                 payment_id,
             )
             return
+
+        # Check if bonus already credited for this payment (idempotency)
+        credited_payment_id = referral_row.get("credited_for_payment_id")
+        if credited_payment_id == payment_id:
+            log.info(
+                "Referral bonus already credited for payment_id=%s referrer=%s",
+                payment_id,
+                referrer_id,
+            )
+            return
+
         bonus_credits = 100
         try:
             await self._db.ensure_user(referrer_id, None)
