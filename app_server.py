@@ -270,8 +270,24 @@ class YooKassaProcessor:
             )
             return
 
+        # Mark payment as processed BEFORE crediting to prevent double-processing
+        await self._db.update_payment_status_by_ext(
+            "yookassa",
+            payment_id,
+            "succeeded",
+            credits_added=0,
+            metadata={**metadata, **metadata_update},
+            idempotency_key=idempotency_key,
+            processed_at=processed_at,
+            package_id=package.package_id,
+            purchased_credits=purchased_credits,
+        )
+
+        # Now credit the user (if this fails, payment is already marked as processed)
         balance_after = await self._db.add_credits(user_id_int, purchased_credits)
         self.credits_credited_total += purchased_credits
+
+        # Update metadata with actual credits added
         await self._db.update_payment_status_by_ext(
             "yookassa",
             payment_id,
