@@ -85,6 +85,7 @@ class PostgresDatabase(DatabaseInterface):
                 SET username = COALESCE(EXCLUDED.username, users.username),
                     first_name = COALESCE(EXCLUDED.first_name, users.first_name),
                     last_name = COALESCE(EXCLUDED.last_name, users.last_name),
+                    economy_v2 = TRUE,
                     updated_at = NOW()
                 RETURNING *
                 """,
