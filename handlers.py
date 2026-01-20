@@ -3343,9 +3343,16 @@ async def _launch_order(
                     await db.add_credits(user_id, credits_cost)
                     refunded = True
                 except Exception:  # pragma: no cover - defensive refund
-                    log.exception("Failed to refund credits after inline delivery error")
-                await callback.message.answer(i18n.t("status.delivery_generic"))
-                await _release_lock("inline_failed", "failed")
+                    log.exception("CRITICAL: Failed to refund %s credits to user %s after inline delivery error", credits_cost, user_id)
+
+                if refunded:
+                    await callback.message.answer(i18n.t("status.delivery_generic"))
+                else:
+                    await callback.message.answer(
+                        f"{i18n.t('status.delivery_generic')}\n\n"
+                        f"⚠️ Возврат {credits_cost} кредитов не удался. Обратитесь в поддержку с corr_id: {corr_id}"
+                    )
+                await _release_lock("inline_failed", "failed" if refunded else "failed_no_refund")
                 log_event(
                     level="INFO",
                     event="refund",
