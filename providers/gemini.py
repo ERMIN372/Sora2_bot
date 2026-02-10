@@ -88,6 +88,7 @@ _MODEL_CAPABILITIES: Dict[str, Dict[str, Any]] = {}
 
 
 _TRACE_HISTORY: DefaultDict[str, List[Dict[str, Any]]] = defaultdict(list)
+_TRACE_HISTORY_MAX_KEYS: int = 5000  # hard cap on tracked correlation IDs
 
 
 _IMAGE_RETRYABLE_REASONS = {"IMAGE_OTHER", "NO_IMAGE", "STOP"}
@@ -401,6 +402,9 @@ def _coerce_json(value: Any, depth: int = 0) -> Any:
 def _register_trace_event(corr_id: Optional[str], payload: Dict[str, Any]) -> None:
     if not corr_id:
         corr_id = "no_corr"
+    if len(_TRACE_HISTORY) >= _TRACE_HISTORY_MAX_KEYS and corr_id not in _TRACE_HISTORY:
+        oldest = next(iter(_TRACE_HISTORY))
+        del _TRACE_HISTORY[oldest]
     history = _TRACE_HISTORY[corr_id]
     history.append(payload)
     if len(history) > 20:

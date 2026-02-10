@@ -1,29 +1,38 @@
 name: Claude Task Executor
-   
+
    on:
      issues:
        types: [opened, labeled]
-   
+
    jobs:
      execute:
        if: contains(github.event.issue.labels.*.name, 'claude-task')
        runs-on: ubuntu-latest
-       
+
        steps:
          - uses: actions/checkout@v4
-         
+
          - name: Parse task
            id: parse
-           run: |
-             TASK=$(echo "${{ github.event.issue.body }}" | sed -n '/```task/,/```/p' | sed '1d;$d')
-             echo "task=$TASK" >> $GITHUB_OUTPUT
-         
+           uses: actions/github-script@v7
+           with:
+             script: |
+               const body = context.payload.issue.body || '';
+               const match = body.match(/```task\s*\n([\s\S]*?)```/);
+               const task = match ? match[1].trim() : '';
+               if (!task) {
+                 core.setFailed('No task block found in issue body');
+                 return;
+               }
+               core.setOutput('task', task);
+
          - name: Execute with Claude
            env:
              ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
              GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+             TASK_BODY: ${{ steps.parse.outputs.task }}
            run: |
              pip install anthropic PyGithub
              python .github/scripts/execute_task.py \
-               --task "${{ steps.parse.outputs.task }}" \
+               --task "$TASK_BODY" \
                --issue-number ${{ github.event.issue.number }}
