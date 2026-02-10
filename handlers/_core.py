@@ -129,7 +129,7 @@ import services
 from services.gemini_catalog import list_veo_video_models
 
 
-_BASE_DIR = Path(__file__).resolve().parent
+_BASE_DIR = Path(__file__).resolve().parent.parent  # project root
 from services.gemini_client import get_media_client, get_text_client
 from services.gemini_downloader import (
     GeminiConfigurationError,
@@ -172,7 +172,7 @@ TREND_VIDEO_PRICE_CREDITS = 99
 
 log = logging.getLogger(__name__)
 
-_HANDLERS_DIR = Path(__file__).resolve().parent
+_HANDLERS_DIR = Path(__file__).resolve().parent.parent  # project root
 
 _BOT_USERNAME_CACHE: str = ""
 
@@ -285,55 +285,14 @@ _VIDEO_PROVIDER_PRICE_KEYS: Dict[str, str] = {
 SUPPORTED_SORA_MODELS: Set[str] = set(SORA_SUPPORTED_MODELS)
 
 
-class GenerationStates(StatesGroup):
-    """Conversation states for collecting generation inputs."""
-
-    video_model = State()
-    video_mode = State()
-    image_model = State()
-    image_mode = State()
-    text_prompt = State()
-    photo_prompt = State()
-
-
-class AutoStyleStates(StatesGroup):
-    """States for navigating auto-style flows (trends and Nano Banana)."""
-
-    trends_menu = State()
-    choosing_styles = State()
-    choosing_prompt_mode = State()
-
-
-class ChatGPTState(StatesGroup):
-    """Conversation states for the GPT-4.1 assistant."""
-
-    awaiting_input = State()
-
-
-class TarotStates(StatesGroup):
-    """Conversation states for tarot spreads."""
-
-    choosing_type = State()
-    waiting_for_question = State()
-
-
-class TrendStates(StatesGroup):
-    """Conversation states for preset trend videos."""
-
-    choosing_trend = State()
-    choosing_model = State()
-    answering_params = State()
-
-
-class AdminStates(StatesGroup):
-    """FSM states for the administrator panel."""
-
-    menu = State()
-    broadcast_message = State()
-    broadcast_confirm = State()
-    direct_target = State()
-    direct_message = State()
-    direct_confirm = State()
+from handlers._states import (  # noqa: E402
+    AdminStates,
+    AutoStyleStates,
+    ChatGPTState,
+    GenerationStates,
+    TarotStates,
+    TrendStates,
+)
 
 
 _ADMIN_BROADCAST_THROTTLE_SECONDS = 0.05

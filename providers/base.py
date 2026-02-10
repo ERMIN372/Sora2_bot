@@ -157,19 +157,31 @@ def extract_url(entry: Mapping[str, Any]) -> Optional[str]:
 
 
 async def stream_response_to_file(response: Any, file_path: Path) -> int:
-    """Stream an aiohttp response body to *file_path*, return bytes written."""
+    """Stream an aiohttp response body to *file_path*, return bytes written.
+
+    On error the parent directory is cleaned up to prevent temp-dir leaks.
+    """
+    import shutil
+
     size = 0
-    with open(file_path, "wb") as output:
-        if hasattr(response, "aiter_bytes"):
-            async for chunk in response.aiter_bytes():
-                if chunk:
-                    output.write(chunk)
-                    size += len(chunk)
-        else:
-            async for chunk in response.content.iter_chunked(65536):
-                if chunk:
-                    output.write(chunk)
-                    size += len(chunk)
+    try:
+        with open(file_path, "wb") as output:
+            if hasattr(response, "aiter_bytes"):
+                async for chunk in response.aiter_bytes():
+                    if chunk:
+                        output.write(chunk)
+                        size += len(chunk)
+            else:
+                async for chunk in response.content.iter_chunked(65536):
+                    if chunk:
+                        output.write(chunk)
+                        size += len(chunk)
+    except BaseException:
+        # Clean up the temp directory to avoid disk leaks.
+        parent = file_path.parent
+        if parent != Path("/") and parent.exists():
+            shutil.rmtree(parent, ignore_errors=True)
+        raise
     return size
 
 

@@ -835,6 +835,8 @@ class VeoVideoClient(BaseProviderClient):
         try:
             path.write_bytes(payload)
         except Exception as exc:  # pragma: no cover - defensive
+            import shutil
+            shutil.rmtree(target_dir, ignore_errors=True)
             raise ProviderAPIError(
                 provider=self.provider_name,
                 status_code=500,

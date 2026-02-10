@@ -769,6 +769,24 @@ def _create_base_app() -> FastAPI:
     async def healthz() -> Dict[str, bool]:
         return {"ok": True}
 
+    @app.get("/ready", include_in_schema=False)
+    async def readiness() -> JSONResponse:
+        """Readiness probe: checks that DB is reachable."""
+        checks: Dict[str, bool] = {}
+        try:
+            if hasattr(app.state, "db") and app.state.db is not None:
+                await app.state.db.healthcheck()
+                checks["db"] = True
+            else:
+                checks["db"] = False
+        except Exception:
+            checks["db"] = False
+        ok = all(checks.values())
+        return JSONResponse(
+            content={"ok": ok, **checks},
+            status_code=200 if ok else 503,
+        )
+
     @app.get("/", include_in_schema=False)
     async def root() -> Dict[str, str | bool]:
         return {"ok": True, "service": "sora2-bot", "mode": "webhook"}
@@ -797,6 +815,7 @@ def create_app(
         log.info("YooKassa integration disabled or misconfigured")
 
     app = _create_base_app()
+    app.state.db = db
 
     app.include_router(_telegram_router(dp, bot))
     app.include_router(_yookassa_router(config=config, processor=processor))

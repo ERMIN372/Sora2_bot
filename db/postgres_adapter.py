@@ -58,6 +58,14 @@ class PostgresDatabase(DatabaseInterface):
             await self._pool.close()
             self._pool = None
 
+    async def healthcheck(self) -> bool:
+        pool = self._pool
+        if not pool:
+            return False
+        async with pool.acquire() as conn:
+            await conn.execute("SELECT 1")
+        return True
+
     def _require_pool(self) -> asyncpg.Pool:
         if not self._pool:
             raise RuntimeError("Postgres pool is not initialised; call init() first")
