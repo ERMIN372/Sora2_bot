@@ -29,6 +29,10 @@ from .base import (
     _sanitize_headers,
     _serialise_for_log,
     _truncate,
+    extract_url,
+    iter_nodes,
+    stream_response_to_file,
+    validate_download_url,
 )
 from services.payload_sanitize import (
     log_removed_keys,
@@ -71,35 +75,8 @@ def _infer_aspect_ratio(size: Optional[str]) -> Optional[str]:
     return f"{width // divisor}:{height // divisor}"
 
 
-def _iter_nodes(value: Any) -> Iterable[Dict[str, Any]]:
-    stack: list[Any] = [value]
-    seen: set[int] = set()
-    while stack:
-        current = stack.pop()
-        if isinstance(current, dict):
-            identifier = id(current)
-            if identifier in seen:
-                continue
-            seen.add(identifier)
-            yield current
-            stack.extend(current.values())
-        elif isinstance(current, (list, tuple)):
-            stack.extend(current)
-
-
-def _extract_url(entry: Dict[str, Any]) -> Optional[str]:
-    for key in ("download_url", "url", "video_url", "asset_url"):
-        value = entry.get(key)
-        if isinstance(value, str) and value:
-            return value
-    for nested_key in ("file", "video", "asset"):
-        nested = entry.get(nested_key)
-        if isinstance(nested, dict):
-            for key in ("download_url", "url"):
-                value = nested.get(key)
-                if isinstance(value, str) and value:
-                    return value
-    return None
+_iter_nodes = iter_nodes
+_extract_url = extract_url
 
 
 def _extract_base64(entry: Dict[str, Any]) -> Optional[str]:
@@ -915,6 +892,7 @@ class SoraVideoClient(BaseProviderClient):
         headers = self._build_headers()
         headers.pop("Content-Type", None)
         headers["Accept"] = "video/mp4" if fmt == "mp4" else "video/webm"
+        validate_download_url(url)
         session = await self._ensure_session()
         timeout = aiohttp.ClientTimeout(
             total=self._config.request_read_timeout or None,
@@ -951,18 +929,7 @@ class SoraVideoClient(BaseProviderClient):
                     if status == 200:
                         target_dir = Path(tempfile.mkdtemp(prefix="sora-video-"))
                         file_path = target_dir / f"{video_id}.{fmt}"
-                        size = 0
-                        with open(file_path, "wb") as output:
-                            if hasattr(response, "aiter_bytes"):
-                                async for chunk in response.aiter_bytes():
-                                    if chunk:
-                                        output.write(chunk)
-                                        size += len(chunk)
-                            else:
-                                async for chunk in response.content.iter_chunked(65536):
-                                    if chunk:
-                                        output.write(chunk)
-                                        size += len(chunk)
+                        size = await stream_response_to_file(response, file_path)
                         meta["bytes"] = size
                         meta["file_path"] = str(file_path)
                         meta["note"] = "success"
