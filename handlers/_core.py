@@ -1355,15 +1355,24 @@ STATUS_MESSAGES = StatusMessageManager()
 
 def _main_keyboard(config: Config) -> ReplyKeyboardMarkup:
     keyboard: List[List[KeyboardButton]] = [
+        # Primary actions — full width for visibility
         [KeyboardButton(text=i18n.t("buttons.generate_text"))],
         [KeyboardButton(text=i18n.t("buttons.generate_photo"))],
-        [KeyboardButton(text=i18n.t("buttons.balance"))],
-        [KeyboardButton(text=i18n.t("buttons.top_up"))],
+        # Secondary actions — 2-column compact layout
+        [
+            KeyboardButton(text=i18n.t("buttons.trends")),
+            KeyboardButton(text=i18n.t("buttons.tarot")),
+        ],
+        [
+            KeyboardButton(text=i18n.t("buttons.chatgpt")),
+        ],
+        # Utility row
+        [
+            KeyboardButton(text=i18n.t("buttons.balance")),
+            KeyboardButton(text=i18n.t("buttons.top_up")),
+        ],
         [KeyboardButton(text=i18n.t("buttons.help"))],
     ]
-    keyboard.append([KeyboardButton(text=i18n.t("buttons.trends"))])
-    keyboard.append([KeyboardButton(text=i18n.t("buttons.tarot"))])
-    keyboard.append([KeyboardButton(text=i18n.t("buttons.chatgpt"))])
     return ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True)
 
 
@@ -1563,10 +1572,61 @@ def _build_generation_in_progress_keyboard() -> InlineKeyboardMarkup:
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text="⏳ Генерация идёт",
+                    text="⏳ Генерация идёт…",
                     callback_data="order:busy",
                 )
             ]
+        ]
+    )
+
+
+def _build_post_generation_keyboard(category: str) -> InlineKeyboardMarkup:
+    """Keyboard shown after successful generation — lets user quickly re-generate."""
+    if category == "image":
+        return InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(
+                        text=i18n.t("buttons.generate_again"),
+                        callback_data="postgen:again:image",
+                    ),
+                    InlineKeyboardButton(
+                        text=i18n.t("buttons.to_menu"),
+                        callback_data="postgen:menu",
+                    ),
+                ],
+            ]
+        )
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=i18n.t("buttons.generate_again"),
+                    callback_data="postgen:again:video",
+                ),
+                InlineKeyboardButton(
+                    text=i18n.t("buttons.to_menu"),
+                    callback_data="postgen:menu",
+                ),
+            ],
+        ]
+    )
+
+
+def _build_retry_keyboard(category: str) -> InlineKeyboardMarkup:
+    """Keyboard shown after failed generation — lets user retry or go back."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=i18n.t("buttons.retry"),
+                    callback_data=f"postgen:again:{category}",
+                ),
+                InlineKeyboardButton(
+                    text=i18n.t("buttons.to_menu"),
+                    callback_data="postgen:menu",
+                ),
+            ],
         ]
     )
 
@@ -1633,9 +1693,19 @@ def _build_mode_keyboard(category: Literal["video", "image"]) -> InlineKeyboardM
 async def _send_balance_info(message: Message, db: Database) -> None:
     user_id = await _ensure_user(message, db)
     credits = await db.get_user_credits(user_id)
-    balance_text = i18n.t("balance.info", credits=credits)
-    balance_text += "\n\nЗа пополнение по твоей ссылке: +100 кредитов."
-    await message.answer(balance_text, reply_markup=_build_balance_keyboard())
+    credits_text = format_credits(credits)
+    balance_text = i18n.t("balance.info", credits=SafeText(credits_text))
+    # Show spending hint
+    video_count = int(credits) // 89 if credits >= 89 else 0
+    image_count = int(credits) // 5 if credits >= 5 else 0
+    if video_count > 0 or image_count > 0:
+        balance_text += i18n.t(
+            "balance.info_hint",
+            video_count=video_count,
+            image_count=image_count,
+        )
+    balance_text += "\n\n🎁 За пополнение по твоей ссылке: <b>+100 кредитов</b>"
+    await message.answer(balance_text, reply_markup=_build_balance_keyboard(), parse_mode="HTML")
 
 
 async def _build_referral_response(bot: Bot, user_id: int) -> tuple[Optional[str], Optional[str]]:
@@ -2071,6 +2141,7 @@ async def _send_main_menu(message: Message, config: Config) -> None:
             image_model=_image_model_description(config),
         ),
         reply_markup=_main_keyboard(config),
+        parse_mode="HTML",
     )
 
 
@@ -2655,7 +2726,7 @@ async def _send_order_confirmation(
                 price=price_text,
             )
     keyboard = _build_confirmation_keyboard(can_launch=can_launch, include_back=include_back)
-    return await bot.send_message(chat_id, body, reply_markup=keyboard)
+    return await bot.send_message(chat_id, body, reply_markup=keyboard, parse_mode="HTML")
 
 
 async def flow_back_callback_handler(
@@ -2831,10 +2902,10 @@ async def _send_payment_showcase(bot: Bot, chat_id: int, config: Config) -> None
     text = _format_packages_list(config)
     keyboard = _build_packages_keyboard(config)
     if keyboard is not None:
-        await bot.send_message(chat_id, text, reply_markup=keyboard)
+        await bot.send_message(chat_id, text, reply_markup=keyboard, parse_mode="HTML")
     else:
         body = f"{text}\n\n{i18n.t('payment.unavailable')}"
-        await bot.send_message(chat_id, body.strip())
+        await bot.send_message(chat_id, body.strip(), parse_mode="HTML")
 
 
 PAYMENT_REUSE_WINDOW_MINUTES = 15
@@ -3013,8 +3084,20 @@ async def _mark_payment_button_created(message: Message) -> None:
         log.info("Failed to disable payment button for message_id=%s", message.message_id, exc_info=True)
 
 
-async def _handle_not_enough_credits(message: Message, config: Config, session: UserSession) -> None:
-    await message.answer(i18n.t("flow.not_enough"))
+async def _handle_not_enough_credits(
+    message: Message,
+    config: Config,
+    session: UserSession,
+    *,
+    deficit: Optional[int] = None,
+) -> None:
+    if deficit is not None and deficit > 0:
+        await message.answer(
+            i18n.t("flow.not_enough", deficit=format_credits(deficit)),
+            parse_mode="HTML",
+        )
+    else:
+        await message.answer(i18n.t("flow.not_enough_generic"), parse_mode="HTML")
     session.awaiting_payment = True
     await _send_payment_showcase(message.bot, message.chat.id, config)
 
@@ -3041,7 +3124,8 @@ async def _show_confirmation_and_balance(
         can_launch=can_launch,
     )
     if not can_launch:
-        await _handle_not_enough_credits(message, config, session)
+        deficit = int(required - credits)
+        await _handle_not_enough_credits(message, config, session, deficit=deficit)
 
 
 async def _launch_order(
@@ -3965,6 +4049,15 @@ async def _send_job_update(
             await STATUS_MESSAGES.mark_failed(
                 bot=dp.bot, db=db, job=job, text=error_text, terminal_state="failed"
             )
+            content_cat = "image" if (job.content_type or "video") == "image" else "video"
+            try:
+                await dp.bot.send_message(
+                    job.user_id,
+                    "👇 Попробуйте ещё раз или вернитесь в меню:",
+                    reply_markup=_build_retry_keyboard(content_cat),
+                )
+            except Exception:  # pragma: no cover - non-critical
+                log.debug("Failed to send retry keyboard for user_id=%s", job.user_id)
             return
         if status == "timeout":
             timeout_text = i18n.t(
@@ -3977,6 +4070,15 @@ async def _send_job_update(
                 text=timeout_text,
                 terminal_state="timeout",
             )
+            content_cat = "image" if (job.content_type or "video") == "image" else "video"
+            try:
+                await dp.bot.send_message(
+                    job.user_id,
+                    "👇 Попробуйте ещё раз или вернитесь в меню:",
+                    reply_markup=_build_retry_keyboard(content_cat),
+                )
+            except Exception:  # pragma: no cover - non-critical
+                log.debug("Failed to send retry keyboard for user_id=%s", job.user_id)
             return
         if status == "refunded":
             refunded_text = job.error or i18n.t("status.delivery_generic")
@@ -4081,6 +4183,16 @@ async def _send_job_update(
                 )
             extra_payload.pop("trend", None)
         increment_metric("deliver_success_total")
+        # Send post-generation action buttons
+        content_cat = "image" if (job.content_type or "video") == "image" else "video"
+        try:
+            await dp.bot.send_message(
+                job.user_id,
+                "👇 Что дальше?",
+                reply_markup=_build_post_generation_keyboard(content_cat),
+            )
+        except Exception:  # pragma: no cover - non-critical
+            log.debug("Failed to send post-gen keyboard for user_id=%s", job.user_id)
         if archive:
             payload = _build_archive_payload_from_sent(job, sent_info)
             if payload:
@@ -5155,6 +5267,7 @@ async def help_command(
         await message.answer(
             _render_help_text(config),
             reply_markup=_build_help_keyboard(config),
+            parse_mode="HTML",
         )
     except Exception:
         success = False
@@ -6043,7 +6156,8 @@ async def order_callback_handler(
         session.awaiting_payment = False
         await state.finish()
         await callback.message.answer(
-            _render_help_text(config), reply_markup=_main_keyboard(config)
+            _render_help_text(config), reply_markup=_main_keyboard(config),
+            parse_mode="HTML",
         )
         return
     if not order:
@@ -7574,6 +7688,32 @@ async def photo_message_handler(
     await handle_photo_input(message, state, db, config)
 
 
+async def postgen_callback_handler(
+    callback: CallbackQuery,
+    state: FSMContext,
+    db: Database,
+    config: Config,
+) -> None:
+    """Handle post-generation action buttons (retry / generate again / menu)."""
+    await safe_callback_answer(callback)
+    data = callback.data or ""
+    if data == "postgen:menu":
+        await state.finish()
+        if callback.message:
+            await _send_main_menu(callback.message, config)
+        return
+    if data.startswith("postgen:again:"):
+        category = data.split(":")[-1]
+        await state.finish()
+        if callback.message:
+            if category == "image":
+                await generate_image_menu(callback.message, db, state, config)
+            else:
+                await generate_video_menu(callback.message, db, state, config)
+        return
+    await safe_callback_answer(callback)
+
+
 def register_handlers(
     dp: Dispatcher,
     *,
@@ -7945,6 +8085,11 @@ def register_handlers(
     dp.register_callback_query_handler(
         balance_callback_handler,
         lambda call: call.data == "balance:ref_link",
+        state="*",
+    )
+    dp.register_callback_query_handler(
+        lambda call, state: postgen_callback_handler(call, state, db, config),
+        lambda call: call.data and call.data.startswith("postgen:"),
         state="*",
     )
 

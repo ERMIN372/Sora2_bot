@@ -18,10 +18,14 @@ if TYPE_CHECKING:  # pragma: no cover
 
 
 _DEFAULT_PHRASES: Sequence[str] = (
-    "Генерация идёт…",
-    "Ещё немного…",
-    "Подчищаю кадры…",
-    "Почти готово…",
+    "⚙️ Генерирую…",
+    "🔄 Обрабатываю кадры…",
+    "🎨 Накладываю эффекты…",
+    "✨ Финальные штрихи…",
+    "📐 Выравниваю композицию…",
+    "🎬 Монтирую…",
+    "⏳ Ещё чуть-чуть…",
+    "🪄 Почти готово…",
 )
 
 _MAX_EDITS = 12
@@ -97,7 +101,7 @@ class StatusMessageManager:
                     job.status_message_index or -1
                 )
                 try:
-                    message = await bot.send_message(job.user_id, initial_phrase)
+                    message = await bot.send_message(job.user_id, initial_phrase, parse_mode="HTML")
                 except Exception:  # pragma: no cover - external dependency
                     raise
                 message_id = message.message_id
@@ -269,7 +273,7 @@ class StatusMessageManager:
         if not force and text == state.last_text:
             return False
         try:
-            await bot.edit_message_text(text, state.chat_id, state.message_id)
+            await bot.edit_message_text(text, state.chat_id, state.message_id, parse_mode="HTML")
         except tg_exceptions.MessageNotModified:
             state.last_text = text
             edited = True
@@ -328,7 +332,7 @@ class StatusMessageManager:
                 except tg_exceptions.TelegramAPIError:  # pragma: no cover - network call
                     pass
             try:
-                message = await bot.send_message(state.chat_id, text)
+                message = await bot.send_message(state.chat_id, text, parse_mode="HTML")
             except tg_exceptions.TelegramAPIError:  # pragma: no cover - network call
                 pass
             else:
