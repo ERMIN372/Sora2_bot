@@ -699,7 +699,7 @@ def _telegram_router(dp: Dispatcher, bot: Bot) -> APIRouter:
         if WEBHOOK_SECRET:
             if x_telegram_bot_api_secret_token != WEBHOOK_SECRET:
                 log.warning("Webhook: bad secret token from %s", request.client.host if request.client else "unknown")
-                return Response(status_code=403)
+                return Response(status_code=200)  # Telegram requires 2xx; update is silently dropped
 
         remote = request.client.host if request.client else "unknown"
         raw = await request.body()
