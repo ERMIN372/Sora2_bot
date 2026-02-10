@@ -698,15 +698,15 @@ def _telegram_router(dp: Dispatcher, bot: Bot) -> APIRouter:
     ) -> Response:
         if WEBHOOK_SECRET:
             if x_telegram_bot_api_secret_token != WEBHOOK_SECRET:
-                log.warning("Webhook: bad secret token")
-                return Response(status_code=200)
+                log.warning("Webhook: bad secret token from %s", request.client.host if request.client else "unknown")
+                return Response(status_code=403)
 
         remote = request.client.host if request.client else "unknown"
         raw = await request.body()
         try:
             data = json.loads(raw.decode("utf-8"))
         except Exception:
-            log.exception("Webhook: invalid JSON body", extra={"raw": raw[:1000]})
+            log.exception("Webhook: invalid JSON body", extra={"raw_length": len(raw)})
             return Response(status_code=200)
 
         log.info(
@@ -732,7 +732,8 @@ def _telegram_router(dp: Dispatcher, bot: Bot) -> APIRouter:
                 update = update.as_(bot)
         except Exception:
             log.exception(
-                "Webhook: cannot convert to aiogram Update", extra={"update_json": data}
+                "Webhook: cannot convert to aiogram Update",
+                extra={"update_id": data.get("update_id"), "keys": list(data.keys())},
             )
             return Response(status_code=200)
 
@@ -748,7 +749,7 @@ def _telegram_router(dp: Dispatcher, bot: Bot) -> APIRouter:
         except Exception:
             log.exception(
                 "Webhook: handler crashed",
-                extra={"update_json": data, "update_id": data.get("update_id")},
+                extra={"update_id": data.get("update_id")},
             )
             return Response(status_code=200)
 

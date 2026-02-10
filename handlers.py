@@ -1348,19 +1348,46 @@ class UserSession:
     awaiting_payment: bool = False
     last_launch_key: Optional[str] = None
     last_launch_ts: float = 0.0
+    _last_access: float = field(default_factory=time.monotonic, repr=False)
 
     def update_video_size(self) -> None:
         self.last_size = _resolve_video_size(self.last_aspect_ratio, self.hd_enabled)
 
 
+_SESSION_TTL_SECONDS: float = 3600.0  # evict sessions idle for >1 hour
+_SESSION_MAX_SIZE: int = 50_000       # hard cap on stored sessions
+_SESSION_CLEANUP_INTERVAL: float = 300.0  # run eviction every 5 min
+
+
 class SessionManager:
-    """In-memory storage for user sessions."""
+    """In-memory storage for user sessions with TTL-based eviction."""
 
     def __init__(self) -> None:
         self._sessions: Dict[int, UserSession] = {}
+        self._last_cleanup: float = time.monotonic()
 
     def get(self, user_id: int) -> UserSession:
-        return self._sessions.setdefault(user_id, UserSession())
+        self._maybe_cleanup()
+        session = self._sessions.get(user_id)
+        if session is None:
+            session = UserSession()
+            self._sessions[user_id] = session
+        session._last_access = time.monotonic()
+        return session
+
+    def _maybe_cleanup(self) -> None:
+        now = time.monotonic()
+        if now - self._last_cleanup < _SESSION_CLEANUP_INTERVAL:
+            return
+        self._last_cleanup = now
+        cutoff = now - _SESSION_TTL_SECONDS
+        stale = [uid for uid, s in self._sessions.items() if s._last_access < cutoff]
+        for uid in stale:
+            del self._sessions[uid]
+        if len(self._sessions) > _SESSION_MAX_SIZE:
+            by_access = sorted(self._sessions, key=lambda k: self._sessions[k]._last_access)
+            for uid in by_access[: len(self._sessions) - _SESSION_MAX_SIZE]:
+                del self._sessions[uid]
 
 
 SESSION_MANAGER = SessionManager()
@@ -2853,16 +2880,30 @@ async def _send_payment_showcase(bot: Bot, chat_id: int, config: Config) -> None
 
 PAYMENT_REUSE_WINDOW_MINUTES = 15
 PAYMENT_DEBOUNCE_SECONDS = 3
+_PAYMENT_LOCK_TTL: float = 1800.0  # evict payment locks after 30 min
 _PENDING_PAYMENT_LOCKS: dict[int, asyncio.Lock] = {}
 _PENDING_PAYMENT_LAST_ATTEMPT: dict[int, float] = {}
 
 
 def _get_payment_lock(user_id: int) -> asyncio.Lock:
+    _evict_stale_payment_locks()
     lock = _PENDING_PAYMENT_LOCKS.get(user_id)
     if lock is None:
         lock = asyncio.Lock()
         _PENDING_PAYMENT_LOCKS[user_id] = lock
     return lock
+
+
+def _evict_stale_payment_locks() -> None:
+    """Remove payment locks and timestamps for users idle longer than TTL."""
+    now = time.monotonic()
+    cutoff = now - _PAYMENT_LOCK_TTL
+    stale = [
+        uid for uid, ts in _PENDING_PAYMENT_LAST_ATTEMPT.items() if ts < cutoff
+    ]
+    for uid in stale:
+        _PENDING_PAYMENT_LOCKS.pop(uid, None)
+        _PENDING_PAYMENT_LAST_ATTEMPT.pop(uid, None)
 
 
 def _coerce_int(value: Any) -> Optional[int]:

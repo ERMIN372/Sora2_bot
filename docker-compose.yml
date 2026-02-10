@@ -6,7 +6,7 @@ services:
     env_file:
       - .env
     environment:
-      DATABASE_URL: postgresql://sora:sora_password@postgres:5432/sora
+      DATABASE_URL: postgresql://sora:${POSTGRES_PASSWORD:-changeme}@postgres:5432/sora
       REDIS_URL: redis://redis:6379/0
       HOST: 0.0.0.0
       PORT: 8080
@@ -31,7 +31,7 @@ services:
     image: postgres:15
     environment:
       POSTGRES_USER: sora
-      POSTGRES_PASSWORD: sora_password
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
       POSTGRES_DB: sora
     volumes:
       - pgdata:/var/lib/postgresql/data
@@ -41,7 +41,7 @@ services:
       timeout: 5s
       retries: 5
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
 
   redis:
     image: redis:7.2
@@ -54,7 +54,7 @@ services:
       timeout: 5s
       retries: 5
     ports:
-      - "6379:6379"
+      - "127.0.0.1:6379:6379"
 
   prometheus:
     image: prom/prometheus:latest
