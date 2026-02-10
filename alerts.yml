@@ -31,3 +31,51 @@ groups:
         annotations:
           summary: "Пул воркеров исчерпан"
           description: "Очередь задач превышает размер пула воркеров."
+
+      - alert: BotDown
+        expr: up{job="sora2-bot"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Бот недоступен"
+          description: "Prometheus не может получить метрики от бота более 2 минут."
+
+      - alert: HighMemoryUsage
+        expr: process_resident_memory_bytes{job="sora2-bot"} > 1e9
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Высокое потребление памяти"
+          description: "Бот использует более 1 ГБ RSS памяти более 10 минут. Возможна утечка."
+
+      - alert: HighRestartRate
+        expr: changes(process_start_time_seconds{job="sora2-bot"}[1h]) > 3
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Частые перезапуски бота"
+          description: "Процесс бота перезапускался более 3 раз за последний час."
+
+      - alert: NoJobsCompleted
+        expr: |
+          sum(increase(jobs_completed_total[30m])) == 0
+          and
+          sum(increase(jobs_enqueued_total[30m])) > 0
+        for: 15m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Задачи не завершаются"
+          description: "За 30 минут были добавлены задачи, но ни одна не завершена."
+
+      - alert: WebhookErrorSpike
+        expr: rate(handler_calls_total{handler="webhook_error"}[5m]) > 0.1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Всплеск ошибок webhook"
+          description: "Частота ошибок обработки webhook превышает 6 в минуту."

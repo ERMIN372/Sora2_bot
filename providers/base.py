@@ -6,7 +6,9 @@ import json
 import logging
 import time
 from dataclasses import dataclass
-from typing import Any, Dict, List, Mapping, Optional, Tuple
+from pathlib import Path
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
+from urllib.parse import urlparse
 
 import aiohttp
 
@@ -80,6 +82,20 @@ def _join_url(base: str, *parts: str) -> str:
     return url
 
 
+_DOWNLOAD_ALLOWED_SCHEMES = {"https"}
+_DOWNLOAD_BLOCKED_HOSTS = {"localhost", "127.0.0.1", "0.0.0.0", "[::1]", "metadata.google.internal"}
+
+
+def validate_download_url(url: str) -> None:
+    """Raise ValueError if *url* points to a non-HTTPS or internal target."""
+    parsed = urlparse(url)
+    if parsed.scheme not in _DOWNLOAD_ALLOWED_SCHEMES:
+        raise ValueError(f"Blocked non-HTTPS download URL: scheme={parsed.scheme!r}")
+    hostname = (parsed.hostname or "").lower()
+    if hostname in _DOWNLOAD_BLOCKED_HOSTS or hostname.endswith(".internal"):
+        raise ValueError(f"Blocked download to internal host: {hostname!r}")
+
+
 def _extract_request_id(headers: Mapping[str, str]) -> Optional[str]:
     if not headers:
         return None
@@ -101,6 +117,60 @@ def _extract_request_id(headers: Mapping[str, str]) -> Optional[str]:
         if header_value:
             return str(header_value)
     return None
+
+
+def iter_nodes(value: Any) -> Iterable[Dict[str, Any]]:
+    """Walk a nested dict/list structure and yield every dict node."""
+    stack: List[Any] = [value]
+    seen: set[int] = set()
+    while stack:
+        current = stack.pop()
+        if isinstance(current, dict):
+            identifier = id(current)
+            if identifier in seen:
+                continue
+            seen.add(identifier)
+            yield current
+            stack.extend(current.values())
+        elif isinstance(current, (list, tuple)):
+            stack.extend(current)
+
+
+_URL_KEYS = ("download_url", "url", "video_url", "asset_url", "content_url")
+_NESTED_KEYS = ("file", "video", "asset")
+
+
+def extract_url(entry: Mapping[str, Any]) -> Optional[str]:
+    """Extract a download URL from a provider response entry."""
+    for key in _URL_KEYS:
+        value = entry.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    for nested_key in _NESTED_KEYS:
+        nested = entry.get(nested_key)
+        if isinstance(nested, Mapping):
+            for key in _URL_KEYS:
+                value = nested.get(key)
+                if isinstance(value, str) and value.strip():
+                    return value.strip()
+    return None
+
+
+async def stream_response_to_file(response: Any, file_path: Path) -> int:
+    """Stream an aiohttp response body to *file_path*, return bytes written."""
+    size = 0
+    with open(file_path, "wb") as output:
+        if hasattr(response, "aiter_bytes"):
+            async for chunk in response.aiter_bytes():
+                if chunk:
+                    output.write(chunk)
+                    size += len(chunk)
+        else:
+            async for chunk in response.content.iter_chunked(65536):
+                if chunk:
+                    output.write(chunk)
+                    size += len(chunk)
+    return size
 
 
 def _serialise_for_log(data: Any, *, limit: int = 3072) -> str:

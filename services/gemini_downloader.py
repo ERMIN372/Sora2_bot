@@ -25,6 +25,7 @@ except ModuleNotFoundError:  # pragma: no cover - tests may stub the client
     httpx = _HttpxMissing()  # type: ignore[assignment]
 
 from config import Config
+from providers.base import validate_download_url
 from services.gemini_client import get_media_client
 from services.gemini_key import current_key_mask, ensure_gemini_key_logged
 
@@ -418,6 +419,7 @@ async def _download_via_http(
         max_attempts,
         mask or "",
     )
+    validate_download_url(url)
     try:
         async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
             response = await client.get(url, headers=headers)

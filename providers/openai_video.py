@@ -31,6 +31,10 @@ from .base import (
     _mask_secret,
     _sanitize_headers,
     _serialise_for_log,
+    extract_url,
+    iter_nodes,
+    stream_response_to_file,
+    validate_download_url,
 )
 
 
@@ -52,34 +56,8 @@ ALLOWED_CONTENT_FIELDS: FrozenSet[str] = frozenset({"variant"})
 _LOG_PAYLOAD_LIMIT = 3072
 
 
-def _iter_nodes(value: Any) -> Iterable[Dict[str, Any]]:
-    stack: List[Any] = [value]
-    seen: set[int] = set()
-    while stack:
-        current = stack.pop()
-        if isinstance(current, dict):
-            identifier = id(current)
-            if identifier in seen:
-                continue
-            seen.add(identifier)
-            yield current
-            stack.extend(current.values())
-        elif isinstance(current, (list, tuple)):
-            stack.extend(current)
-
-
-def _extract_url(entry: Mapping[str, Any]) -> Optional[str]:
-    for key in ("download_url", "url", "video_url", "asset_url", "content_url"):
-        value = entry.get(key)
-        if isinstance(value, str) and value.strip():
-            return value.strip()
-    nested = entry.get("file") or entry.get("video") or entry.get("asset")
-    if isinstance(nested, Mapping):
-        for key in ("download_url", "url", "content_url"):
-            value = nested.get(key)
-            if isinstance(value, str) and value.strip():
-                return value.strip()
-    return None
+_iter_nodes = iter_nodes
+_extract_url = extract_url
 
 
 def _extract_base64(entry: Mapping[str, Any]) -> Optional[str]:
@@ -531,6 +509,7 @@ class OpenAIVideoClient(BaseProviderClient):
             headers["OpenAI-Beta"] = self._beta_header
         if self._organization_id:
             headers["OpenAI-Organization"] = self._organization_id
+        validate_download_url(url)
         safe_headers = _sanitize_headers(headers)
         correlation_id = f"download:{video_id}:{fmt}"
         self._record_last_request(
@@ -591,18 +570,7 @@ class OpenAIVideoClient(BaseProviderClient):
                     if status == 200:
                         target_dir = Path(tempfile.mkdtemp(prefix="openai-video-"))
                         file_path = target_dir / f"{video_id}.{fmt}"
-                        size = 0
-                        with open(file_path, "wb") as output:
-                            if hasattr(response, "aiter_bytes"):
-                                async for chunk in response.aiter_bytes():
-                                    if chunk:
-                                        output.write(chunk)
-                                        size += len(chunk)
-                            else:
-                                async for chunk in response.content.iter_chunked(65536):
-                                    if chunk:
-                                        output.write(chunk)
-                                        size += len(chunk)
+                        size = await stream_response_to_file(response, file_path)
                         self._update_last_download_meta(
                             status_code=status,
                             request_id=request_id,
