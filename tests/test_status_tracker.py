@@ -37,13 +37,13 @@ class DummyBot:
         self.edited_messages = []
         self.deleted_messages = []
 
-    async def send_message(self, chat_id: int, text: str):
+    async def send_message(self, chat_id: int, text: str, **kwargs):
         message_id = len(self.sent_messages) + 1
         record = {"chat_id": chat_id, "text": text, "message_id": message_id}
         self.sent_messages.append(record)
         return SimpleNamespace(message_id=message_id)
 
-    async def edit_message_text(self, text: str, chat_id: int, message_id: int):
+    async def edit_message_text(self, text: str, chat_id: int, message_id: int, **kwargs):
         self.edited_messages.append(
             {"chat_id": chat_id, "message_id": message_id, "text": text}
         )
