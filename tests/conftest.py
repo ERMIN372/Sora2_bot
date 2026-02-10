@@ -141,10 +141,14 @@ except ModuleNotFoundError:  # pragma: no cover - test environment shim
     class InputFile(_BaseType):
         pass
 
+    class InputMediaPhoto(_BaseType):
+        pass
+
     types_stub.Message = Message
     types_stub.CallbackQuery = CallbackQuery
     types_stub.InlineKeyboardButton = InlineKeyboardButton
     types_stub.InlineKeyboardMarkup = InlineKeyboardMarkup
+    types_stub.InputMediaPhoto = InputMediaPhoto
     types_stub.KeyboardButton = KeyboardButton
     types_stub.ReplyKeyboardMarkup = ReplyKeyboardMarkup
     types_stub.ReplyKeyboardRemove = ReplyKeyboardRemove
@@ -191,6 +195,51 @@ except ModuleNotFoundError:  # pragma: no cover - test environment shim
     utils_stub.exceptions = exceptions_stub
     sys.modules["aiogram.utils"] = utils_stub
     sys.modules["aiogram.utils.exceptions"] = exceptions_stub
+
+try:  # pragma: no cover - prefer real dependency
+    import prometheus_client  # type: ignore
+except ModuleNotFoundError:  # pragma: no cover - test environment shim
+    prom_stub = types.ModuleType("prometheus_client")
+
+    prom_stub.CONTENT_TYPE_LATEST = "text/plain; version=0.0.4; charset=utf-8"
+
+    class _LabelWrapper:
+        def inc(self, amount: float = 1) -> None:
+            pass
+
+        def dec(self, amount: float = 1) -> None:
+            pass
+
+        def set(self, value: float) -> None:
+            pass
+
+    class Counter:
+        def __init__(self, name: str = "", documentation: str = "", labelnames: Any = ()) -> None:
+            self._name = name
+
+        def labels(self, **_kw: Any) -> _LabelWrapper:
+            return _LabelWrapper()
+
+        def inc(self, amount: float = 1) -> None:
+            pass
+
+    class Gauge:
+        def __init__(self, name: str = "", documentation: str = "", labelnames: Any = ()) -> None:
+            self._name = name
+
+        def labels(self, **_kw: Any) -> _LabelWrapper:
+            return _LabelWrapper()
+
+        def set(self, value: float) -> None:
+            pass
+
+    def generate_latest() -> bytes:
+        return b""
+
+    prom_stub.Counter = Counter
+    prom_stub.Gauge = Gauge
+    prom_stub.generate_latest = generate_latest
+    sys.modules["prometheus_client"] = prom_stub
 
 try:  # pragma: no cover - prefer real dependency
     import aiohttp  # type: ignore
@@ -356,24 +405,31 @@ except ModuleNotFoundError:  # pragma: no cover - test environment shim
     tenacity_stub.wait_exponential = lambda *_args, **_kwargs: None
     sys.modules["tenacity"] = tenacity_stub
 
-    class _Models:
-        def generate_videos(self, *args: Any, **kwargs: Any):  # pragma: no cover - not used in tests
-            raise NotImplementedError
+# Ensure genai_mod.Client is always set (even when tenacity is installed)
+if "google.genai" in sys.modules:
+    _genai = sys.modules["google.genai"]
+    if not hasattr(_genai, "Client"):
 
-    class _Operations:
-        def get(self, operation):  # pragma: no cover - tests stub behaviour
-            return operation
+        class _Models:
+            def generate_videos(self, *args: Any, **kwargs: Any):  # pragma: no cover
+                raise NotImplementedError
 
-    class Client:
-        def __init__(self, api_key: str, http_options: HttpOptions | None = None) -> None:
-            self.api_key = api_key
-            self.http_options = http_options
-            self.models = _Models()
-            self.operations = _Operations()
+        class _Operations:
+            def get(self, operation):  # pragma: no cover
+                return operation
 
-    genai_mod.Client = Client
-    genai_mod.types = types_mod
-    genai_mod.errors = errors_mod
+        class _GenAIClient:
+            def __init__(self, api_key: str = "", http_options: Any = None) -> None:
+                self.api_key = api_key
+                self.http_options = http_options
+                self.models = _Models()
+                self.operations = _Operations()
+
+        _genai.Client = _GenAIClient
+    if not hasattr(_genai, "types"):
+        _genai.types = sys.modules.get("google.genai.types")
+    if not hasattr(_genai, "errors"):
+        _genai.errors = sys.modules.get("google.genai.errors")
 
 try:  # pragma: no cover - prefer real dependency
     import gspread  # type: ignore
