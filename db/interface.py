@@ -16,6 +16,10 @@ class DatabaseInterface(abc.ABC):
     async def close(self) -> None:  # pragma: no cover - interface
         return None
 
+    async def healthcheck(self) -> bool:  # pragma: no cover - interface
+        """Return True if the database is reachable."""
+        return True
+
     # Users
     @abc.abstractmethod
     async def ensure_user(
