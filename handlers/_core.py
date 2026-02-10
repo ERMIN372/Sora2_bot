@@ -3326,7 +3326,7 @@ async def _launch_order(
             prompt=order.prompt,
         )
         await _release_lock("submit_failed", "insufficient_credits")
-        await callback.message.answer(i18n.t("flow.not_enough"))
+        await callback.message.answer(i18n.t("flow.not_enough_generic"))
         session.awaiting_payment = True
         await _send_payment_showcase(callback.message.bot, callback.message.chat.id, config)
         return
@@ -6366,7 +6366,7 @@ async def resend_pending_order(
         can_launch=can_launch,
     )
     if not can_launch:
-        await bot.send_message(user_id, i18n.t("flow.not_enough"))
+        await bot.send_message(user_id, i18n.t("flow.not_enough_generic"))
         await _send_payment_showcase(bot, user_id, config)
     return True
 
@@ -6894,7 +6894,7 @@ async def _video_create_command_impl(
     if credits_cost > 0:
         balance = await db.get_user_credits(user.id)
         if balance < credits_cost:
-            await message.answer(i18n.t("flow.not_enough"))
+            await message.answer(i18n.t("flow.not_enough_generic"))
             return
     corr_id = str(uuid.uuid4())
     try:
@@ -7058,7 +7058,7 @@ async def _video_remix_command_impl(
     if credits_cost > 0:
         deducted = await db.deduct_credit(user.id, credits_cost)
         if not deducted:
-            await message.answer(i18n.t("flow.not_enough"))
+            await message.answer(i18n.t("flow.not_enough_generic"))
             return
     prompt_text = prompt.strip() or f"Remix {video_id}"
     corr_id = str(uuid.uuid4())
