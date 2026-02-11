@@ -167,6 +167,7 @@ VIDEO_PRICE_RUB: Dict[int, Decimal] = {
 }
 VEO_FIXED_DURATION = 8
 VEO_FIXED_PRICE_RUB = Decimal("89")
+VEO31_FIXED_PRICE_RUB = Decimal("299")
 TREND_VIDEO_PRICE_CREDITS = 99
 
 
@@ -279,6 +280,7 @@ _SUPPORTED_SORA_PREFIXES: Tuple[str, ...] = (
 
 _VIDEO_PROVIDER_PRICE_KEYS: Dict[str, str] = {
     "veo": "veo3",
+    "veo31": "veo31",
     "sora": "sora",
 }
 
@@ -691,6 +693,12 @@ def _is_veo_video_model_name(name: str) -> bool:
     return any(lowered.startswith(prefix) for prefix in _SUPPORTED_VEO_PREFIXES)
 
 
+def _is_veo31_model(name: str) -> bool:
+    """Return True if *name* refers to a Veo 3.1 model."""
+    normalised = _normalise_video_model_name(name)
+    return normalised.lower().startswith("veo-3.1-")
+
+
 def _is_sora_video_model_name(name: str) -> bool:
     normalised = _normalise_video_model_name(name)
     lowered = normalised.lower()
@@ -718,7 +726,7 @@ def _is_veo_context(
     if provider_key.startswith("veo"):
         return True
     product_key = (product or "").strip().lower()
-    if product_key == "veo3":
+    if product_key in {"veo3", "veo31"}:
         return True
     if model and _is_veo_video_model_name(model):
         return True
@@ -803,11 +811,15 @@ def _video_model_options(config: Config) -> list[VideoModelOption]:
     if config.gemini_video_enabled:
         default_name = _normalise_video_model_name(config.gemini_model_video)
         if default_name:
-            _register(default_name, "veo")
+            provider_tag = "veo31" if _is_veo31_model(default_name) else "veo"
+            _register(default_name, provider_tag)
         for candidate in list_veo_video_models(config):
             normalised = _normalise_video_model_name(candidate)
             if _is_veo_video_model_name(normalised):
-                _register(normalised, "veo")
+                provider_tag = "veo31" if _is_veo31_model(normalised) else "veo"
+                _register(normalised, provider_tag)
+        # Always offer veo-3.1 if it wasn't discovered automatically
+        _register("veo-3.1-generate-001", "veo31")
 
     if config.sora_video_enabled:
         default_sora = _normalise_video_model_name(config.sora_model_video)
@@ -980,9 +992,11 @@ def _resolve_product_key(
     provider_key = (provider or "").lower()
     if provider_key in {"gemini-image", "image", "gemini"}:
         return "image"
+    model_key = _normalise_video_model_name(model or "")
+    if _is_veo31_model(model_key):
+        return "veo31"
     if provider_key.startswith("veo") or provider_key in {"gemini-video", "veo"}:
         return "veo3"
-    model_key = _normalise_video_model_name(model or "")
     if _is_veo_video_model_name(model_key):
         return "veo3"
     if _is_sora_video_model_name(model_key):
@@ -1536,8 +1550,15 @@ def _build_video_settings_keyboard(
 
 
 def _video_price_rub(
-    duration: Optional[int], provider: Optional[str], product: Optional[str]
+    duration: Optional[int],
+    provider: Optional[str],
+    product: Optional[str],
+    model: Optional[str] = None,
 ) -> Decimal:
+    if model and _is_veo31_model(model):
+        return VEO31_FIXED_PRICE_RUB
+    if (product or "").lower() == "veo31":
+        return VEO31_FIXED_PRICE_RUB
     if _is_veo_context(provider, product):
         return VEO_FIXED_PRICE_RUB
     if duration is not None:
@@ -1546,9 +1567,13 @@ def _video_price_rub(
 
 
 def _format_video_price(
-    duration: Optional[int], config: Config, provider: Optional[str], product: Optional[str]
+    duration: Optional[int],
+    config: Config,
+    provider: Optional[str],
+    product: Optional[str],
+    model: Optional[str] = None,
 ) -> str:
-    return config.format_rubles(_video_price_rub(duration, provider, product))
+    return config.format_rubles(_video_price_rub(duration, provider, product, model=model))
 
 
 def _video_quality_label(hd: bool) -> str:
@@ -2533,7 +2558,7 @@ def _create_order(
         if _is_veo_context(provider, resolved_product, model):
             duration_seconds = VEO_FIXED_DURATION
             hd_enabled = False
-        price_rub = _video_price_rub(duration_seconds, provider, resolved_product)
+        price_rub = _video_price_rub(duration_seconds, provider, resolved_product, model=model)
         credits_cost = config.credits_for_rubles(price_rub)
     if credits_cost <= 0:
         credits_cost = config.generation_cost_credits
@@ -2591,8 +2616,9 @@ def _video_prompt_body(
     config: Config,
     provider: Optional[str],
     product: Optional[str],
+    model: Optional[str] = None,
 ) -> str:
-    is_veo = _is_veo_context(provider, product)
+    is_veo = _is_veo_context(provider, product, model)
     template = "video.prompt.photo_veo" if mode == "photo" else "video.prompt.text_veo"
     duration_value: int
     quality_label = _video_quality_label(session.hd_enabled)
@@ -2608,7 +2634,7 @@ def _video_prompt_body(
         duration=duration_value,
         aspect=session.last_aspect_ratio,
         quality=quality_label,
-        price=_format_video_price(duration_value, config, provider, product),
+        price=_format_video_price(duration_value, config, provider, product, model=model),
     )
 
 
@@ -2640,6 +2666,7 @@ async def _send_generation_prompt(
             config=config,
             provider=provider,
             product=product,
+            model=model,
         )
         if include_size:
             markup = _build_video_settings_keyboard(
@@ -6112,6 +6139,7 @@ async def option_callback_handler(
             config=config,
             provider=provider,
             product=product,
+            model=model,
         )
         await callback.message.edit_text(
             body,

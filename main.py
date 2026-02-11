@@ -178,6 +178,7 @@ def _init_application(config: Config) -> ApplicationState:
         providers.update(
             {
                 "veo": veo_client,
+                "veo31": veo_client,
                 "gemini-video": veo_client,
                 config.gemini_model_video: veo_client,
             }

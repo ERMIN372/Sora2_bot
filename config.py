@@ -125,6 +125,7 @@ TAROT_READING_PRICE_CREDITS = 29
 PRODUCT_PRICING: Dict[str, Decimal] = {
     "sora": Decimal("99"),
     "veo3": Decimal("89"),
+    "veo31": Decimal("299"),
     "image": Decimal("5"),
     "tarot": Decimal(TAROT_READING_PRICE_CREDITS),
 }
@@ -134,6 +135,7 @@ PRODUCT_PRICE_ALIASES: Dict[str, str] = {
     "veo_video": "veo3",
     "gemini_video": "veo3",
     "veo": "veo3",
+    "veo31_video": "veo31",
     "gemini-image": "image",
     "image_generation": "image",
 }
@@ -145,6 +147,7 @@ PRODUCT_PRICE_ALIASES: Dict[str, str] = {
 PRODUCT_PRICING_UI = {
     "sora": 99,
     "veo3": 89,
+    "veo31": 299,
     "image": 5,
     "tarot": TAROT_READING_PRICE_CREDITS,
 }
@@ -161,6 +164,7 @@ UI_MODEL_LABELS = {
     # UI labels only, the actual API model identifiers remain unchanged
     "veo": "💚Gemini veo3",
     "veo-3.0-generate-001": "💚Gemini veo3",
+    "veo-3.1-generate-001": "💎Gemini veo 3.1",
     "sora": "☁️OpenAI Sora 2",
     "sora-2": "☁️OpenAI Sora 2",
     "sora-2-pro": "☁️OpenAI Sora 2",
