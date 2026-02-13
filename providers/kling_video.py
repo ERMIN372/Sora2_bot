@@ -13,6 +13,7 @@ import hashlib
 import hmac
 import json
 import logging
+import os
 import tempfile
 import time
 from pathlib import Path
@@ -30,26 +31,9 @@ from providers.base import (
 
 log = logging.getLogger(__name__)
 
-KLING_BASE_URL = "https://api.klingai.com"
-KLING_MODEL_NAME = "kling-v2-6"
+KLING_BASE_URL = os.getenv("KLING_BASE_URL", "https://api-singapore.klingai.com")
 
-# Available preset motions for Motion Control
-KLING_PRESET_MOTIONS: Tuple[str, ...] = (
-    "Heart Gesture Dance",
-    "Cute Baby Dance",
-    "Running",
-    "Martial Arts",
-    "Ghost Step Dance",
-    "Subject 3 Dance",
-    "Motorcycle Dance",
-    "Nezha",
-    "Poping",
-)
-
-DEFAULT_PRESET_MOTION = "Heart Gesture Dance"
 DEFAULT_MODE = "std"  # std = 720p, pro = 1080p
-DEFAULT_DURATION = 5  # seconds
-DEFAULT_CFG_SCALE = 0.5
 
 # Kling task status mapping → normalised provider statuses
 _STATUS_MAP: Dict[str, str] = {
@@ -167,48 +151,39 @@ class KlingVideoClient(BaseProviderClient):
                 error_type="validation",
             )
 
-        # Motion reference: video_url or preset_motion
+        # Motion reference URL is required by Motion Control API
         video_url = self._resolve_motion_video_url(settings)
-        preset_motion = settings.get("preset_motion") or settings.get("kling_preset")
-        if not video_url and not preset_motion:
-            preset_motion = DEFAULT_PRESET_MOTION
+        if not video_url:
+            raise ProviderAPIError(
+                provider="kling",
+                status_code=400,
+                message="Motion Control requires an accessible video_url",
+                error_type="validation",
+            )
 
         mode = settings.get("kling_mode") or DEFAULT_MODE
-        duration = int(
-            settings.get("duration") or settings.get("duration_seconds") or DEFAULT_DURATION
-        )
-        if duration not in (5, 10):
-            duration = DEFAULT_DURATION
 
         body: Dict[str, Any] = {
-            "model_name": KLING_MODEL_NAME,
             "mode": mode,
             "image_url": image_url,
-            "duration": duration,
-            "cfg_scale": float(settings.get("cfg_scale") or DEFAULT_CFG_SCALE),
+            "video_url": video_url,
+            "character_orientation": settings.get("character_orientation") or "video",
+            "keep_original_sound": settings.get("keep_original_sound") or "yes",
         }
-
-        if video_url:
-            body["video_url"] = video_url
-            body["character_orientation"] = settings.get("character_orientation") or "video"
-        elif preset_motion:
-            body["preset_motion"] = preset_motion
 
         if prompt and prompt.strip():
             body["prompt"] = prompt.strip()[:2500]
 
         log.info(
-            "kling.enqueue mode=%s duration=%s preset=%s has_video_url=%s prompt_len=%s",
+            "kling.enqueue mode=%s has_video_url=%s prompt_len=%s",
             mode,
-            duration,
-            preset_motion or "-",
             bool(video_url),
             len(prompt or ""),
         )
 
         data, status_code, duration_ms = await self._request(
             "POST",
-            "/v1/videos/motion",
+            "/v1/videos/motion-control",
             json=body,
         )
 
@@ -267,7 +242,7 @@ class KlingVideoClient(BaseProviderClient):
 
         data, status_code, duration_ms = await self._request(
             "GET",
-            f"/v1/videos/motion/{job_id}",
+            f"/v1/videos/motion-control/{job_id}",
         )
 
         api_code = data.get("code")
@@ -402,6 +377,8 @@ class KlingVideoClient(BaseProviderClient):
 
         inline = settings.get("motion_video_inline_data")
         if isinstance(inline, dict):
+            # Backward-compatible fallback: older code paths may still pass inline payload.
+            # API expects URL, but keep this to avoid hard break for legacy callers.
             mime = inline.get("mime_type") or "video/mp4"
             data = inline.get("data")
             if data:
@@ -429,9 +406,9 @@ class KlingVideoClient(BaseProviderClient):
         # Inline data from Telegram download (base64)
         inline = settings.get("reference_inline_data")
         if isinstance(inline, dict):
-            mime = inline.get("mime_type") or "image/jpeg"
             data = inline.get("data")
             if data:
-                return f"data:{mime};base64,{data}"
+                # Motion Control docs require raw base64 without data: prefix.
+                return str(data)
 
         return None

@@ -65,6 +65,19 @@ def test_kling_resolve_motion_video_url_from_inline_data() -> None:
     assert url == "data:video/mp4;base64,ZmFrZV9kYXRh"
 
 
+def test_kling_resolve_image_url_from_inline_data_returns_raw_base64() -> None:
+    image_value = KlingVideoClient._resolve_image_url(
+        {
+            "reference_inline_data": {
+                "mime_type": "image/jpeg",
+                "data": "aW1hZ2VfYmFzZTY0",
+            }
+        }
+    )
+
+    assert image_value == "aW1hZ2VfYmFzZTY0"
+
+
 def test_build_telegram_file_url() -> None:
     bot = _FakeBot()
     url = asyncio.run(build_telegram_file_url(bot, "file123"))
