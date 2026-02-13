@@ -8,6 +8,7 @@ import hmac
 import json
 import logging
 import os
+import time
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from ipaddress import ip_address, ip_network
@@ -37,6 +38,50 @@ YOOKASSA_IP_RANGES = [
 ]
 
 MAX_REQUEST_SIZE = 2 * 1024 * 1024  # 2 MiB
+
+_TG_WEBHOOK_HITS_TOTAL = 0
+_TG_WEBHOOK_SECRET_MISMATCH_TOTAL = 0
+_LAST_TG_WEBHOOK_HIT_TS: float | None = None
+
+
+def _debug_updates_enabled() -> bool:
+    return os.getenv("TG_DEBUG_UPDATES", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _webhook_secret_mode() -> str:
+    mode = os.getenv("TG_WEBHOOK_SECRET_MODE", "strict").strip().lower()
+    if mode in {"strict", "warn"}:
+        return mode
+    return "strict"
+
+
+def _extract_update_summary(data: Dict[str, Any]) -> Dict[str, Any]:
+    message = data.get("message") if isinstance(data.get("message"), dict) else {}
+    callback_query = (
+        data.get("callback_query") if isinstance(data.get("callback_query"), dict) else {}
+    )
+    callback_message = (
+        callback_query.get("message") if isinstance(callback_query.get("message"), dict) else {}
+    )
+    user = message.get("from") if isinstance(message.get("from"), dict) else {}
+    callback_user = (
+        callback_query.get("from") if isinstance(callback_query.get("from"), dict) else {}
+    )
+    chat = message.get("chat") if isinstance(message.get("chat"), dict) else {}
+    callback_chat = (
+        callback_message.get("chat") if isinstance(callback_message.get("chat"), dict) else {}
+    )
+    return {
+        "update_id": data.get("update_id"),
+        "has_message": bool(message),
+        "has_callback": bool(callback_query),
+        "text": message.get("text") if isinstance(message.get("text"), str) else None,
+        "callback_data": (
+            callback_query.get("data") if isinstance(callback_query.get("data"), str) else None
+        ),
+        "user_id": user.get("id") or callback_user.get("id"),
+        "chat_id": chat.get("id") or callback_chat.get("id"),
+    }
 
 
 def _debug_updates_enabled() -> bool:
@@ -743,6 +788,9 @@ def _telegram_router(dp: Dispatcher, bot: Bot) -> APIRouter:
             "x-telegram-bot-api-secret-token"
         )
 
+        global _TG_WEBHOOK_HITS_TOTAL, _LAST_TG_WEBHOOK_HIT_TS
+        _TG_WEBHOOK_HITS_TOTAL += 1
+        _LAST_TG_WEBHOOK_HIT_TS = time.time()
         log.info(
             "tg.webhook.arrived path=%s remote=%s secret_header_present=%s",
             request.url.path,
@@ -755,6 +803,8 @@ def _telegram_router(dp: Dispatcher, bot: Bot) -> APIRouter:
                 str(provided_secret), str(webhook_secret)
             )
             if not secret_valid:
+                global _TG_WEBHOOK_SECRET_MISMATCH_TOTAL
+                _TG_WEBHOOK_SECRET_MISMATCH_TOTAL += 1
                 mode = _webhook_secret_mode()
                 log.warning(
                     "Webhook: bad secret token from %s mode=%s expected_len=%s got_len=%s",
@@ -867,6 +917,22 @@ def _create_base_app() -> FastAPI:
             content={"ok": ok, **checks},
             status_code=200 if ok else 503,
         )
+
+    @app.get("/diag", include_in_schema=False)
+    async def diag() -> Dict[str, object]:
+        now = time.time()
+        last_hit = _LAST_TG_WEBHOOK_HIT_TS
+        last_hit_age_s = None if last_hit is None else round(max(0.0, now - last_hit), 3)
+        return {
+            "ok": True,
+            "mode": CFG.BOT_MODE,
+            "webhook_url": CFG.WEBHOOK_URL,
+            "webhook_path": CFG.WEBHOOK_PATH,
+            "webhook_secret_mode": _webhook_secret_mode(),
+            "webhook_hits_total": _TG_WEBHOOK_HITS_TOTAL,
+            "webhook_secret_mismatch_total": _TG_WEBHOOK_SECRET_MISMATCH_TOTAL,
+            "last_webhook_hit_age_s": last_hit_age_s,
+        }
 
     @app.get("/", include_in_schema=False)
     async def root() -> Dict[str, str | bool]:
