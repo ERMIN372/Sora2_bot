@@ -1,4 +1,5 @@
 """Aiogram handlers for the video generation bot."""
+
 from __future__ import annotations
 
 import asyncio
@@ -35,9 +36,11 @@ from aiogram.types import (
     ReplyKeyboardMarkup,
     ReplyKeyboardRemove,
 )
+
 try:  # pragma: no cover - fallback for test stubs without ContentType
     from aiogram.types import ContentType
 except ImportError:  # pragma: no cover - fallback used in tests
+
     class _FallbackContentType:
         ANY = "*"
         TEXT = "text"
@@ -145,7 +148,7 @@ from trend_presets import TREND_PRESETS, TrendPreset, get_trend_by_id
 from telegram_files import BufferedInputFile
 from tarot_data import draw_cards
 from tarot_telegram import send_card
-from utils import build_inline_data_from_telegram_file
+from utils import build_inline_data_from_telegram_file, build_telegram_file_url
 import yookassa_client
 from news_admin import register_news_admin_handlers
 
@@ -216,6 +219,7 @@ async def safe_callback_answer(callback: CallbackQuery, *args: Any, **kwargs: An
     except InvalidQueryID:
         log.debug("Callback query %s already expired", callback.id)
 
+
 _INLINE_ASSET_MAX_BYTES = 9 * 1024 * 1024
 _TELEGRAM_VIDEO_MAX_BYTES = 48 * 1024 * 1024
 _TELEGRAM_PHOTO_MAX_BYTES = 10 * 1024 * 1024
@@ -224,6 +228,7 @@ _TELEGRAM_DOCUMENT_MAX_BYTES = 2 * 1024 * 1024 * 1024
 
 def _append_checkmark(label: str, selected: bool) -> str:
     return f"{label} ✅" if selected else label
+
 
 MAX_INLINE_VIDEO_BYTES = 9 * 1024 * 1024
 
@@ -239,8 +244,7 @@ MAIN_MENU_BUTTONS = {
 }
 
 TREND_MENU_TITLE = (
-    "🚀 Тренды\n\n"
-    "Выберите направление, в котором хотите сгенерировать изображение."
+    "🚀 Тренды\n\n" "Выберите направление, в котором хотите сгенерировать изображение."
 )
 TREND_AUTO_BUTTON = "🚗 Авто"
 TREND_BACK_BUTTON = "⬅️ Назад"
@@ -263,9 +267,7 @@ AUTO_STYLES_ROOT_BACK_TRENDS = "⬅️ В меню трендов"
 AUTO_STYLES_ROOT_BACK_NANO = "⬅️ Назад к выбору режима"
 AUTO_STYLES_MANUAL_PROMPT = "✏️ Свой текстовый промпт"
 AUTO_STYLES_AUTO_PROMPT = "🚗 Авто-стили"
-AUTO_PROMPT_CHOICE_TEXT = (
-    "Как будем генерировать изображение?\n\nВыберите один из вариантов:"
-)
+AUTO_PROMPT_CHOICE_TEXT = "Как будем генерировать изображение?\n\nВыберите один из вариантов:"
 
 _PRO_REQUEST_PATTERN = re.compile(
     r"\b(?:veo(?:[-\s]?2)?[-\s]*pro|veo2pro|model\s*[:=]?\s*pro|pro-?версия|pro version)\b",
@@ -485,15 +487,11 @@ async def _send_text_safely(bot: Bot, user_id: int, text: str) -> bool:
         log.info("Skipping delivery to user=%s error=%s", user_id, exc)
         return False
     except TelegramAPIError as exc:  # pragma: no cover - network guard
-        log.warning(
-            "Failed to deliver broadcast to user=%s error=%s", user_id, exc, exc_info=True
-        )
+        log.warning("Failed to deliver broadcast to user=%s error=%s", user_id, exc, exc_info=True)
         return False
 
 
-async def _copy_message_safely(
-    bot: Bot, user_id: int, from_chat_id: int, message_id: int
-) -> str:
+async def _copy_message_safely(bot: Bot, user_id: int, from_chat_id: int, message_id: int) -> str:
     try:
         await bot.copy_message(chat_id=user_id, from_chat_id=from_chat_id, message_id=message_id)
         return "ok"
@@ -505,7 +503,9 @@ async def _copy_message_safely(
             delay = 0.0
         await asyncio.sleep(max(delay, 0.0) + 0.5)
         try:
-            await bot.copy_message(chat_id=user_id, from_chat_id=from_chat_id, message_id=message_id)
+            await bot.copy_message(
+                chat_id=user_id, from_chat_id=from_chat_id, message_id=message_id
+            )
             return "ok"
         except RetryAfter as err:  # pragma: no cover - defensive guard
             log.warning(
@@ -517,7 +517,10 @@ async def _copy_message_safely(
             return "blocked"
         except BadRequest as err:
             log.warning(
-                "Bad request when copying broadcast for user=%s error=%s", user_id, err, exc_info=True
+                "Bad request when copying broadcast for user=%s error=%s",
+                user_id,
+                err,
+                exc_info=True,
             )
             return "bad_request"
         except TelegramAPIError as err:  # pragma: no cover - network guard
@@ -534,9 +537,7 @@ async def _copy_message_safely(
         )
         return "bad_request"
     except TelegramAPIError as exc:  # pragma: no cover - network guard
-        log.warning(
-            "Failed to deliver broadcast to user=%s error=%s", user_id, exc, exc_info=True
-        )
+        log.warning("Failed to deliver broadcast to user=%s error=%s", user_id, exc, exc_info=True)
         return "other"
 
 
@@ -580,9 +581,7 @@ async def _start_broadcast(
         await message.answer(i18n.t("admin.broadcast.empty_audience"))
         await _return_to_admin_menu(state, message)
         return
-    progress = await message.answer(
-        i18n.t("admin.broadcast.started", count=len(recipients_list))
-    )
+    progress = await message.answer(i18n.t("admin.broadcast.started", count=len(recipients_list)))
     try:
         sent, blocked, failed = await _broadcast_to_users(
             bot, recipients_list, from_chat_id_int, message_id_int
@@ -621,6 +620,7 @@ async def _enter_admin_menu(state: FSMContext, message: Message) -> None:
 async def _return_to_admin_menu(state: FSMContext, message: Message) -> None:
     await state.reset_data()
     await _enter_admin_menu(state, message)
+
 
 @dataclass
 class OrderContext:
@@ -787,7 +787,9 @@ def _available_duration_options(
         if ADMIN_SORA_DURATION_OPTION not in options:
             options.insert(0, ADMIN_SORA_DURATION_OPTION)
         else:
-            options = sorted(options, key=lambda value: (value != ADMIN_SORA_DURATION_OPTION, value))
+            options = sorted(
+                options, key=lambda value: (value != ADMIN_SORA_DURATION_OPTION, value)
+            )
     return tuple(options)
 
 
@@ -992,9 +994,17 @@ def _provider_for_model(model: Optional[str], config: Config) -> str:
         return "veo"
     if name and _is_sora_video_model_name(name):
         return "sora"
-    if name and config.sora_model_video and name == _normalise_video_model_name(config.sora_model_video):
+    if (
+        name
+        and config.sora_model_video
+        and name == _normalise_video_model_name(config.sora_model_video)
+    ):
         return "sora"
-    if name and config.gemini_model_video and name == _normalise_video_model_name(config.gemini_model_video):
+    if (
+        name
+        and config.gemini_model_video
+        and name == _normalise_video_model_name(config.gemini_model_video)
+    ):
         return "veo"
     lowered = (model or "").strip().lower()
     if lowered in {"sora", "sora-video", "openai-video"}:
@@ -1339,9 +1349,7 @@ class UserSession:
     """Transient per-user settings and cached context."""
 
     last_size: str = field(
-        default_factory=lambda: _resolve_video_size(
-            DEFAULT_ASPECT_RATIO, DEFAULT_HD_ENABLED
-        )
+        default_factory=lambda: _resolve_video_size(DEFAULT_ASPECT_RATIO, DEFAULT_HD_ENABLED)
     )
     last_aspect_ratio: str = DEFAULT_ASPECT_RATIO
     video_duration: int = DEFAULT_VIDEO_DURATION
@@ -1359,7 +1367,7 @@ class UserSession:
 
 
 _SESSION_TTL_SECONDS: float = 3600.0  # evict sessions idle for >1 hour
-_SESSION_MAX_SIZE: int = 50_000       # hard cap on stored sessions
+_SESSION_MAX_SIZE: int = 50_000  # hard cap on stored sessions
 _SESSION_CLEANUP_INTERVAL: float = 300.0  # run eviction every 5 min
 
 
@@ -1422,9 +1430,7 @@ def _main_keyboard(config: Config) -> ReplyKeyboardMarkup:
 
 
 def _back_button(target: str) -> InlineKeyboardButton:
-    return InlineKeyboardButton(
-        text=i18n.t("buttons.back"), callback_data=f"flow:back:{target}"
-    )
+    return InlineKeyboardButton(text=i18n.t("buttons.back"), callback_data=f"flow:back:{target}")
 
 
 def _build_back_keyboard(target: str) -> InlineKeyboardMarkup:
@@ -1455,21 +1461,13 @@ def _build_auto_prompt_choice_keyboard() -> InlineKeyboardMarkup:
                     callback_data="auto_prompt_mode:text",
                 )
             ],
-            [
-                InlineKeyboardButton(
-                    text=TREND_BACK_BUTTON, callback_data="auto_prompt_mode:back"
-                )
-            ],
+            [InlineKeyboardButton(text=TREND_BACK_BUTTON, callback_data="auto_prompt_mode:back")],
         ]
     )
 
 
 def _auto_styles_back_label(source: str) -> str:
-    return (
-        AUTO_STYLES_ROOT_BACK_TRENDS
-        if source == "trends"
-        else AUTO_STYLES_ROOT_BACK_NANO
-    )
+    return AUTO_STYLES_ROOT_BACK_TRENDS if source == "trends" else AUTO_STYLES_ROOT_BACK_NANO
 
 
 def _build_auto_styles_keyboard(page: int, *, source: str) -> InlineKeyboardMarkup:
@@ -1481,19 +1479,11 @@ def _build_auto_styles_keyboard(page: int, *, source: str) -> InlineKeyboardMark
         styles = AUTO_STYLES_PAGE2
     for style in styles:
         rows.append(
-            [
-                InlineKeyboardButton(
-                    text=style.title, callback_data=f"auto_style:{style.id}"
-                )
-            ]
+            [InlineKeyboardButton(text=style.title, callback_data=f"auto_style:{style.id}")]
         )
     if page == 1:
         rows.append(
-            [
-                InlineKeyboardButton(
-                    text=AUTO_STYLES_NEXT_PAGE, callback_data="auto_style:page2"
-                )
-            ]
+            [InlineKeyboardButton(text=AUTO_STYLES_NEXT_PAGE, callback_data="auto_style:page2")]
         )
         rows.append(
             [
@@ -1505,11 +1495,7 @@ def _build_auto_styles_keyboard(page: int, *, source: str) -> InlineKeyboardMark
         )
     else:
         rows.append(
-            [
-                InlineKeyboardButton(
-                    text=AUTO_STYLES_PREV_PAGE, callback_data="auto_style:page1"
-                )
-            ]
+            [InlineKeyboardButton(text=AUTO_STYLES_PREV_PAGE, callback_data="auto_style:page1")]
         )
         rows.append(
             [
@@ -1534,14 +1520,10 @@ def _build_video_settings_keyboard(
 ) -> InlineKeyboardMarkup:
     is_veo = _is_veo_context(provider, product, model)
     prompt_row = [
-        InlineKeyboardButton(
-            text=i18n.t("video.prompt.current_prompt"), callback_data="noop"
-        )
+        InlineKeyboardButton(text=i18n.t("video.prompt.current_prompt"), callback_data="noop")
     ]
     image_row = [
-        InlineKeyboardButton(
-            text=i18n.t("video.prompt.current_image"), callback_data="noop"
-        )
+        InlineKeyboardButton(text=i18n.t("video.prompt.current_image"), callback_data="noop")
     ]
     duration_row: list[InlineKeyboardButton] = []
     duration_options = _available_duration_options(
@@ -1552,21 +1534,15 @@ def _build_video_settings_keyboard(
     )
     if duration_options:
         for option in duration_options:
-            label = _append_checkmark(
-                f"{option} сек.", session.video_duration == option
-            )
+            label = _append_checkmark(f"{option} сек.", session.video_duration == option)
             duration_row.append(
-                InlineKeyboardButton(
-                    text=label, callback_data=f"opt:duration:{context}:{option}"
-                )
+                InlineKeyboardButton(text=label, callback_data=f"opt:duration:{context}:{option}")
             )
     aspect_row: list[InlineKeyboardButton] = []
     for token, ratio in ASPECT_RATIO_OPTIONS.items():
         label = _append_checkmark(ratio, session.last_aspect_ratio == ratio)
         aspect_row.append(
-            InlineKeyboardButton(
-                text=label, callback_data=f"opt:aspect:{context}:{token}"
-            )
+            InlineKeyboardButton(text=label, callback_data=f"opt:aspect:{context}:{token}")
         )
     rows: list[list[InlineKeyboardButton]] = [
         prompt_row,
@@ -1576,8 +1552,104 @@ def _build_video_settings_keyboard(
     if duration_row:
         rows.insert(2, duration_row)
     if include_back:
-        rows.append([_back_button("video_mode")])
+        back_target = "video_model" if _is_kling_context(provider, product, model) else "video_mode"
+        rows.append([_back_button(back_target)])
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _is_video_document(message: Message) -> bool:
+    document = message.document
+    if not document:
+        return False
+    mime_type = (document.mime_type or "").lower()
+    return mime_type.startswith("video/")
+
+
+def _extract_motion_reference_file_id(message: Message) -> Optional[str]:
+    if message.video and message.video.file_id:
+        return message.video.file_id
+    if _is_video_document(message) and message.document and message.document.file_id:
+        return message.document.file_id
+    return None
+
+
+async def _start_kling_motion_flow(
+    message: Message,
+    *,
+    state: FSMContext,
+    model: str,
+    provider: str,
+    product: str,
+    model_label: str,
+) -> None:
+    await state.update_data(
+        flow_type="video",
+        mode="photo",
+        model=model,
+        provider=provider,
+        model_label=model_label,
+        include_size=True,
+        product=product,
+        kling_motion_video_file_id=None,
+    )
+    await GenerationStates.kling_motion_video.set()
+    await message.answer(
+        i18n.t("video.prompt.kling.reference_video", model=model_label),
+        reply_markup=_build_back_keyboard("video_model"),
+    )
+
+
+async def handle_kling_motion_video_input(
+    message: Message,
+    state: FSMContext,
+    db: Database,
+    config: Config,
+) -> None:
+    user_id = await _ensure_user(message, db)
+    session = SESSION_MANAGER.get(user_id)
+    state_data = await state.get_data()
+    model = state_data.get("model") or config.default_video_model
+    provider = state_data.get("provider") or model
+    product = _resolve_product_key("video", provider, model, state_data.get("product"))
+    model_label = state_data.get("model_label") or _resolve_model_label(model, config)
+    if not _is_kling_context(provider, product, model):
+        await GenerationStates.photo_prompt.set()
+        await message.answer(i18n.t("errors.unsupported_video_model"))
+        return
+
+    motion_file_id = _extract_motion_reference_file_id(message)
+    if not motion_file_id:
+        await message.answer(
+            i18n.t("video.prompt.kling.reference_video_invalid"),
+            reply_markup=ReplyKeyboardRemove(),
+        )
+        return
+
+    await state.update_data(
+        flow_type="video",
+        mode="photo",
+        model=model,
+        provider=provider,
+        model_label=model_label,
+        include_size=True,
+        product=product,
+        kling_motion_video_file_id=motion_file_id,
+    )
+    await GenerationStates.photo_prompt.set()
+    is_admin = _is_admin(user_id, config)
+    await _send_generation_prompt(
+        message,
+        session=session,
+        category="video",
+        mode="photo",
+        model_label=model_label,
+        include_size=True,
+        config=config,
+        provider=provider,
+        product=product,
+        model=model,
+        is_admin=is_admin,
+    )
 
 
 def _video_price_rub(
@@ -1617,7 +1689,9 @@ def _video_quality_label(hd: bool) -> str:
     return i18n.t("video.prompt.quality_hd") if hd else i18n.t("video.prompt.quality_sd")
 
 
-def _build_confirmation_keyboard(*, can_launch: bool, include_back: bool = True) -> InlineKeyboardMarkup:
+def _build_confirmation_keyboard(
+    *, can_launch: bool, include_back: bool = True
+) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
     if can_launch:
         rows.append(
@@ -1843,13 +1917,17 @@ async def _process_referral_payload(message: Message, payload: str) -> None:
         return
     if existing:
         log.debug(
-            "Referral already tracked new_user=%s referrer=%s", new_user_id, existing.get("referrer_user_id")
+            "Referral already tracked new_user=%s referrer=%s",
+            new_user_id,
+            existing.get("referrer_user_id"),
         )
         return
     try:
         appended = await gsheets_ref.append_ref_row(referrer_id, new_user_id)
     except Exception:
-        log.exception("Failed to append referral row new_user=%s referrer=%s", new_user_id, referrer_id)
+        log.exception(
+            "Failed to append referral row new_user=%s referrer=%s", new_user_id, referrer_id
+        )
         return
     if appended:
         log.debug("ref track ok new_user=%s referrer=%s", new_user_id, referrer_id)
@@ -1954,11 +2032,7 @@ def _build_trend_presets_keyboard() -> InlineKeyboardMarkup:
             ]
         )
     rows.append(
-        [
-            InlineKeyboardButton(
-                text=i18n.t("trend.buttons.back"), callback_data="trend_select:back"
-            )
-        ]
+        [InlineKeyboardButton(text=i18n.t("trend.buttons.back"), callback_data="trend_select:back")]
     )
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -2005,7 +2079,9 @@ def _compose_trend_prompt(
     template = preset.prompt_templates.get(model_choice)
     if not template:
         template = next(iter(preset.prompt_templates.values()), "")
-    values = {param.key: _escape_format_value(answers.get(param.key, "")) for param in preset.params}
+    values = {
+        param.key: _escape_format_value(answers.get(param.key, "")) for param in preset.params
+    }
     values.setdefault("title", _escape_format_value(preset.title))
     if not template:
         return ""
@@ -2050,6 +2126,7 @@ async def _generate_trend_caption(
     except Exception:
         log.exception("Failed to generate trend caption via ChatGPT")
         return None
+
 
 def _build_tarot_interpretation(
     tarot_type: str, question: str, cards: Sequence[Mapping[str, object]]
@@ -2154,8 +2231,7 @@ async def generate_tarot_reading(
         "для саморазвития – 🧘‍♂️, 📚, 🌱, 💡, 🧠. Не перегружай текст: максимум 1–2 эмодзи на "
         "строку или пункт списка."
     )
-    structure_instructions = (
-        """Составь интерпретацию расклада Таро по следующей структуре в Markdown:\n\n"
+    structure_instructions = """Составь интерпретацию расклада Таро по следующей структуре в Markdown:\n\n"
         "## 🌟 Общий смысл\n"
         "Кратко опиши, что в целом показывает расклад по теме запроса (2–4 абзаца).\n"
         "Добавь по смыслу 1–2 эмодзи в абзац.\n\n"
@@ -2171,7 +2247,6 @@ async def generate_tarot_reading(
         "Можно использовать эмодзи ⚠️, 🚩, 💔, но не злоупотребляй.\n\n"
         "В конце добавь одну строку-дисклеймер без эмодзи:\n"
         "\"Это метафорический расклад для размышления, а не прогноз будущего или финансовый совет.\""""
-    )
     prompt_lines = [
         f"Тип расклада: {spread_label}",
         structure_instructions,
@@ -2823,7 +2898,9 @@ async def flow_back_callback_handler(
     if target == "video_model":
         current_model = data.get("model")
         current_provider = data.get("provider")
-        product = _resolve_product_key("video", current_provider, current_model, data.get("product"))
+        product = _resolve_product_key(
+            "video", current_provider, current_model, data.get("product")
+        )
         await state.update_data(
             flow_type="video",
             model=None,
@@ -2836,13 +2913,9 @@ async def flow_back_callback_handler(
         await GenerationStates.video_model.set()
         keyboard = _build_video_models_keyboard(_video_model_options(config))
         try:
-            await callback.message.edit_text(
-                i18n.t("video.models.prompt"), reply_markup=keyboard
-            )
+            await callback.message.edit_text(i18n.t("video.models.prompt"), reply_markup=keyboard)
         except Exception:  # pragma: no cover - Telegram edits may fail
-            await callback.message.answer(
-                i18n.t("video.models.prompt"), reply_markup=keyboard
-            )
+            await callback.message.answer(i18n.t("video.models.prompt"), reply_markup=keyboard)
         return
     if target == "video_mode":
         model = data.get("model") or config.default_video_model
@@ -2926,13 +2999,9 @@ async def flow_back_callback_handler(
         await GenerationStates.image_model.set()
         keyboard = _build_image_models_keyboard(options)
         try:
-            await callback.message.edit_text(
-                i18n.t("image.models.prompt"), reply_markup=keyboard
-            )
+            await callback.message.edit_text(i18n.t("image.models.prompt"), reply_markup=keyboard)
         except Exception:  # pragma: no cover - Telegram edits may fail
-            await callback.message.answer(
-                i18n.t("image.models.prompt"), reply_markup=keyboard
-            )
+            await callback.message.answer(i18n.t("image.models.prompt"), reply_markup=keyboard)
         return
 
 
@@ -2972,7 +3041,9 @@ def _build_packages_keyboard(config: Config) -> Optional[InlineKeyboardMarkup]:
                 )
             ]
         )
-    rows.append([InlineKeyboardButton(text="💌 Реферальная ссылка", callback_data="balance:ref_link")])
+    rows.append(
+        [InlineKeyboardButton(text="💌 Реферальная ссылка", callback_data="balance:ref_link")]
+    )
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -3006,9 +3077,7 @@ def _evict_stale_payment_locks() -> None:
     """Remove payment locks and timestamps for users idle longer than TTL."""
     now = time.monotonic()
     cutoff = now - _PAYMENT_LOCK_TTL
-    stale = [
-        uid for uid, ts in _PENDING_PAYMENT_LAST_ATTEMPT.items() if ts < cutoff
-    ]
+    stale = [uid for uid, ts in _PENDING_PAYMENT_LAST_ATTEMPT.items() if ts < cutoff]
     for uid in stale:
         _PENDING_PAYMENT_LOCKS.pop(uid, None)
         _PENDING_PAYMENT_LAST_ATTEMPT.pop(uid, None)
@@ -3155,11 +3224,15 @@ async def _mark_payment_button_created(message: Message) -> None:
     try:
         await message.edit_reply_markup(
             reply_markup=InlineKeyboardMarkup(
-                inline_keyboard=[[InlineKeyboardButton(text="⏳ Ссылка создана", callback_data="noop")]]
+                inline_keyboard=[
+                    [InlineKeyboardButton(text="⏳ Ссылка создана", callback_data="noop")]
+                ]
             )
         )
     except Exception:
-        log.info("Failed to disable payment button for message_id=%s", message.message_id, exc_info=True)
+        log.info(
+            "Failed to disable payment button for message_id=%s", message.message_id, exc_info=True
+        )
 
 
 async def _handle_not_enough_credits(
@@ -3303,7 +3376,9 @@ async def _launch_order(
     else:
         lower_prompt = original_prompt.lower()
         if any(word in lower_prompt for word in ("логотип", "logo", "бренд")):
-            await callback.message.answer("Создание оригинальных логотипов разрешено — запускаю как есть.")
+            await callback.message.answer(
+                "Создание оригинальных логотипов разрешено — запускаю как есть."
+            )
 
     key = order.key()
     await db.sync_user_profile(
@@ -3313,7 +3388,9 @@ async def _launch_order(
         last_name=user.last_name,
     )
     provider_key = order.provider or order.model
-    task_label = "image_generate" if provider_key in {"gemini-image", "dall-e-3"} else "video_generate"
+    task_label = (
+        "image_generate" if provider_key in {"gemini-image", "dall-e-3"} else "video_generate"
+    )
     credits_cost = order.credits_cost or config.generation_cost_credits
 
     normalized = normalize_prompt(order.prompt)
@@ -3344,9 +3421,7 @@ async def _launch_order(
         )
     if gate_result.decision is GateDecision.BLOCK_BUSY:
         try:
-            await callback.message.edit_reply_markup(
-                _build_generation_in_progress_keyboard()
-            )
+            await callback.message.edit_reply_markup(_build_generation_in_progress_keyboard())
         except Exception:  # pragma: no cover - Telegram may block edits on old messages
             log.debug("Failed to switch keyboard to busy state", exc_info=True)
         await callback.message.answer(
@@ -3361,9 +3436,7 @@ async def _launch_order(
 
     idempotency_key = gate_result.idempotency_key or corr_id
     try:
-        await callback.message.edit_reply_markup(
-            _build_generation_in_progress_keyboard()
-        )
+        await callback.message.edit_reply_markup(_build_generation_in_progress_keyboard())
     except Exception:  # pragma: no cover - Telegram may block edits on old messages
         log.debug("Failed to switch keyboard to busy state", exc_info=True)
 
@@ -3445,6 +3518,16 @@ async def _launch_order(
         if inline_data:
             provider_settings["reference_inline_data"] = inline_data
         job_meta["ref_file_id"] = order.image_file_id
+    motion_video_file_id = None
+    if isinstance(order.extra, dict):
+        candidate_motion_file = order.extra.get("motion_video_file_id")
+        if isinstance(candidate_motion_file, str) and candidate_motion_file.strip():
+            motion_video_file_id = candidate_motion_file.strip()
+    if motion_video_file_id:
+        motion_video_url = await build_telegram_file_url(callback.message.bot, motion_video_file_id)
+        if motion_video_url:
+            provider_settings["motion_video_url"] = motion_video_url
+        job_meta["motion_video_file_id"] = motion_video_file_id
 
     try:
         job_record = await job_queue.submit(
@@ -3478,7 +3561,11 @@ async def _launch_order(
             session.awaiting_payment = False
             session.pending_order = None
             await callback.message.answer(i18n.t("flow.nano_image_progress"))
-            artifacts = inline_result.get("inline_assets") if isinstance(inline_result.get("inline_assets"), list) else []
+            artifacts = (
+                inline_result.get("inline_assets")
+                if isinstance(inline_result.get("inline_assets"), list)
+                else []
+            )
             messages_sent: List[Message] = []
             if artifacts:
                 try:
@@ -3543,9 +3630,7 @@ async def _launch_order(
                     archive_publisher.schedule(payload)
             await callback.message.answer(i18n.t("flow.nano_image_done"))
             if job_meta.get("auto_style"):
-                await _send_auto_style_ready(
-                    callback.message.bot, callback.message.chat.id
-                )
+                await _send_auto_style_ready(callback.message.bot, callback.message.chat.id)
             await _release_lock("inline_completed", "completed")
             return
         if (job_record.status or "").lower() == "completed" and task_label == "image_generate":
@@ -3589,9 +3674,7 @@ async def _launch_order(
                                 archive_publisher.schedule(payload)
                     await callback.message.answer(i18n.t("status.completed_photo"))
                     if job_meta.get("auto_style"):
-                        await _send_auto_style_ready(
-                            callback.message.bot, callback.message.chat.id
-                        )
+                        await _send_auto_style_ready(callback.message.bot, callback.message.chat.id)
                 return
             else:
                 idempotency_key = f"{idempotency_key}:{uuid.uuid4().hex}"
@@ -3796,9 +3879,7 @@ async def _launch_order(
                     content_type=order.category,
                     extra=job_meta or None,
                 )
-                await callback.message.answer(
-                    "Автоматически запускаем Veo в качестве фоллбека."
-                )
+                await callback.message.answer("Автоматически запускаем Veo в качестве фоллбека.")
             except ProviderAPIError as fallback_error:
                 log.warning(
                     "Veo fallback failed corr_id=%s status=%s error_type=%s message=%s",
@@ -4014,7 +4095,9 @@ async def _launch_order(
     session.pending_order = None
 
     queue_pos = await db.count_active_jobs(user_id)
-    confirmation_key = "flow.order_submitted_image" if task_label == "image_generate" else "flow.order_submitted"
+    confirmation_key = (
+        "flow.order_submitted_image" if task_label == "image_generate" else "flow.order_submitted"
+    )
     await callback.message.answer(i18n.t(confirmation_key, queue_pos=queue_pos))
     await STATUS_MESSAGES.ensure_started(
         bot=callback.message.bot,
@@ -4056,10 +4139,14 @@ async def _persist_delivery_metadata(
             "filename": sent.filename,
         }
     )
-    cleaned_delivery = {key: value for key, value in delivery_meta.items() if value not in (None, "", 0)}
+    cleaned_delivery = {
+        key: value for key, value in delivery_meta.items() if value not in (None, "", 0)
+    }
     extra["delivery"] = cleaned_delivery
     job.extra = extra
-    image_file_id = file_id_value if ((job.content_type or "video") == "image" and file_id_value) else None
+    image_file_id = (
+        file_id_value if ((job.content_type or "video") == "image" and file_id_value) else None
+    )
     try:
         await db.update_job(
             job.id,
@@ -4138,9 +4225,7 @@ async def _send_job_update(
                 log.debug("Failed to send retry keyboard for user_id=%s", job.user_id)
             return
         if status == "timeout":
-            timeout_text = i18n.t(
-                "status.failed", error=job.error or i18n.t("errors.unknown")
-            )
+            timeout_text = i18n.t("status.failed", error=job.error or i18n.t("errors.unknown"))
             await STATUS_MESSAGES.mark_failed(
                 bot=dp.bot,
                 db=db,
@@ -4169,9 +4254,7 @@ async def _send_job_update(
             )
             return
         if status != "completed":
-            generic_text = i18n.t(
-                "status.generic", status=job.status or i18n.t("errors.unknown")
-            )
+            generic_text = i18n.t("status.generic", status=job.status or i18n.t("errors.unknown"))
             await STATUS_MESSAGES.mark_failed(bot=dp.bot, db=db, job=job, text=generic_text)
             return
 
@@ -4647,9 +4730,7 @@ async def _send_hydrated_images(
     media: List[InputMediaPhoto] = []
     for mime, payload in decoded:
         media.append(
-            InputMediaPhoto(
-                media=BufferedInputFile(payload, filename="image.png", mime_type=mime)
-            )
+            InputMediaPhoto(media=BufferedInputFile(payload, filename="image.png", mime_type=mime))
         )
     return await bot.send_media_group(user_id, media)
 
@@ -4690,6 +4771,7 @@ async def _deliver_remote_media(
 
     if asset_reference.startswith("/tmp/"):
         from pathlib import Path
+
         try:
             local_path = Path(asset_reference)
             if not local_path.exists():
@@ -4708,13 +4790,17 @@ async def _deliver_remote_media(
                 return None
             content = local_path.read_bytes()
             size = len(content)
-            downloaded = type('DownloadedAsset', (), {
-                'content': content,
-                'size': size,
-                'mime': mime_hint or 'video/mp4',
-                'filename': filename_hint or local_path.name,
-                'key_mask': expected_mask
-            })()
+            downloaded = type(
+                "DownloadedAsset",
+                (),
+                {
+                    "content": content,
+                    "size": size,
+                    "mime": mime_hint or "video/mp4",
+                    "filename": filename_hint or local_path.name,
+                    "key_mask": expected_mask,
+                },
+            )()
         except Exception as exc:
             log.exception("Failed to read local file %s job_id=%s", asset_reference, job.id)
             await _handle_delivery_failure(
@@ -4829,7 +4915,10 @@ async def _deliver_remote_media(
 
     if downloaded.size <= 0:
         log.warning(
-            "Downloaded asset is empty provider=%s job_id=%s corr_id=%s", provider_key, job.id, corr_id
+            "Downloaded asset is empty provider=%s job_id=%s corr_id=%s",
+            provider_key,
+            job.id,
+            corr_id,
         )
         await _handle_delivery_failure(
             dp,
@@ -4849,9 +4938,7 @@ async def _deliver_remote_media(
     duration_seconds = _extract_video_duration(job)
     download_mime = downloaded.mime or mime_hint or ""
     send_as_image = target_media == "image" and download_mime.startswith("image/")
-    filename = downloaded.filename or (
-        "image.png" if send_as_image else "video.mp4"
-    )
+    filename = downloaded.filename or ("image.png" if send_as_image else "video.mp4")
     if send_as_image:
         if not filename.lower().endswith((".png", ".jpg", ".jpeg", ".webp")):
             filename = "image.png"
@@ -4897,8 +4984,7 @@ async def _deliver_remote_media(
             if downloaded.size <= _TELEGRAM_VIDEO_MAX_BYTES:
                 video_source: Optional[Any] = None
                 is_veo_provider = provider_key == "veo" or (
-                    isinstance(job.model, str)
-                    and job.model.lower().startswith("veo-3.0-")
+                    isinstance(job.model, str) and job.model.lower().startswith("veo-3.0-")
                 )
                 if is_veo_provider:
                     file_path = getattr(downloaded, "path", None)
@@ -4936,9 +5022,7 @@ async def _deliver_remote_media(
                             blob = getattr(downloaded, "content", None)
                         if isinstance(blob, (bytes, bytearray)) and len(blob) > 0:
                             memory_filename = (
-                                getattr(downloaded, "filename", None)
-                                or filename
-                                or "video.mp4"
+                                getattr(downloaded, "filename", None) or filename or "video.mp4"
                             )
                             buffer = io.BytesIO(bytes(blob))
                             buffer.name = memory_filename
@@ -4987,7 +5071,10 @@ async def _deliver_remote_media(
                             error_reporter=error_reporter,
                             message=i18n.t("status.delivery_generic"),
                             reason="no_media",
-                            extra_log={"asset_bytes": downloaded.size, "stage": "missing_asset_payload"},
+                            extra_log={
+                                "asset_bytes": downloaded.size,
+                                "stage": "missing_asset_payload",
+                            },
                             key_mask=downloaded.key_mask or expected_mask,
                         )
                         return None
@@ -5187,7 +5274,9 @@ async def _handle_delivery_failure(
     if key_mask:
         extra_payload.setdefault("gemini_key_mask", key_mask)
     extra_payload.setdefault("delivery_reason", reason)
-    stage = "download" if reason in {"download_error", "key_mismatch", "config_error"} else "deliver"
+    stage = (
+        "download" if reason in {"download_error", "key_mismatch", "config_error"} else "deliver"
+    )
     if reason == "no_media":
         stage = "poll"
     status_code_value = None
@@ -5197,8 +5286,12 @@ async def _handle_delivery_failure(
         raw_status = extra_log.get("status_code")
         if isinstance(raw_status, int):
             status_code_value = raw_status
-        provider_error_code = str(extra_log.get("error_status") or raw_status or extra_log.get("status") or "")
-        provider_error_message = str(extra_log.get("error_status") or extra_log.get("reason_message") or "")
+        provider_error_code = str(
+            extra_log.get("error_status") or raw_status or extra_log.get("status") or ""
+        )
+        provider_error_message = str(
+            extra_log.get("error_status") or extra_log.get("reason_message") or ""
+        )
     else:
         provider_error_message = ""
     error_record = ErrorLogRecord(
@@ -5299,9 +5392,7 @@ def _build_archive_payload_from_sent(
     return payload
 
 
-async def start_command(
-    message: Message, db: Database, state: FSMContext, config: Config
-) -> None:
+async def start_command(message: Message, db: Database, state: FSMContext, config: Config) -> None:
     success = True
     try:
         payload = ""
@@ -5336,9 +5427,7 @@ def _render_help_text(config: Config) -> str:
     )
 
 
-async def help_command(
-    message: Message, db: Database, state: FSMContext, config: Config
-) -> None:
+async def help_command(message: Message, db: Database, state: FSMContext, config: Config) -> None:
     success = True
     try:
         await _ensure_user(message, db)
@@ -5474,7 +5563,9 @@ async def generate_image_menu(
 # --- Auto-style flows: trends entry and Nano Banana reuse ---
 
 
-async def _ensure_auto_style_context(state: FSMContext, config: Config) -> Optional[ImageModelOption]:
+async def _ensure_auto_style_context(
+    state: FSMContext, config: Config
+) -> Optional[ImageModelOption]:
     option = _default_image_model_option(config)
     if option is None:
         return None
@@ -5548,14 +5639,10 @@ async def trends_entry_menu(
     await message.answer(TREND_MENU_TITLE, reply_markup=_trends_keyboard())
 
 
-async def trends_menu_handler(
-    message: Message, state: FSMContext, config: Config
-) -> None:
+async def trends_menu_handler(message: Message, state: FSMContext, config: Config) -> None:
     choice = (message.text or "").strip()
     if choice == TREND_AUTO_BUTTON:
-        await _open_auto_styles_menu(
-            message=message, state=state, config=config, source="trends"
-        )
+        await _open_auto_styles_menu(message=message, state=state, config=config, source="trends")
         return
     if choice == TREND_BACK_BUTTON:
         await state.finish()
@@ -5660,9 +5747,7 @@ async def auto_style_callback_handler(
     await _prompt_auto_style_photo(message=callback.message, state=state, style=style)
 
 
-async def help_button(
-    message: Message, db: Database, state: FSMContext, config: Config
-) -> None:
+async def help_button(message: Message, db: Database, state: FSMContext, config: Config) -> None:
     await help_command(message, db, state, config)
 
 
@@ -5682,7 +5767,9 @@ async def handle_text_input(
     session = SESSION_MANAGER.get(user_id)
     state_data = await state.get_data()
     stored_model = state_data.get("model")
-    inferred_category = _infer_category_from_model(stored_model, config) if stored_model else "video"
+    inferred_category = (
+        _infer_category_from_model(stored_model, config) if stored_model else "video"
+    )
     category = state_data.get("flow_type", inferred_category)
     if category == "image":
         model = state_data.get("model")
@@ -5742,14 +5829,17 @@ async def handle_text_input(
     )
 
 
-async def handle_non_photo_reply(
-    message: Message, state: FSMContext, config: Config
-) -> None:
+async def handle_non_photo_reply(message: Message, state: FSMContext, config: Config) -> None:
     state_data = await state.get_data()
     auto_style = get_auto_style(state_data.get("auto_style_id"))
     if auto_style:
         await message.answer(
             AUTO_STYLE_PHOTO_PROMPT.format(style_title=auto_style.title),
+            reply_markup=ReplyKeyboardRemove(),
+        )
+    elif state_data.get("kling_motion_video_file_id"):
+        await message.answer(
+            i18n.t("video.prompt.kling.waiting_photo"),
             reply_markup=ReplyKeyboardRemove(),
         )
     else:
@@ -5835,6 +5925,10 @@ async def handle_photo_input(
             caption = _strip_pro_directives(raw_caption)
         prompt_text = caption
         order_extra = None
+    motion_video_file_id = state_data.get("kling_motion_video_file_id")
+    if _is_kling_context(provider, product, model) and isinstance(motion_video_file_id, str):
+        order_extra = dict(order_extra or {})
+        order_extra["motion_video_file_id"] = motion_video_file_id
     order = _create_order(
         category=category,
         flow="photo",
@@ -5966,6 +6060,16 @@ async def video_model_callback_handler(
         include_size=True,
         product=resolved_product,
     )
+    if _is_kling_context(option.provider, resolved_product, option.model):
+        await _start_kling_motion_flow(
+            callback.message,
+            state=state,
+            model=option.model,
+            provider=option.provider,
+            product=resolved_product,
+            model_label=option.label,
+        )
+        return
     await GenerationStates.video_mode.set()
     provider_key = (option.provider or "").strip().lower()
     if provider_key.startswith("sora"):
@@ -6235,7 +6339,8 @@ async def order_callback_handler(
         session.awaiting_payment = False
         await state.finish()
         await callback.message.answer(
-            _render_help_text(config), reply_markup=_main_keyboard(config),
+            _render_help_text(config),
+            reply_markup=_main_keyboard(config),
             parse_mode="HTML",
         )
         return
@@ -6474,11 +6579,15 @@ async def admin_menu_handler(
     close_label = i18n.t("admin.menu.close")
     if choice == broadcast_label:
         await AdminStates.broadcast_message.set()
-        await message.answer(i18n.t("admin.broadcast.prompt"), reply_markup=_admin_cancel_keyboard())
+        await message.answer(
+            i18n.t("admin.broadcast.prompt"), reply_markup=_admin_cancel_keyboard()
+        )
         return
     if choice == direct_label:
         await AdminStates.direct_target.set()
-        await message.answer(i18n.t("admin.direct.prompt_id"), reply_markup=_admin_cancel_keyboard())
+        await message.answer(
+            i18n.t("admin.direct.prompt_id"), reply_markup=_admin_cancel_keyboard()
+        )
         return
     if choice == close_label:
         await state.finish()
@@ -6498,10 +6607,14 @@ async def admin_broadcast_message_handler(
         await _return_to_admin_menu(state, message)
         return
     if message.media_group_id:
-        await message.answer(i18n.t("admin.broadcast.media_group_unsupported"), reply_markup=_admin_cancel_keyboard())
+        await message.answer(
+            i18n.t("admin.broadcast.media_group_unsupported"), reply_markup=_admin_cancel_keyboard()
+        )
         return
     if message.content_type in _BROADCAST_UNSUPPORTED_CONTENT_TYPES:
-        await message.answer(i18n.t("admin.broadcast.unsupported_service"), reply_markup=_admin_cancel_keyboard())
+        await message.answer(
+            i18n.t("admin.broadcast.unsupported_service"), reply_markup=_admin_cancel_keyboard()
+        )
         return
     preview_text = ""
     if message.content_type == ContentType.TEXT:
@@ -6523,9 +6636,7 @@ async def admin_broadcast_message_handler(
         broadcast_src_message_id=message.message_id,
         broadcast_preview_text=preview_text,
     )
-    await message.answer(
-        i18n.t("admin.broadcast.accepted", count=len(recipients))
-    )
+    await message.answer(i18n.t("admin.broadcast.accepted", count=len(recipients)))
     bot = getattr(message, "bot", None)
     if bot is None:
         log.warning("Admin broadcast message without bot instance")
@@ -6547,7 +6658,9 @@ async def admin_direct_target_handler(
         return
     identifier = (message.text or "").strip()
     if not identifier:
-        await message.answer(i18n.t("admin.direct.prompt_id"), reply_markup=_admin_cancel_keyboard())
+        await message.answer(
+            i18n.t("admin.direct.prompt_id"), reply_markup=_admin_cancel_keyboard()
+        )
         return
     try:
         users = await db.list_users()
@@ -6558,14 +6671,18 @@ async def admin_direct_target_handler(
         return
     record = _find_user_record(users, identifier)
     if not record:
-        await message.answer(i18n.t("admin.direct.not_found"), reply_markup=_admin_cancel_keyboard())
+        await message.answer(
+            i18n.t("admin.direct.not_found"), reply_markup=_admin_cancel_keyboard()
+        )
         return
     try:
         target_id = int(record.get("user_id", 0))
     except (TypeError, ValueError):
         target_id = 0
     if target_id <= 0:
-        await message.answer(i18n.t("admin.direct.not_found"), reply_markup=_admin_cancel_keyboard())
+        await message.answer(
+            i18n.t("admin.direct.not_found"), reply_markup=_admin_cancel_keyboard()
+        )
         return
     label = _format_user_label(record)
     await state.update_data(
@@ -6591,7 +6708,9 @@ async def admin_direct_message_handler(
         return
     text = (message.text or "").strip()
     if not text:
-        await message.answer(i18n.t("admin.direct.empty_message"), reply_markup=_admin_cancel_keyboard())
+        await message.answer(
+            i18n.t("admin.direct.empty_message"), reply_markup=_admin_cancel_keyboard()
+        )
         return
     data = await state.get_data()
     label = data.get("direct_target_label")
@@ -6651,10 +6770,9 @@ async def admin_panel_callback_handler(
             pass
         success = await _send_text_safely(bot, int(target_id), direct_text)
         result_key = "admin.direct.sent" if success else "admin.direct.failed"
-        await message.answer(
-            i18n.t(result_key, user=_escape_format_value(str(label or target_id)))
-        )
+        await message.answer(i18n.t(result_key, user=_escape_format_value(str(label or target_id))))
         await _return_to_admin_menu(state, message)
+
 
 def _format_health_text(result) -> str:
     mode = escape_html(result.details.get("mode", "-")) if isinstance(result.details, dict) else "-"
@@ -6936,9 +7054,8 @@ async def _video_create_command_impl(
         return
     available_lookup = {model.lower(): model for model in available_models}
     model_name_raw = (
-        (model or str(settings.get("model") or "").strip())
-        or config.resolved_sora_video_model
-    )
+        model or str(settings.get("model") or "").strip()
+    ) or config.resolved_sora_video_model
     model_name_lower = model_name_raw.lower() if model_name_raw else ""
     if available_lookup:
         if model_name_lower not in available_lookup:
@@ -7002,7 +7119,9 @@ async def _video_create_command_impl(
         await message.answer(message_text)
         return
     last_request = client.last_request
-    dropped_fields_snapshot = tuple(last_request.get("dropped_fields", ())) if isinstance(last_request, dict) else ()
+    dropped_fields_snapshot = (
+        tuple(last_request.get("dropped_fields", ())) if isinstance(last_request, dict) else ()
+    )
     try:
         record = await job_queue.register_external_job(
             job_id=job_id,
@@ -7101,7 +7220,9 @@ async def _video_remix_command_impl(
             await message.answer(i18n.t("video.common.expected_object"))
             return
         video_id = str(data.get("video_id") or data.get("id") or "").strip() or None
-        payload_text = json.dumps({k: v for k, v in data.items() if k not in {"video_id", "id"}}, ensure_ascii=False)
+        payload_text = json.dumps(
+            {k: v for k, v in data.items() if k not in {"video_id", "id"}}, ensure_ascii=False
+        )
     else:
         parts = args.split(maxsplit=1)
         video_id = parts[0]
@@ -7118,10 +7239,9 @@ async def _video_remix_command_impl(
     if client is None:
         await message.answer(i18n.t("video.common.init_failed"))
         return
-    model_name = (
-        (model or str(settings.get("model") or "").strip())
-        or (config.sora_model_video or "").strip()
-    )
+    model_name = (model or str(settings.get("model") or "").strip()) or (
+        config.sora_model_video or ""
+    ).strip()
     if not model_name:
         supported = client.supported_models
         model_name = supported[0] if supported else "sora-2"
@@ -7295,7 +7415,9 @@ async def video_list_command(
         status = str(entry.get("status") or entry.get("state") or "-")
         created = entry.get("created_at") or entry.get("createdAt") or entry.get("created")
         created_label = (
-            SafeText(i18n.t("video.list.entry_created", created=created)) if created else SafeText("")
+            SafeText(i18n.t("video.list.entry_created", created=created))
+            if created
+            else SafeText("")
         )
         lines.append(
             i18n.t(
@@ -7453,9 +7575,13 @@ async def diag_openai_video_command(
     supported = ", ".join(client.supported_models) or "—"
     diagnostics = client.get_diagnostics()
     headers = diagnostics.get("headers") or {}
-    headers_text = ", ".join(
-        f"{escape_html(str(key))}={escape_html(str(value))}" for key, value in sorted(headers.items())
-    ) or "—"
+    headers_text = (
+        ", ".join(
+            f"{escape_html(str(key))}={escape_html(str(value))}"
+            for key, value in sorted(headers.items())
+        )
+        or "—"
+    )
     content_endpoint = diagnostics.get("content_endpoint") or "—"
     available_models = diagnostics.get("available_models") or []
     available_models_text = ", ".join(map(str, available_models)) or "—"
@@ -7547,7 +7673,9 @@ async def diag_openai_video_command(
                 lines.append(f"… ещё {len(filtered_models) - 5}")
         else:
             lines.append("list_models: пусто")
-    sample_model = (config.sora_model_video or "").strip() or (client.supported_models[0] if client.supported_models else "")
+    sample_model = (config.sora_model_video or "").strip() or (
+        client.supported_models[0] if client.supported_models else ""
+    )
     try:
         prepared = client.prepare_create_request(
             prompt="Диагностика", payload={"model": sample_model} if sample_model else None
@@ -7644,7 +7772,9 @@ async def diag_openai_video_command(
                     parts.append(_shorten(str(message), 180))
                 if provider_message:
                     parts.append(_shorten(str(provider_message), 180))
-                lines.append("• " + escape_html("; ".join(parts) or json.dumps(snapshot, ensure_ascii=False)))
+                lines.append(
+                    "• " + escape_html("; ".join(parts) or json.dumps(snapshot, ensure_ascii=False))
+                )
             else:
                 lines.append("• " + escape_html(str(snapshot)))
     await message.answer("\n".join(lines))
@@ -7987,9 +8117,7 @@ def register_handlers(
         state="*",
     )
     dp.register_message_handler(
-        lambda message, state: chatgpt_menu(
-            message, state, config, chatgpt_client
-        ),
+        lambda message, state: chatgpt_menu(message, state, config, chatgpt_client),
         lambda message: message.text == i18n.t("buttons.chatgpt"),
         state="*",
     )
@@ -8018,6 +8146,16 @@ def register_handlers(
         state=GenerationStates.text_prompt,
     )
     dp.register_message_handler(
+        lambda message, state: handle_kling_motion_video_input(message, state, db, config),
+        state=GenerationStates.kling_motion_video,
+        content_types=[ContentType.VIDEO, ContentType.DOCUMENT],
+    )
+    dp.register_message_handler(
+        lambda message: message.answer(i18n.t("video.prompt.kling.reference_video_invalid")),
+        state=GenerationStates.kling_motion_video,
+        content_types=ContentType.ANY,
+    )
+    dp.register_message_handler(
         lambda message, state: handle_non_photo_reply(message, state, config),
         lambda message: not message.photo,
         state=GenerationStates.photo_prompt,
@@ -8029,9 +8167,7 @@ def register_handlers(
         content_types=["photo"],
     )
     dp.register_message_handler(
-        lambda message, state: tarot_question_handler(
-            message, state, db, config, chatgpt_client
-        ),
+        lambda message, state: tarot_question_handler(message, state, db, config, chatgpt_client),
         state=TarotStates.waiting_for_question,
         content_types=["text"],
     )
@@ -8054,16 +8190,12 @@ def register_handlers(
         state=None,
     )
     dp.register_message_handler(
-        lambda message, state: successful_text_handler(
-            message, state, db, config, chatgpt_client
-        ),
+        lambda message, state: successful_text_handler(message, state, db, config, chatgpt_client),
         content_types=["text"],
         state=None,
     )
     dp.register_message_handler(
-        lambda message, state: chatgpt_respond(
-            message, state, config, chatgpt_client
-        ),
+        lambda message, state: chatgpt_respond(message, state, config, chatgpt_client),
         state=ChatGPTState.awaiting_input,
         content_types=["text"],
     )
