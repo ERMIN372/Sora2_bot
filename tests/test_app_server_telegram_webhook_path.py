@@ -154,3 +154,40 @@ def test_telegram_webhook_warn_secret_mode_allows_invalid_token(monkeypatch):
 
     assert response.status_code == 200
     assert len(dp.updates) == 1
+
+
+class _StubWebhookInfo:
+    url = "https://example.org/tg/webhook"
+    pending_update_count = 7
+    last_error_date = None
+    last_error_message = None
+    max_connections = 40
+    ip_address = "1.2.3.4"
+
+
+class _DiagBot:
+    async def get_webhook_info(self):
+        return _StubWebhookInfo()
+
+
+def test_diag_returns_live_telegram_webhook_info(monkeypatch):
+    monkeypatch.setattr(
+        app_server,
+        "CFG",
+        SimpleNamespace(
+            BOT_MODE="webhook",
+            WEBHOOK_URL="https://example.org/tg/webhook",
+            WEBHOOK_PATH="/tg/webhook",
+            TG_WEBHOOK_SECRET="",
+        ),
+    )
+    app = app_server._create_base_app()
+    app.state.bot = _DiagBot()
+    client = TestClient(app)
+
+    response = client.get("/diag")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["webhook_url"] == "https://example.org/tg/webhook"
+    assert payload["telegram_webhook_info"]["pending_update_count"] == 7
