@@ -419,6 +419,25 @@ def _is_valid_webhook_host(host: str) -> bool:
     return bool(hostname and "." in hostname)
 
 
+async def _log_webhook_info(bot: Bot, *, context: str) -> None:
+    try:
+        info = await bot.get_webhook_info()
+    except Exception:
+        log.warning("Failed to read Telegram webhook info context=%s", context, exc_info=True)
+        return
+
+    log.info(
+        "tg.webhook.info context=%s url=%s pending=%s last_error_date=%s last_error_message=%s max_connections=%s ip_address=%s",
+        context,
+        getattr(info, "url", None),
+        getattr(info, "pending_update_count", None),
+        getattr(info, "last_error_date", None),
+        getattr(info, "last_error_message", None),
+        getattr(info, "max_connections", None),
+        getattr(info, "ip_address", None),
+    )
+
+
 async def _configure_webhook(state: ApplicationState) -> bool:
     webhook_task = asyncio.create_task(
         state.bot.set_webhook(
@@ -435,6 +454,7 @@ async def _configure_webhook(state: ApplicationState) -> bool:
         return False
 
     log.info("webhook_set url=%s", CFG.WEBHOOK_URL)
+    await _log_webhook_info(state.bot, context="after_set_webhook")
     return True
 
 
@@ -638,6 +658,7 @@ if __name__ != "__main__":
             _start_asgi_polling_task(_ASGI_STATE, reason="invalid WEBHOOK_HOST")
             return
 
+        await _log_webhook_info(_ASGI_STATE.bot, context="before_set_webhook")
         configured = await _configure_webhook(_ASGI_STATE)
         if not configured:
             _start_asgi_polling_task(_ASGI_STATE, reason="webhook setup failed")
