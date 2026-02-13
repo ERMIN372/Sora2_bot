@@ -29,6 +29,7 @@ from middleware.rate_limit import RateLimitMiddleware
 from providers import (
     BaseProviderClient,
     GeminiImageClient,
+    KlingVideoClient,
     OpenAIChatClient,
     OpenAIImageClient,
     OpenAIVideoClient,
@@ -207,6 +208,22 @@ def _init_application(config: Config) -> ApplicationState:
             configured_model = (config.sora_model_video or "").strip()
             if configured_model and configured_model not in providers:
                 providers[configured_model] = openai_video_client
+    if config.kling_video_enabled:
+        try:
+            kling_client = KlingVideoClient(config=config)
+        except RuntimeError:
+            log.warning(
+                "Kling AI client is not configured; skipping",
+                exc_info=True,
+            )
+        else:
+            providers.update({
+                "kling": kling_client,
+                "kling_mc": kling_client,
+                "kling-video": kling_client,
+                "kling-v2-6-motion": kling_client,
+            })
+            log.info("Kling AI Motion Control provider registered")
     if config.openai_image_enabled:
         try:
             openai_image_client = OpenAIImageClient(config=config)
