@@ -1,4 +1,5 @@
 """Unified FastAPI application exposing health, payments and Telegram webhooks."""
+
 from __future__ import annotations
 
 import asyncio
@@ -27,8 +28,6 @@ from services import gsheets_ref
 import yookassa_client
 
 log = logging.getLogger(__name__)
-WEBHOOK_SECRET = CFG.TG_WEBHOOK_SECRET
-
 YOOKASSA_IP_RANGES = [
     ip_network("185.71.76.0/27"),
     ip_network("185.71.77.0/27"),
@@ -116,7 +115,9 @@ class YooKassaProcessor:
                 amount_currency = str(currency_raw)
         if not amount_value_str and amount_cp:
             try:
-                amount_value_str = str((Decimal(amount_cp) / Decimal(100)).quantize(Decimal("0.01")))
+                amount_value_str = str(
+                    (Decimal(amount_cp) / Decimal(100)).quantize(Decimal("0.01"))
+                )
             except Exception:
                 amount_value_str = str(amount_cp)
         idempotency_key = str(
@@ -126,7 +127,9 @@ class YooKassaProcessor:
             or ""
         )
         existing = await self._db.get_payment_by_ext("yookassa", payment_id)
-        existing_metadata = self._parse_metadata_field(existing.get("metadata") if existing else None)
+        existing_metadata = self._parse_metadata_field(
+            existing.get("metadata") if existing else None
+        )
         metadata = {**existing_metadata, **metadata}
         user_id_int = self._resolve_user_id(metadata, existing)
         if not user_id_int:
@@ -138,9 +141,7 @@ class YooKassaProcessor:
             return
 
         package_id = str(
-            metadata.get("package_id")
-            or (existing.get("package_id") if existing else "")
-            or ""
+            metadata.get("package_id") or (existing.get("package_id") if existing else "") or ""
         )
         purchased_credits = self._coerce_optional_int(metadata.get("purchased_credits"))
         if purchased_credits is None and existing is not None:
@@ -360,7 +361,9 @@ class YooKassaProcessor:
                     user_id,
                     i18n.t("payment.received", items=format_credits(items)),
                 )
-            await resend_pending_order(bot=self._bot, db=self._db, config=self._config, user_id=user_id)
+            await resend_pending_order(
+                bot=self._bot, db=self._db, config=self._config, user_id=user_id
+            )
         except Exception:  # pragma: no cover - Telegram API interaction
             log.exception("Failed to notify user %s about YooKassa success", user_id)
 
@@ -443,9 +446,7 @@ class YooKassaProcessor:
                 "🎉 Твой друг пополнил баланс. +100 кредитов за рефералку начислены.",
             )
         except Exception:
-            log.exception(
-                "Failed to notify referrer %s about referral bonus", referrer_id
-            )
+            log.exception("Failed to notify referrer %s about referral bonus", referrer_id)
         try:
             await self._bot.send_message(
                 payer_user_id,
@@ -510,7 +511,9 @@ class YooKassaProcessor:
     def _now_iso() -> str:
         return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
-    def _resolve_user_id(self, metadata: Dict[str, Any], existing: Optional[Dict[str, Any]]) -> Optional[int]:
+    def _resolve_user_id(
+        self, metadata: Dict[str, Any], existing: Optional[Dict[str, Any]]
+    ) -> Optional[int]:
         candidate = metadata.get("user_id")
         value = self._coerce_optional_int(candidate)
         if value:
@@ -619,9 +622,7 @@ def _health_router() -> APIRouter:
     return router
 
 
-def _yookassa_router(
-    *, config: Config, processor: Optional[YooKassaProcessor]
-) -> APIRouter:
+def _yookassa_router(*, config: Config, processor: Optional[YooKassaProcessor]) -> APIRouter:
     router = APIRouter()
 
     @router.post(config.yookassa_webhook_path)
@@ -636,9 +637,7 @@ def _yookassa_router(
             log.warning("Rejected YooKassa webhook from unauthorized IP %s", remote)
             return Response(status_code=403)
         body = await request.body()
-        if not _validate_yookassa_signature(
-            body, x_yookassa_signature, config.yookassa_secret_key
-        ):
+        if not _validate_yookassa_signature(body, x_yookassa_signature, config.yookassa_secret_key):
             log.warning("Rejected YooKassa webhook with invalid signature from %s", remote)
             return Response(status_code=401)
         try:
@@ -690,16 +689,24 @@ def _yookassa_router(
 def _telegram_router(dp: Dispatcher, bot: Bot) -> APIRouter:
     router = APIRouter()
 
-    # [TG_WEBHOOK_ROUTE]
-    @router.post("/tg/webhook", include_in_schema=False)
+    webhook_paths = [CFG.WEBHOOK_PATH]
+    if CFG.WEBHOOK_PATH != "/tg/webhook":
+        webhook_paths.append("/tg/webhook")
+
     async def tg_webhook(
         request: Request,
         x_telegram_bot_api_secret_token: str | None = Header(default=None),
     ) -> Response:
-        if WEBHOOK_SECRET:
-            if x_telegram_bot_api_secret_token != WEBHOOK_SECRET:
-                log.warning("Webhook: bad secret token from %s", request.client.host if request.client else "unknown")
-                return Response(status_code=200)  # Telegram requires 2xx; update is silently dropped
+        webhook_secret = CFG.TG_WEBHOOK_SECRET
+        if webhook_secret:
+            if x_telegram_bot_api_secret_token != webhook_secret:
+                log.warning(
+                    "Webhook: bad secret token from %s",
+                    request.client.host if request.client else "unknown",
+                )
+                return Response(
+                    status_code=200
+                )  # Telegram requires 2xx; update is silently dropped
 
         remote = request.client.host if request.client else "unknown"
         raw = await request.body()
@@ -754,6 +761,14 @@ def _telegram_router(dp: Dispatcher, bot: Bot) -> APIRouter:
             return Response(status_code=200)
 
         return Response(status_code=200)
+
+    for webhook_path in webhook_paths:
+        router.add_api_route(
+            webhook_path,
+            tg_webhook,
+            methods=["POST"],
+            include_in_schema=False,
+        )
 
     return router
 
@@ -830,6 +845,7 @@ app = _create_base_app()
 async def _unhandled_exc(request: Request, exc: Exception):
     log.exception("Unhandled exception", extra={"path": str(request.url)})
     return JSONResponse({"error": "internal"}, status_code=500)
+
 
 __all__ = [
     "BodySizeLimitMiddleware",

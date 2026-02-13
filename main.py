@@ -1,4 +1,5 @@
 """Minimal ASGI entrypoint for Uvicorn/Railway."""
+
 from __future__ import annotations
 
 import argparse
@@ -95,6 +96,19 @@ else:
 app: FastAPI | None = None
 _ASGI_STATE: "ApplicationState | None" = None
 _SENTRY_INITIALIZED = False
+
+
+def _start_asgi_polling_task(state: "ApplicationState", *, reason: str) -> None:
+    """Start background polling task in ASGI mode when webhook is unavailable."""
+
+    already_running = any(
+        not task.done() and getattr(task.get_coro(), "__name__", "") == "_run_polling_loop"
+        for task in state.background_tasks
+    )
+    if already_running:
+        return
+    state.background_tasks.append(asyncio.create_task(_run_polling_loop(state)))
+    log.warning("ASGI startup: fallback to polling (%s)", reason)
 
 
 def _init_sentry(config: Config) -> None:
@@ -217,12 +231,14 @@ def _init_application(config: Config) -> ApplicationState:
                 exc_info=True,
             )
         else:
-            providers.update({
-                "kling": kling_client,
-                "kling_mc": kling_client,
-                "kling-video": kling_client,
-                "kling-v2-6-motion": kling_client,
-            })
+            providers.update(
+                {
+                    "kling": kling_client,
+                    "kling_mc": kling_client,
+                    "kling-video": kling_client,
+                    "kling-v2-6-motion": kling_client,
+                }
+            )
             log.info("Kling AI Motion Control provider registered")
     if config.openai_image_enabled:
         try:
@@ -233,9 +249,7 @@ def _init_application(config: Config) -> ApplicationState:
                 exc_info=True,
             )
         else:
-            entries: Dict[str, BaseProviderClient] = {
-                "openai-image": openai_image_client
-            }
+            entries: Dict[str, BaseProviderClient] = {"openai-image": openai_image_client}
             for model_name in config.fallback_image_models:
                 if not isinstance(model_name, str):
                     continue
@@ -349,7 +363,9 @@ async def _startup(state: ApplicationState, *, mode: str) -> None:
             "last_name": chat.last_name,
         }
 
-    state.background_tasks.append(asyncio.create_task(state.db.backfill_user_profiles(_fetch_profile)))
+    state.background_tasks.append(
+        asyncio.create_task(state.db.backfill_user_profiles(_fetch_profile))
+    )
     if state.config.credit_migration_enabled:
         try:
             migrated = await state.db.migrate_credit_balances(state.config.generation_cost_credits)
@@ -583,8 +599,7 @@ if __name__ != "__main__":
         await _startup(_ASGI_STATE, mode=mode)
 
         if mode == "polling":
-            _ASGI_STATE.background_tasks.append(asyncio.create_task(_run_polling_loop(_ASGI_STATE)))
-            log.info("ASGI startup: polling background task started")
+            _start_asgi_polling_task(_ASGI_STATE, reason="BOT_MODE=polling")
             return
 
         if mode != "webhook":
@@ -592,14 +607,13 @@ if __name__ != "__main__":
             return
 
         if not _is_valid_webhook_host(CFG.WEBHOOK_HOST):
-            log.warning(
-                "WEBHOOK_HOST is empty or invalid; webhook setup skipped and bot will not receive updates"
-            )
+            log.warning("WEBHOOK_HOST is empty or invalid; webhook setup skipped")
+            _start_asgi_polling_task(_ASGI_STATE, reason="invalid WEBHOOK_HOST")
             return
 
         configured = await _configure_webhook(_ASGI_STATE)
         if not configured:
-            log.warning("Webhook setup failed; bot may be unreachable via webhook")
+            _start_asgi_polling_task(_ASGI_STATE, reason="webhook setup failed")
 
     @app.on_event("shutdown")
     async def _asgi_shutdown() -> None:  # pragma: no cover - uvicorn lifecycle
@@ -609,6 +623,7 @@ if __name__ != "__main__":
 
 
 if __name__ == "__main__":
+
     def main() -> None:
         args = _parse_args()
         config = load_config()
