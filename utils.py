@@ -110,7 +110,12 @@ async def build_telegram_file_url(bot: Bot, file_id: str) -> Optional[str]:
     file_path = (telegram_file.file_path or "").strip()
     if not file_path:
         return None
-    token = (getattr(bot, "token", "") or "").strip()
+    token = (
+        getattr(bot, "token", "")
+        or getattr(bot, "_token", "")
+        or getattr(bot, "_Bot__token", "")
+        or ""
+    ).strip()
     if not token:
         return None
     return f"https://api.telegram.org/file/bot{token}/{file_path}"

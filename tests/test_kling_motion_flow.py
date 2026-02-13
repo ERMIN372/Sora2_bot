@@ -7,7 +7,7 @@ from utils import build_telegram_file_url
 
 
 class _FakeBot:
-    token = "12345:abc"
+    _token = "12345:abc"
 
     async def get_file(self, file_id: str):
         assert file_id == "file123"
@@ -83,3 +83,13 @@ def test_build_telegram_file_url() -> None:
     url = asyncio.run(build_telegram_file_url(bot, "file123"))
 
     assert url == "https://api.telegram.org/file/bot12345:abc/videos/ref.mp4"
+
+
+def test_build_telegram_file_url_with_public_token_attr() -> None:
+    class _FakeBotPublicToken(_FakeBot):
+        token = "99999:xyz"
+
+    bot = _FakeBotPublicToken()
+    url = asyncio.run(build_telegram_file_url(bot, "file123"))
+
+    assert url == "https://api.telegram.org/file/bot99999:xyz/videos/ref.mp4"
