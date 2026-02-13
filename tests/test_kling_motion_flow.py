@@ -93,3 +93,26 @@ def test_build_telegram_file_url_with_public_token_attr() -> None:
     url = asyncio.run(build_telegram_file_url(bot, "file123"))
 
     assert url == "https://api.telegram.org/file/bot99999:xyz/videos/ref.mp4"
+
+
+def test_kling_extract_status_for_fal_queue() -> None:
+    client = KlingVideoClient.__new__(KlingVideoClient)
+
+    assert client._extract_status({"status": "IN_PROGRESS"}) == "running"
+    assert client._extract_status({"status": "COMPLETED"}) == "completed"
+
+
+def test_kling_extract_assets_for_fal_output() -> None:
+    client = KlingVideoClient.__new__(KlingVideoClient)
+
+    assets = client._extract_assets(
+        {
+            "output": {
+                "video": {
+                    "url": "https://cdn.example/video.mp4",
+                }
+            }
+        }
+    )
+
+    assert assets["video"] == "https://cdn.example/video.mp4"
