@@ -445,6 +445,33 @@ async def _shutdown(state: ApplicationState, *, mode: str) -> None:
     log.info("Shutdown sequence completed mode=%s", mode)
 
 
+async def _run_polling_loop(state: ApplicationState) -> None:
+    """Run Telegram long polling inside an existing asyncio loop.
+
+    This is used in ASGI deployments when BOT_MODE=polling so the bot can
+    receive updates even without webhook configuration.
+    """
+
+    log.info("ASGI polling loop started allowed_updates=%s", ",".join(ALLOWED_UPDATES))
+    offset: Optional[int] = None
+    try:
+        while True:
+            updates = await state.bot.get_updates(
+                offset=offset,
+                timeout=20,
+                allowed_updates=ALLOWED_UPDATES,
+            )
+            for update in updates:
+                offset = update.update_id + 1
+                await state.dp.process_update(update)
+    except asyncio.CancelledError:
+        log.info("ASGI polling loop cancelled")
+        raise
+    except Exception:
+        log.exception("ASGI polling loop crashed")
+        raise
+
+
 def _run_polling(state: ApplicationState, loop: asyncio.AbstractEventLoop) -> None:
     log.info("Launching polling mode")
 
@@ -553,12 +580,12 @@ if __name__ != "__main__":
         if _ASGI_STATE is None:
             return
         mode = (CFG.BOT_MODE or "webhook").lower()
-        if mode == "polling":
-            log.warning(
-                "ASGI startup: BOT_MODE=polling is not supported; keeping webhook handlers active",
-            )
-            mode = "webhook"
         await _startup(_ASGI_STATE, mode=mode)
+
+        if mode == "polling":
+            _ASGI_STATE.background_tasks.append(asyncio.create_task(_run_polling_loop(_ASGI_STATE)))
+            log.info("ASGI startup: polling background task started")
+            return
 
         if mode != "webhook":
             log.info("Webhook setup skipped because BOT_MODE=%s", mode)
