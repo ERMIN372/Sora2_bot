@@ -148,7 +148,7 @@ from trend_presets import TREND_PRESETS, TrendPreset, get_trend_by_id
 from telegram_files import BufferedInputFile
 from tarot_data import draw_cards
 from tarot_telegram import send_card
-from utils import build_inline_data_from_telegram_file
+from utils import build_inline_data_from_telegram_file, build_telegram_file_url
 import yookassa_client
 from news_admin import register_news_admin_handlers
 
@@ -3524,11 +3524,9 @@ async def _launch_order(
         if isinstance(candidate_motion_file, str) and candidate_motion_file.strip():
             motion_video_file_id = candidate_motion_file.strip()
     if motion_video_file_id:
-        motion_inline_data = await build_inline_data_from_telegram_file(
-            callback.message.bot, motion_video_file_id
-        )
-        if motion_inline_data:
-            provider_settings["motion_video_inline_data"] = motion_inline_data
+        motion_video_url = await build_telegram_file_url(callback.message.bot, motion_video_file_id)
+        if motion_video_url:
+            provider_settings["motion_video_url"] = motion_video_url
         job_meta["motion_video_file_id"] = motion_video_file_id
 
     try:
