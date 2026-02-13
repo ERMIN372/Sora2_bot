@@ -1,4 +1,5 @@
 """Minimal ASGI entrypoint for Uvicorn/Railway."""
+
 from __future__ import annotations
 
 import argparse
@@ -77,7 +78,19 @@ def _configure_logging() -> None:
     root_logger.handlers = [handler]
     root_logger.setLevel(_LOG_LEVEL)
     logging.captureWarnings(True)
-    logging.getLogger("aiogram").setLevel(logging.DEBUG)
+
+    aiogram_level_name = os.getenv("AIOGRAM_LOG_LEVEL", "INFO").upper()
+    aiogram_level = getattr(logging, aiogram_level_name, logging.INFO)
+    if not isinstance(aiogram_level, int):
+        aiogram_level = logging.INFO
+    logging.getLogger("aiogram").setLevel(aiogram_level)
+
+    aiogram_api_level_name = os.getenv("AIOGRAM_API_LOG_LEVEL", "WARNING").upper()
+    aiogram_api_level = getattr(logging, aiogram_api_level_name, logging.WARNING)
+    if not isinstance(aiogram_api_level, int):
+        aiogram_api_level = logging.WARNING
+    logging.getLogger("aiogram.bot.api").setLevel(aiogram_api_level)
+
     logging.getLogger("uvicorn.error").setLevel(logging.INFO)
     logging.getLogger("uvicorn.access").setLevel(logging.INFO)
 
@@ -95,6 +108,23 @@ else:
 app: FastAPI | None = None
 _ASGI_STATE: "ApplicationState | None" = None
 _SENTRY_INITIALIZED = False
+
+
+def _debug_updates_enabled() -> bool:
+    return os.getenv("TG_DEBUG_UPDATES", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _start_asgi_polling_task(state: "ApplicationState", *, reason: str) -> None:
+    """Start background polling task in ASGI mode when webhook is unavailable."""
+
+    already_running = any(
+        not task.done() and getattr(task.get_coro(), "__name__", "") == "_run_polling_loop"
+        for task in state.background_tasks
+    )
+    if already_running:
+        return
+    state.background_tasks.append(asyncio.create_task(_run_polling_loop(state)))
+    log.warning("ASGI startup: fallback to polling (%s)", reason)
 
 
 def _init_sentry(config: Config) -> None:
@@ -217,12 +247,14 @@ def _init_application(config: Config) -> ApplicationState:
                 exc_info=True,
             )
         else:
-            providers.update({
-                "kling": kling_client,
-                "kling_mc": kling_client,
-                "kling-video": kling_client,
-                "kling-v2-6-motion": kling_client,
-            })
+            providers.update(
+                {
+                    "kling": kling_client,
+                    "kling_mc": kling_client,
+                    "kling-video": kling_client,
+                    "kling-v2-6-motion": kling_client,
+                }
+            )
             log.info("Kling AI Motion Control provider registered")
     if config.openai_image_enabled:
         try:
@@ -233,9 +265,7 @@ def _init_application(config: Config) -> ApplicationState:
                 exc_info=True,
             )
         else:
-            entries: Dict[str, BaseProviderClient] = {
-                "openai-image": openai_image_client
-            }
+            entries: Dict[str, BaseProviderClient] = {"openai-image": openai_image_client}
             for model_name in config.fallback_image_models:
                 if not isinstance(model_name, str):
                     continue
@@ -322,6 +352,17 @@ def _init_application(config: Config) -> ApplicationState:
 async def _startup(state: ApplicationState, *, mode: str) -> None:
     log.info("Starting services mode=%s", mode)
 
+    try:
+        me = await state.bot.get_me()
+    except Exception:
+        log.warning("Failed to read bot identity on startup", exc_info=True)
+    else:
+        log.info(
+            "tg.bot.identity id=%s username=%s",
+            getattr(me, "id", None),
+            getattr(me, "username", None),
+        )
+
     if mode == "polling":
         await state.bot.delete_webhook(drop_pending_updates=True)
         log.info("Webhook removed before polling starts")
@@ -349,7 +390,9 @@ async def _startup(state: ApplicationState, *, mode: str) -> None:
             "last_name": chat.last_name,
         }
 
-    state.background_tasks.append(asyncio.create_task(state.db.backfill_user_profiles(_fetch_profile)))
+    state.background_tasks.append(
+        asyncio.create_task(state.db.backfill_user_profiles(_fetch_profile))
+    )
     if state.config.credit_migration_enabled:
         try:
             migrated = await state.db.migrate_credit_balances(state.config.generation_cost_credits)
@@ -360,6 +403,12 @@ async def _startup(state: ApplicationState, *, mode: str) -> None:
     else:
         log.info("Credit migration disabled on startup")
     await state.job_queue.start()
+
+    if mode == "webhook":
+        guard_interval = int(os.getenv("TG_WEBHOOK_GUARD_INTERVAL_S", "60") or "60")
+        state.background_tasks.append(
+            asyncio.create_task(_webhook_guard_loop(state, interval_s=guard_interval))
+        )
 
     if state.yookassa_processor:
         try:
@@ -387,12 +436,35 @@ def _is_valid_webhook_host(host: str) -> bool:
     return bool(hostname and "." in hostname)
 
 
-async def _configure_webhook(state: ApplicationState) -> bool:
+async def _log_webhook_info(bot: Bot, *, context: str) -> None:
+    try:
+        info = await bot.get_webhook_info()
+    except Exception:
+        log.warning("Failed to read Telegram webhook info context=%s", context, exc_info=True)
+        return
+
+    log.info(
+        "tg.webhook.info context=%s url=%s pending=%s last_error_date=%s last_error_message=%s max_connections=%s ip_address=%s",
+        context,
+        getattr(info, "url", None),
+        getattr(info, "pending_update_count", None),
+        getattr(info, "last_error_date", None),
+        getattr(info, "last_error_message", None),
+        getattr(info, "max_connections", None),
+        getattr(info, "ip_address", None),
+    )
+
+
+async def _configure_webhook(
+    state: ApplicationState,
+    *,
+    drop_pending_updates: bool = True,
+) -> bool:
     webhook_task = asyncio.create_task(
         state.bot.set_webhook(
             CFG.WEBHOOK_URL,
             secret_token=CFG.TG_WEBHOOK_SECRET or None,
-            drop_pending_updates=True,
+            drop_pending_updates=drop_pending_updates,
             allowed_updates=ALLOWED_UPDATES,
         )
     )
@@ -403,7 +475,38 @@ async def _configure_webhook(state: ApplicationState) -> bool:
         return False
 
     log.info("webhook_set url=%s", CFG.WEBHOOK_URL)
+    await _log_webhook_info(state.bot, context="after_set_webhook")
     return True
+
+
+async def _webhook_guard_loop(state: ApplicationState, *, interval_s: int = 60) -> None:
+    """Keep Telegram webhook configured in webhook mode.
+
+    Some platforms or parallel processes may clear webhook unexpectedly.
+    This guard periodically verifies current webhook URL and restores it
+    without dropping pending updates.
+    """
+
+    target_url = CFG.WEBHOOK_URL
+    while True:
+        try:
+            await asyncio.sleep(max(15, int(interval_s)))
+            info = await state.bot.get_webhook_info()
+            current_url = (getattr(info, "url", "") or "").strip()
+            if current_url == target_url:
+                continue
+            log.warning(
+                "tg.webhook.guard.repair current=%s target=%s pending=%s",
+                current_url,
+                target_url,
+                getattr(info, "pending_update_count", None),
+            )
+            await _configure_webhook(state, drop_pending_updates=False)
+        except asyncio.CancelledError:
+            log.info("tg.webhook.guard.stopped")
+            raise
+        except Exception:
+            log.warning("tg.webhook.guard.failed", exc_info=True)
 
 
 async def _shutdown(state: ApplicationState, *, mode: str) -> None:
@@ -463,7 +566,18 @@ async def _run_polling_loop(state: ApplicationState) -> None:
             )
             for update in updates:
                 offset = update.update_id + 1
+                if _debug_updates_enabled():
+                    log.info(
+                        "tg.polling.dispatch update_id=%s has_message=%s has_callback=%s",
+                        getattr(update, "update_id", None),
+                        getattr(update, "message", None) is not None,
+                        getattr(update, "callback_query", None) is not None,
+                    )
                 await state.dp.process_update(update)
+                if _debug_updates_enabled():
+                    log.info(
+                        "tg.polling.processed update_id=%s", getattr(update, "update_id", None)
+                    )
     except asyncio.CancelledError:
         log.info("ASGI polling loop cancelled")
         raise
@@ -583,8 +697,7 @@ if __name__ != "__main__":
         await _startup(_ASGI_STATE, mode=mode)
 
         if mode == "polling":
-            _ASGI_STATE.background_tasks.append(asyncio.create_task(_run_polling_loop(_ASGI_STATE)))
-            log.info("ASGI startup: polling background task started")
+            _start_asgi_polling_task(_ASGI_STATE, reason="BOT_MODE=polling")
             return
 
         if mode != "webhook":
@@ -592,14 +705,14 @@ if __name__ != "__main__":
             return
 
         if not _is_valid_webhook_host(CFG.WEBHOOK_HOST):
-            log.warning(
-                "WEBHOOK_HOST is empty or invalid; webhook setup skipped and bot will not receive updates"
-            )
+            log.warning("WEBHOOK_HOST is empty or invalid; webhook setup skipped")
+            _start_asgi_polling_task(_ASGI_STATE, reason="invalid WEBHOOK_HOST")
             return
 
+        await _log_webhook_info(_ASGI_STATE.bot, context="before_set_webhook")
         configured = await _configure_webhook(_ASGI_STATE)
         if not configured:
-            log.warning("Webhook setup failed; bot may be unreachable via webhook")
+            _start_asgi_polling_task(_ASGI_STATE, reason="webhook setup failed")
 
     @app.on_event("shutdown")
     async def _asgi_shutdown() -> None:  # pragma: no cover - uvicorn lifecycle
@@ -609,6 +722,7 @@ if __name__ != "__main__":
 
 
 if __name__ == "__main__":
+
     def main() -> None:
         args = _parse_args()
         config = load_config()

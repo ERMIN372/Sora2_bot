@@ -1,4 +1,5 @@
 """Unified FastAPI application exposing health, payments and Telegram webhooks."""
+
 from __future__ import annotations
 
 import asyncio
@@ -7,6 +8,7 @@ import hmac
 import json
 import logging
 import os
+import time
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from ipaddress import ip_address, ip_network
@@ -27,8 +29,6 @@ from services import gsheets_ref
 import yookassa_client
 
 log = logging.getLogger(__name__)
-WEBHOOK_SECRET = CFG.TG_WEBHOOK_SECRET
-
 YOOKASSA_IP_RANGES = [
     ip_network("185.71.76.0/27"),
     ip_network("185.71.77.0/27"),
@@ -38,6 +38,50 @@ YOOKASSA_IP_RANGES = [
 ]
 
 MAX_REQUEST_SIZE = 2 * 1024 * 1024  # 2 MiB
+
+_TG_WEBHOOK_HITS_TOTAL = 0
+_TG_WEBHOOK_SECRET_MISMATCH_TOTAL = 0
+_LAST_TG_WEBHOOK_HIT_TS: float | None = None
+
+
+def _debug_updates_enabled() -> bool:
+    return os.getenv("TG_DEBUG_UPDATES", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _webhook_secret_mode() -> str:
+    mode = os.getenv("TG_WEBHOOK_SECRET_MODE", "strict").strip().lower()
+    if mode in {"strict", "warn"}:
+        return mode
+    return "strict"
+
+
+def _extract_update_summary(data: Dict[str, Any]) -> Dict[str, Any]:
+    message = data.get("message") if isinstance(data.get("message"), dict) else {}
+    callback_query = (
+        data.get("callback_query") if isinstance(data.get("callback_query"), dict) else {}
+    )
+    callback_message = (
+        callback_query.get("message") if isinstance(callback_query.get("message"), dict) else {}
+    )
+    user = message.get("from") if isinstance(message.get("from"), dict) else {}
+    callback_user = (
+        callback_query.get("from") if isinstance(callback_query.get("from"), dict) else {}
+    )
+    chat = message.get("chat") if isinstance(message.get("chat"), dict) else {}
+    callback_chat = (
+        callback_message.get("chat") if isinstance(callback_message.get("chat"), dict) else {}
+    )
+    return {
+        "update_id": data.get("update_id"),
+        "has_message": bool(message),
+        "has_callback": bool(callback_query),
+        "text": message.get("text") if isinstance(message.get("text"), str) else None,
+        "callback_data": (
+            callback_query.get("data") if isinstance(callback_query.get("data"), str) else None
+        ),
+        "user_id": user.get("id") or callback_user.get("id"),
+        "chat_id": chat.get("id") or callback_chat.get("id"),
+    }
 
 
 async def _load_available_models_async() -> None:
@@ -116,7 +160,9 @@ class YooKassaProcessor:
                 amount_currency = str(currency_raw)
         if not amount_value_str and amount_cp:
             try:
-                amount_value_str = str((Decimal(amount_cp) / Decimal(100)).quantize(Decimal("0.01")))
+                amount_value_str = str(
+                    (Decimal(amount_cp) / Decimal(100)).quantize(Decimal("0.01"))
+                )
             except Exception:
                 amount_value_str = str(amount_cp)
         idempotency_key = str(
@@ -126,7 +172,9 @@ class YooKassaProcessor:
             or ""
         )
         existing = await self._db.get_payment_by_ext("yookassa", payment_id)
-        existing_metadata = self._parse_metadata_field(existing.get("metadata") if existing else None)
+        existing_metadata = self._parse_metadata_field(
+            existing.get("metadata") if existing else None
+        )
         metadata = {**existing_metadata, **metadata}
         user_id_int = self._resolve_user_id(metadata, existing)
         if not user_id_int:
@@ -138,9 +186,7 @@ class YooKassaProcessor:
             return
 
         package_id = str(
-            metadata.get("package_id")
-            or (existing.get("package_id") if existing else "")
-            or ""
+            metadata.get("package_id") or (existing.get("package_id") if existing else "") or ""
         )
         purchased_credits = self._coerce_optional_int(metadata.get("purchased_credits"))
         if purchased_credits is None and existing is not None:
@@ -360,7 +406,9 @@ class YooKassaProcessor:
                     user_id,
                     i18n.t("payment.received", items=format_credits(items)),
                 )
-            await resend_pending_order(bot=self._bot, db=self._db, config=self._config, user_id=user_id)
+            await resend_pending_order(
+                bot=self._bot, db=self._db, config=self._config, user_id=user_id
+            )
         except Exception:  # pragma: no cover - Telegram API interaction
             log.exception("Failed to notify user %s about YooKassa success", user_id)
 
@@ -443,9 +491,7 @@ class YooKassaProcessor:
                 "🎉 Твой друг пополнил баланс. +100 кредитов за рефералку начислены.",
             )
         except Exception:
-            log.exception(
-                "Failed to notify referrer %s about referral bonus", referrer_id
-            )
+            log.exception("Failed to notify referrer %s about referral bonus", referrer_id)
         try:
             await self._bot.send_message(
                 payer_user_id,
@@ -510,7 +556,9 @@ class YooKassaProcessor:
     def _now_iso() -> str:
         return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
-    def _resolve_user_id(self, metadata: Dict[str, Any], existing: Optional[Dict[str, Any]]) -> Optional[int]:
+    def _resolve_user_id(
+        self, metadata: Dict[str, Any], existing: Optional[Dict[str, Any]]
+    ) -> Optional[int]:
         candidate = metadata.get("user_id")
         value = self._coerce_optional_int(candidate)
         if value:
@@ -619,9 +667,7 @@ def _health_router() -> APIRouter:
     return router
 
 
-def _yookassa_router(
-    *, config: Config, processor: Optional[YooKassaProcessor]
-) -> APIRouter:
+def _yookassa_router(*, config: Config, processor: Optional[YooKassaProcessor]) -> APIRouter:
     router = APIRouter()
 
     @router.post(config.yookassa_webhook_path)
@@ -636,9 +682,7 @@ def _yookassa_router(
             log.warning("Rejected YooKassa webhook from unauthorized IP %s", remote)
             return Response(status_code=403)
         body = await request.body()
-        if not _validate_yookassa_signature(
-            body, x_yookassa_signature, config.yookassa_secret_key
-        ):
+        if not _validate_yookassa_signature(body, x_yookassa_signature, config.yookassa_secret_key):
             log.warning("Rejected YooKassa webhook with invalid signature from %s", remote)
             return Response(status_code=401)
         try:
@@ -690,18 +734,50 @@ def _yookassa_router(
 def _telegram_router(dp: Dispatcher, bot: Bot) -> APIRouter:
     router = APIRouter()
 
-    # [TG_WEBHOOK_ROUTE]
-    @router.post("/tg/webhook", include_in_schema=False)
+    webhook_paths = [CFG.WEBHOOK_PATH]
+    if CFG.WEBHOOK_PATH != "/tg/webhook":
+        webhook_paths.append("/tg/webhook")
+
     async def tg_webhook(
         request: Request,
         x_telegram_bot_api_secret_token: str | None = Header(default=None),
     ) -> Response:
-        if WEBHOOK_SECRET:
-            if x_telegram_bot_api_secret_token != WEBHOOK_SECRET:
-                log.warning("Webhook: bad secret token from %s", request.client.host if request.client else "unknown")
-                return Response(status_code=200)  # Telegram requires 2xx; update is silently dropped
-
         remote = request.client.host if request.client else "unknown"
+        webhook_secret = CFG.TG_WEBHOOK_SECRET
+        provided_secret = x_telegram_bot_api_secret_token or request.headers.get(
+            "x-telegram-bot-api-secret-token"
+        )
+
+        global _TG_WEBHOOK_HITS_TOTAL, _LAST_TG_WEBHOOK_HIT_TS
+        _TG_WEBHOOK_HITS_TOTAL += 1
+        _LAST_TG_WEBHOOK_HIT_TS = time.time()
+        log.info(
+            "tg.webhook.arrived path=%s remote=%s secret_header_present=%s",
+            request.url.path,
+            remote,
+            bool(provided_secret),
+        )
+
+        if webhook_secret:
+            secret_valid = bool(provided_secret) and hmac.compare_digest(
+                str(provided_secret), str(webhook_secret)
+            )
+            if not secret_valid:
+                global _TG_WEBHOOK_SECRET_MISMATCH_TOTAL
+                _TG_WEBHOOK_SECRET_MISMATCH_TOTAL += 1
+                mode = _webhook_secret_mode()
+                log.warning(
+                    "Webhook: bad secret token from %s mode=%s expected_len=%s got_len=%s",
+                    remote,
+                    mode,
+                    len(webhook_secret),
+                    len(provided_secret or ""),
+                )
+                if mode == "strict":
+                    return Response(
+                        status_code=200
+                    )  # Telegram requires 2xx; update is silently dropped
+
         raw = await request.body()
         try:
             data = json.loads(raw.decode("utf-8"))
@@ -717,6 +793,11 @@ def _telegram_router(dp: Dispatcher, bot: Bot) -> APIRouter:
                 "keys": list(data.keys()),
             },
         )
+        if _debug_updates_enabled():
+            log.info(
+                "tg.webhook.dispatch.debug %s",
+                json.dumps(_extract_update_summary(data), ensure_ascii=False),
+            )
 
         try:
             if hasattr(types.Update, "to_object"):
@@ -746,6 +827,8 @@ def _telegram_router(dp: Dispatcher, bot: Bot) -> APIRouter:
                 set_dispatcher_ctx(dp)
 
             await dp.process_update(update)
+            if _debug_updates_enabled():
+                log.info("tg.webhook.processed update_id=%s", data.get("update_id"))
         except Exception:
             log.exception(
                 "Webhook: handler crashed",
@@ -755,7 +838,53 @@ def _telegram_router(dp: Dispatcher, bot: Bot) -> APIRouter:
 
         return Response(status_code=200)
 
+    for webhook_path in webhook_paths:
+        router.add_api_route(
+            webhook_path,
+            tg_webhook,
+            methods=["POST"],
+            include_in_schema=False,
+        )
+
     return router
+
+
+async def _ensure_webhook_configured(bot: Bot) -> None:
+    expected_url = CFG.WEBHOOK_URL
+    if not expected_url:
+        return
+    info = await bot.get_webhook_info()
+    current_url = (getattr(info, "url", "") or "").strip()
+    if current_url == expected_url:
+        return
+    log.warning(
+        "tg.webhook.guard.repair current=%s target=%s pending=%s",
+        current_url,
+        expected_url,
+        getattr(info, "pending_update_count", None),
+    )
+    await bot.set_webhook(
+        expected_url,
+        secret_token=CFG.TG_WEBHOOK_SECRET or None,
+        drop_pending_updates=False,
+        allowed_updates=["message", "callback_query"],
+    )
+
+
+async def _webhook_guard_loop(app: FastAPI, *, interval_s: int) -> None:
+    bot = getattr(app.state, "bot", None)
+    if bot is None:
+        log.info("tg.webhook.guard skipped: bot is not attached to app.state")
+        return
+    while True:
+        try:
+            await asyncio.sleep(max(15, int(interval_s)))
+            await _ensure_webhook_configured(bot)
+        except asyncio.CancelledError:
+            log.info("tg.webhook.guard.stopped")
+            raise
+        except Exception:
+            log.warning("tg.webhook.guard.failed", exc_info=True)
 
 
 def _create_base_app() -> FastAPI:
@@ -787,6 +916,41 @@ def _create_base_app() -> FastAPI:
             status_code=200 if ok else 503,
         )
 
+    @app.get("/diag", include_in_schema=False)
+    async def diag() -> Dict[str, object]:
+        now = time.time()
+        last_hit = _LAST_TG_WEBHOOK_HIT_TS
+        last_hit_age_s = None if last_hit is None else round(max(0.0, now - last_hit), 3)
+
+        result: Dict[str, object] = {
+            "ok": True,
+            "mode": CFG.BOT_MODE,
+            "webhook_url": CFG.WEBHOOK_URL,
+            "webhook_path": CFG.WEBHOOK_PATH,
+            "webhook_secret_mode": _webhook_secret_mode(),
+            "webhook_hits_total": _TG_WEBHOOK_HITS_TOTAL,
+            "webhook_secret_mismatch_total": _TG_WEBHOOK_SECRET_MISMATCH_TOTAL,
+            "last_webhook_hit_age_s": last_hit_age_s,
+        }
+
+        bot = getattr(app.state, "bot", None)
+        if bot is not None:
+            try:
+                info = await bot.get_webhook_info()
+            except Exception as exc:
+                result["telegram_webhook_info_error"] = str(exc)
+            else:
+                result["telegram_webhook_info"] = {
+                    "url": getattr(info, "url", None),
+                    "pending_update_count": getattr(info, "pending_update_count", None),
+                    "last_error_date": getattr(info, "last_error_date", None),
+                    "last_error_message": getattr(info, "last_error_message", None),
+                    "max_connections": getattr(info, "max_connections", None),
+                    "ip_address": getattr(info, "ip_address", None),
+                }
+
+        return result
+
     @app.get("/", include_in_schema=False)
     async def root() -> Dict[str, str | bool]:
         return {"ok": True, "service": "sora2-bot", "mode": "webhook"}
@@ -796,10 +960,29 @@ def _create_base_app() -> FastAPI:
 
     @app.on_event("startup")
     async def _startup_bg() -> None:
-        if os.getenv("SKIP_GEMINI_MODEL_LOADING", "1") == "1":
-            return
-        loader_task = asyncio.create_task(_load_available_models_async())
-        app.state.model_loader_task = loader_task
+        if CFG.BOT_MODE == "webhook":
+            guard_interval = int(os.getenv("TG_WEBHOOK_GUARD_INTERVAL_S", "60") or "60")
+            app.state.webhook_guard_task = asyncio.create_task(
+                _webhook_guard_loop(app, interval_s=guard_interval)
+            )
+            bot = getattr(app.state, "bot", None)
+            if bot is not None:
+                try:
+                    await _ensure_webhook_configured(bot)
+                except Exception:
+                    log.warning("Failed to ensure webhook from app startup", exc_info=True)
+
+        if os.getenv("SKIP_GEMINI_MODEL_LOADING", "1") != "1":
+            loader_task = asyncio.create_task(_load_available_models_async())
+            app.state.model_loader_task = loader_task
+
+    @app.on_event("shutdown")
+    async def _shutdown_bg() -> None:
+        guard_task = getattr(app.state, "webhook_guard_task", None)
+        if guard_task is not None:
+            guard_task.cancel()
+            await asyncio.gather(guard_task, return_exceptions=True)
+            app.state.webhook_guard_task = None
 
     return app
 
@@ -816,6 +999,7 @@ def create_app(
 
     app = _create_base_app()
     app.state.db = db
+    app.state.bot = bot
 
     app.include_router(_telegram_router(dp, bot))
     app.include_router(_yookassa_router(config=config, processor=processor))
@@ -830,6 +1014,7 @@ app = _create_base_app()
 async def _unhandled_exc(request: Request, exc: Exception):
     log.exception("Unhandled exception", extra={"path": str(request.url)})
     return JSONResponse({"error": "internal"}, status_code=500)
+
 
 __all__ = [
     "BodySizeLimitMiddleware",
