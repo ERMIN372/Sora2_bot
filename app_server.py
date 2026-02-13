@@ -43,6 +43,13 @@ def _debug_updates_enabled() -> bool:
     return os.getenv("TG_DEBUG_UPDATES", "").strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _webhook_secret_mode() -> str:
+    mode = os.getenv("TG_WEBHOOK_SECRET_MODE", "strict").strip().lower()
+    if mode in {"strict", "warn"}:
+        return mode
+    return "strict"
+
+
 def _extract_update_summary(data: Dict[str, Any]) -> Dict[str, Any]:
     message = data.get("message") if isinstance(data.get("message"), dict) else {}
     callback_query = (
@@ -730,18 +737,37 @@ def _telegram_router(dp: Dispatcher, bot: Bot) -> APIRouter:
         request: Request,
         x_telegram_bot_api_secret_token: str | None = Header(default=None),
     ) -> Response:
-        webhook_secret = CFG.TG_WEBHOOK_SECRET
-        if webhook_secret:
-            if x_telegram_bot_api_secret_token != webhook_secret:
-                log.warning(
-                    "Webhook: bad secret token from %s",
-                    request.client.host if request.client else "unknown",
-                )
-                return Response(
-                    status_code=200
-                )  # Telegram requires 2xx; update is silently dropped
-
         remote = request.client.host if request.client else "unknown"
+        webhook_secret = CFG.TG_WEBHOOK_SECRET
+        provided_secret = x_telegram_bot_api_secret_token or request.headers.get(
+            "x-telegram-bot-api-secret-token"
+        )
+
+        log.info(
+            "tg.webhook.arrived path=%s remote=%s secret_header_present=%s",
+            request.url.path,
+            remote,
+            bool(provided_secret),
+        )
+
+        if webhook_secret:
+            secret_valid = bool(provided_secret) and hmac.compare_digest(
+                str(provided_secret), str(webhook_secret)
+            )
+            if not secret_valid:
+                mode = _webhook_secret_mode()
+                log.warning(
+                    "Webhook: bad secret token from %s mode=%s expected_len=%s got_len=%s",
+                    remote,
+                    mode,
+                    len(webhook_secret),
+                    len(provided_secret or ""),
+                )
+                if mode == "strict":
+                    return Response(
+                        status_code=200
+                    )  # Telegram requires 2xx; update is silently dropped
+
         raw = await request.body()
         try:
             data = json.loads(raw.decode("utf-8"))

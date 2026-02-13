@@ -110,3 +110,47 @@ def test_telegram_webhook_debug_logging(monkeypatch, caplog):
     assert response.status_code == 200
     assert "tg.webhook.dispatch.debug" in caplog.text
     assert "tg.webhook.processed update_id=303" in caplog.text
+
+
+def test_telegram_webhook_strict_secret_mode_blocks_invalid_token(monkeypatch):
+    monkeypatch.setenv("TG_WEBHOOK_SECRET_MODE", "strict")
+    monkeypatch.setattr(
+        app_server,
+        "CFG",
+        SimpleNamespace(WEBHOOK_PATH="/tg/webhook", TG_WEBHOOK_SECRET="secret"),
+    )
+    monkeypatch.setattr(app_server.types, "Update", _StubUpdate)
+    monkeypatch.setattr(app_server, "Bot", _StubBotClass)
+    monkeypatch.setattr(app_server, "Dispatcher", _StubDispatcherClass)
+
+    dp = _StubDispatcher()
+    app = FastAPI()
+    app.include_router(app_server._telegram_router(dp=dp, bot=object()))
+    client = TestClient(app)
+
+    response = client.post("/tg/webhook", json={"update_id": 404, "message": {"text": "/start"}})
+
+    assert response.status_code == 200
+    assert len(dp.updates) == 0
+
+
+def test_telegram_webhook_warn_secret_mode_allows_invalid_token(monkeypatch):
+    monkeypatch.setenv("TG_WEBHOOK_SECRET_MODE", "warn")
+    monkeypatch.setattr(
+        app_server,
+        "CFG",
+        SimpleNamespace(WEBHOOK_PATH="/tg/webhook", TG_WEBHOOK_SECRET="secret"),
+    )
+    monkeypatch.setattr(app_server.types, "Update", _StubUpdate)
+    monkeypatch.setattr(app_server, "Bot", _StubBotClass)
+    monkeypatch.setattr(app_server, "Dispatcher", _StubDispatcherClass)
+
+    dp = _StubDispatcher()
+    app = FastAPI()
+    app.include_router(app_server._telegram_router(dp=dp, bot=object()))
+    client = TestClient(app)
+
+    response = client.post("/tg/webhook", json={"update_id": 405, "message": {"text": "/start"}})
+
+    assert response.status_code == 200
+    assert len(dp.updates) == 1
