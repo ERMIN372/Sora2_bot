@@ -357,14 +357,14 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
             "🎭 <b>Motion Control</b> · {model}\n\n"
             "Пришлите <b>фото персонажа</b> — модель перенесёт на него движение.\n"
             "При желании добавьте текстовый промпт для фона/стиля.\n\n"
-            "Длительность: {duration} сек\n"
+            "Длительность: автоматически по видео-референсу\n"
             "Стоимость: {price}"
         ),
         "video.prompt.photo_kling": (
             "🎭 <b>Motion Control</b> · {model}\n\n"
             "Теперь пришлите <b>фото персонажа</b> (можно с подписью-промптом).\n"
             "Модель перенесёт движение из видео-референса на вашего персонажа.\n\n"
-            "Длительность: {duration} сек\n"
+            "Длительность: автоматически по видео-референсу\n"
             "Стоимость: {price}"
         ),
         "video.prompt.kling.reference_video": (
@@ -401,6 +401,25 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
             "📎 Фото принято\n"
             "✍️ {prompt}\n\n"
             "🎛 {duration} сек · {aspect} · {quality}\n"
+            "🎞 {size} · {model}\n"
+            "━━━━━━━━━━━━━━━\n"
+            "💰 <b>{price}</b>"
+        ),
+        "video.confirm.text_kling": (
+            "<b>📋 Ваш заказ</b>\n"
+            "━━━━━━━━━━━━━━━\n"
+            "✍️ {prompt}\n\n"
+            "🎭 Motion Control · длительность по видео-референсу\n"
+            "🎞 {size} · {model}\n"
+            "━━━━━━━━━━━━━━━\n"
+            "💰 <b>{price}</b>"
+        ),
+        "video.confirm.photo_kling": (
+            "<b>📋 Ваш заказ</b>\n"
+            "━━━━━━━━━━━━━━━\n"
+            "📎 Фото принято\n"
+            "✍️ {prompt}\n\n"
+            "🎭 Motion Control · длительность по видео-референсу\n"
             "🎞 {size} · {model}\n"
             "━━━━━━━━━━━━━━━\n"
             "💰 <b>{price}</b>"

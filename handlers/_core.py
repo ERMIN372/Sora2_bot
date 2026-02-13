@@ -171,7 +171,6 @@ VIDEO_PRICE_RUB: Dict[int, Decimal] = {
 VEO_FIXED_DURATION = 8
 VEO_FIXED_PRICE_RUB = Decimal("89")
 VEO31_FIXED_PRICE_RUB = Decimal("299")
-KLING_MC_FIXED_DURATION = 5
 KLING_MC_FIXED_PRICE_RUB = Decimal("79")
 TREND_VIDEO_PRICE_CREDITS = 99
 
@@ -2668,7 +2667,7 @@ def _create_order(
     credits_cost = config.get_product_credits(resolved_product)
     if category == "video":
         if _is_kling_context(provider, resolved_product, model):
-            duration_seconds = KLING_MC_FIXED_DURATION
+            duration_seconds = None
             hd_enabled = False
         elif _is_veo_context(provider, resolved_product, model):
             duration_seconds = VEO_FIXED_DURATION
@@ -2738,7 +2737,7 @@ def _video_prompt_body(
     duration_value: int
     quality_label = _video_quality_label(session.hd_enabled)
     if is_kling:
-        duration_value = KLING_MC_FIXED_DURATION
+        duration_value = session.video_duration
         quality_label = _video_quality_label(False)
         template = "video.prompt.photo_kling" if mode == "photo" else "video.prompt.text_kling"
     elif is_veo:
@@ -2774,8 +2773,6 @@ async def _send_generation_prompt(
 ) -> None:
     if category == "video":
         if _is_kling_context(provider, product, model):
-            if session.video_duration != KLING_MC_FIXED_DURATION:
-                session.video_duration = KLING_MC_FIXED_DURATION
             if session.hd_enabled:
                 session.hd_enabled = False
                 session.update_video_size()
@@ -2853,12 +2850,14 @@ async def _send_order_confirmation(
             )
     else:
         size_value = order.size or "—"
+        is_kling = _is_kling_context(order.provider, order.product, order.model)
         duration_value = order.duration_seconds or DEFAULT_VIDEO_DURATION
         aspect_value = order.aspect_ratio or DEFAULT_ASPECT_RATIO
         quality_value = _video_quality_label(order.hd)
         if order.flow == "photo":
+            template = "video.confirm.photo_kling" if is_kling else "video.confirm.photo"
             body = i18n.t(
-                "video.confirm.photo",
+                template,
                 prompt=prompt_text,
                 size=size_value,
                 duration=duration_value,
@@ -2868,8 +2867,9 @@ async def _send_order_confirmation(
                 price=price_text,
             )
         else:
+            template = "video.confirm.text_kling" if is_kling else "video.confirm.text"
             body = i18n.t(
-                "video.confirm.text",
+                template,
                 prompt=prompt_text,
                 size=size_value,
                 duration=duration_value,
