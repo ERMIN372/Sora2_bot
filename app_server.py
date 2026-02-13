@@ -39,6 +39,39 @@ YOOKASSA_IP_RANGES = [
 MAX_REQUEST_SIZE = 2 * 1024 * 1024  # 2 MiB
 
 
+def _debug_updates_enabled() -> bool:
+    return os.getenv("TG_DEBUG_UPDATES", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _extract_update_summary(data: Dict[str, Any]) -> Dict[str, Any]:
+    message = data.get("message") if isinstance(data.get("message"), dict) else {}
+    callback_query = (
+        data.get("callback_query") if isinstance(data.get("callback_query"), dict) else {}
+    )
+    callback_message = (
+        callback_query.get("message") if isinstance(callback_query.get("message"), dict) else {}
+    )
+    user = message.get("from") if isinstance(message.get("from"), dict) else {}
+    callback_user = (
+        callback_query.get("from") if isinstance(callback_query.get("from"), dict) else {}
+    )
+    chat = message.get("chat") if isinstance(message.get("chat"), dict) else {}
+    callback_chat = (
+        callback_message.get("chat") if isinstance(callback_message.get("chat"), dict) else {}
+    )
+    return {
+        "update_id": data.get("update_id"),
+        "has_message": bool(message),
+        "has_callback": bool(callback_query),
+        "text": message.get("text") if isinstance(message.get("text"), str) else None,
+        "callback_data": (
+            callback_query.get("data") if isinstance(callback_query.get("data"), str) else None
+        ),
+        "user_id": user.get("id") or callback_user.get("id"),
+        "chat_id": chat.get("id") or callback_chat.get("id"),
+    }
+
+
 async def _load_available_models_async() -> None:
     """Placeholder for asynchronous model loading during startup."""
 
@@ -724,6 +757,11 @@ def _telegram_router(dp: Dispatcher, bot: Bot) -> APIRouter:
                 "keys": list(data.keys()),
             },
         )
+        if _debug_updates_enabled():
+            log.info(
+                "tg.webhook.dispatch.debug %s",
+                json.dumps(_extract_update_summary(data), ensure_ascii=False),
+            )
 
         try:
             if hasattr(types.Update, "to_object"):
@@ -753,6 +791,8 @@ def _telegram_router(dp: Dispatcher, bot: Bot) -> APIRouter:
                 set_dispatcher_ctx(dp)
 
             await dp.process_update(update)
+            if _debug_updates_enabled():
+                log.info("tg.webhook.processed update_id=%s", data.get("update_id"))
         except Exception:
             log.exception(
                 "Webhook: handler crashed",

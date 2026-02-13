@@ -98,6 +98,10 @@ _ASGI_STATE: "ApplicationState | None" = None
 _SENTRY_INITIALIZED = False
 
 
+def _debug_updates_enabled() -> bool:
+    return os.getenv("TG_DEBUG_UPDATES", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _start_asgi_polling_task(state: "ApplicationState", *, reason: str) -> None:
     """Start background polling task in ASGI mode when webhook is unavailable."""
 
@@ -479,7 +483,18 @@ async def _run_polling_loop(state: ApplicationState) -> None:
             )
             for update in updates:
                 offset = update.update_id + 1
+                if _debug_updates_enabled():
+                    log.info(
+                        "tg.polling.dispatch update_id=%s has_message=%s has_callback=%s",
+                        getattr(update, "update_id", None),
+                        getattr(update, "message", None) is not None,
+                        getattr(update, "callback_query", None) is not None,
+                    )
                 await state.dp.process_update(update)
+                if _debug_updates_enabled():
+                    log.info(
+                        "tg.polling.processed update_id=%s", getattr(update, "update_id", None)
+                    )
     except asyncio.CancelledError:
         log.info("ASGI polling loop cancelled")
         raise

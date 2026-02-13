@@ -1,3 +1,4 @@
+import logging
 from types import SimpleNamespace
 
 from fastapi import FastAPI
@@ -84,3 +85,28 @@ def test_telegram_webhook_secret_validation(monkeypatch):
     assert rejected.status_code == 200
     assert accepted.status_code == 200
     assert len(dp.updates) == 1
+
+
+def test_telegram_webhook_debug_logging(monkeypatch, caplog):
+    monkeypatch.setenv("TG_DEBUG_UPDATES", "1")
+    monkeypatch.setattr(
+        app_server,
+        "CFG",
+        SimpleNamespace(WEBHOOK_PATH="/tg/webhook", TG_WEBHOOK_SECRET=""),
+    )
+    monkeypatch.setattr(app_server.types, "Update", _StubUpdate)
+    monkeypatch.setattr(app_server, "Bot", _StubBotClass)
+    monkeypatch.setattr(app_server, "Dispatcher", _StubDispatcherClass)
+
+    dp = _StubDispatcher()
+    app = FastAPI()
+    app.include_router(app_server._telegram_router(dp=dp, bot=object()))
+    client = TestClient(app)
+
+    caplog.set_level(logging.INFO)
+    payload = {"update_id": 303, "message": {"text": "/start", "chat": {"id": 77}}}
+    response = client.post("/tg/webhook", json=payload)
+
+    assert response.status_code == 200
+    assert "tg.webhook.dispatch.debug" in caplog.text
+    assert "tg.webhook.processed update_id=303" in caplog.text
