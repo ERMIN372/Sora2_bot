@@ -168,6 +168,8 @@ VIDEO_PRICE_RUB: Dict[int, Decimal] = {
 VEO_FIXED_DURATION = 8
 VEO_FIXED_PRICE_RUB = Decimal("89")
 VEO31_FIXED_PRICE_RUB = Decimal("299")
+KLING_MC_FIXED_DURATION = 5
+KLING_MC_FIXED_PRICE_RUB = Decimal("79")
 TREND_VIDEO_PRICE_CREDITS = 99
 
 
@@ -282,6 +284,8 @@ _VIDEO_PROVIDER_PRICE_KEYS: Dict[str, str] = {
     "veo": "veo3",
     "veo31": "veo31",
     "sora": "sora",
+    "kling": "kling_mc",
+    "kling_mc": "kling_mc",
 }
 
 SUPPORTED_SORA_MODELS: Set[str] = set(SORA_SUPPORTED_MODELS)
@@ -699,6 +703,26 @@ def _is_veo31_model(name: str) -> bool:
     return normalised.lower().startswith("veo-3.1-")
 
 
+def _is_kling_mc_model(name: str) -> bool:
+    """Return True if *name* refers to a Kling Motion Control model."""
+    normalised = _normalise_video_model_name(name).lower()
+    return normalised.startswith("kling") and "motion" in normalised
+
+
+def _is_kling_context(
+    provider: Optional[str], product: Optional[str], model: Optional[str] = None
+) -> bool:
+    provider_key = (provider or "").strip().lower()
+    if provider_key.startswith("kling"):
+        return True
+    product_key = (product or "").strip().lower()
+    if product_key in {"kling_mc", "kling"}:
+        return True
+    if model and _is_kling_mc_model(model):
+        return True
+    return False
+
+
 def _is_sora_video_model_name(name: str) -> bool:
     normalised = _normalise_video_model_name(name)
     lowered = normalised.lower()
@@ -755,6 +779,8 @@ def _available_duration_options(
     is_admin: bool,
 ) -> Tuple[int, ...]:
     if _is_veo_context(provider, product, model):
+        return ()
+    if _is_kling_context(provider, product, model):
         return ()
     options: list[int] = list(VIDEO_DURATION_OPTIONS)
     if is_admin and _is_sora_context(provider, product, model):
@@ -825,6 +851,9 @@ def _video_model_options(config: Config) -> list[VideoModelOption]:
         default_sora = _normalise_video_model_name(config.sora_model_video)
         if default_sora:
             _register(default_sora, "sora")
+
+    if config.kling_video_enabled:
+        _register("kling-v2-6-motion", "kling_mc")
 
     return options
 
@@ -993,6 +1022,8 @@ def _resolve_product_key(
     if provider_key in {"gemini-image", "image", "gemini"}:
         return "image"
     model_key = _normalise_video_model_name(model or "")
+    if _is_kling_mc_model(model_key) or provider_key.startswith("kling"):
+        return "kling_mc"
     if _is_veo31_model(model_key):
         return "veo31"
     if provider_key.startswith("veo") or provider_key in {"gemini-video", "veo"}:
@@ -1555,6 +1586,12 @@ def _video_price_rub(
     product: Optional[str],
     model: Optional[str] = None,
 ) -> Decimal:
+    if model and _is_kling_mc_model(model):
+        return KLING_MC_FIXED_PRICE_RUB
+    if (product or "").lower() == "kling_mc":
+        return KLING_MC_FIXED_PRICE_RUB
+    if _is_kling_context(provider, product):
+        return KLING_MC_FIXED_PRICE_RUB
     if model and _is_veo31_model(model):
         return VEO31_FIXED_PRICE_RUB
     if (product or "").lower() == "veo31":
@@ -2555,7 +2592,10 @@ def _create_order(
     price_rub = Decimal("0")
     credits_cost = config.get_product_credits(resolved_product)
     if category == "video":
-        if _is_veo_context(provider, resolved_product, model):
+        if _is_kling_context(provider, resolved_product, model):
+            duration_seconds = KLING_MC_FIXED_DURATION
+            hd_enabled = False
+        elif _is_veo_context(provider, resolved_product, model):
             duration_seconds = VEO_FIXED_DURATION
             hd_enabled = False
         price_rub = _video_price_rub(duration_seconds, provider, resolved_product, model=model)
@@ -2618,13 +2658,18 @@ def _video_prompt_body(
     product: Optional[str],
     model: Optional[str] = None,
 ) -> str:
+    is_kling = _is_kling_context(provider, product, model)
     is_veo = _is_veo_context(provider, product, model)
-    template = "video.prompt.photo_veo" if mode == "photo" else "video.prompt.text_veo"
     duration_value: int
     quality_label = _video_quality_label(session.hd_enabled)
-    if is_veo:
+    if is_kling:
+        duration_value = KLING_MC_FIXED_DURATION
+        quality_label = _video_quality_label(False)
+        template = "video.prompt.photo_kling" if mode == "photo" else "video.prompt.text_kling"
+    elif is_veo:
         duration_value = VEO_FIXED_DURATION
         quality_label = _video_quality_label(False)
+        template = "video.prompt.photo_veo" if mode == "photo" else "video.prompt.text_veo"
     else:
         template = "video.prompt.photo" if mode == "photo" else "video.prompt.text"
         duration_value = session.video_duration
@@ -2653,7 +2698,13 @@ async def _send_generation_prompt(
     is_admin: bool = False,
 ) -> None:
     if category == "video":
-        if _is_veo_context(provider, product, model):
+        if _is_kling_context(provider, product, model):
+            if session.video_duration != KLING_MC_FIXED_DURATION:
+                session.video_duration = KLING_MC_FIXED_DURATION
+            if session.hd_enabled:
+                session.hd_enabled = False
+                session.update_video_size()
+        elif _is_veo_context(provider, product, model):
             if session.video_duration != VEO_FIXED_DURATION:
                 session.video_duration = VEO_FIXED_DURATION
             if session.hd_enabled:

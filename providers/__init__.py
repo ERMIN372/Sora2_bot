@@ -8,6 +8,7 @@ from .base import (
     ProviderJobSubmission,
 )
 from .gemini import GeminiImageClient, GeminiTextClient
+from .kling_video import KlingVideoClient
 from .openai_chat import OpenAIChatClient
 from .openai_image import OpenAIImageClient
 from .openai_video import OpenAIVideoClient
@@ -22,6 +23,7 @@ __all__ = [
     "ProviderJobSubmission",
     "GeminiImageClient",
     "GeminiTextClient",
+    "KlingVideoClient",
     "OpenAIChatClient",
     "OpenAIImageClient",
     "OpenAIVideoClient",
