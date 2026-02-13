@@ -70,6 +70,7 @@ def _mask(value: str, visible: int = 4) -> str:
 # JWT generation (HS256) without PyJWT dependency
 # ------------------------------------------------------------------
 
+
 def _b64url_encode(data: bytes) -> bytes:
     """Base64url-encode without padding."""
     return base64.urlsafe_b64encode(data).rstrip(b"=")
@@ -106,8 +107,7 @@ class KlingVideoClient(BaseProviderClient):
         self._secret_key = config.kling_secret_key
         if not self._access_key or not self._secret_key:
             raise RuntimeError(
-                "Kling API credentials not configured; "
-                "set KLING_ACCESS_KEY and KLING_SECRET_KEY"
+                "Kling API credentials not configured; " "set KLING_ACCESS_KEY and KLING_SECRET_KEY"
             )
         super().__init__(
             config=config,
@@ -168,13 +168,15 @@ class KlingVideoClient(BaseProviderClient):
             )
 
         # Motion reference: video_url or preset_motion
-        video_url = settings.get("video_url") or settings.get("motion_video_url")
+        video_url = self._resolve_motion_video_url(settings)
         preset_motion = settings.get("preset_motion") or settings.get("kling_preset")
         if not video_url and not preset_motion:
             preset_motion = DEFAULT_PRESET_MOTION
 
         mode = settings.get("kling_mode") or DEFAULT_MODE
-        duration = int(settings.get("duration") or settings.get("duration_seconds") or DEFAULT_DURATION)
+        duration = int(
+            settings.get("duration") or settings.get("duration_seconds") or DEFAULT_DURATION
+        )
         if duration not in (5, 10):
             duration = DEFAULT_DURATION
 
@@ -329,9 +331,7 @@ class KlingVideoClient(BaseProviderClient):
         )
         started = time.monotonic()
         try:
-            async with session.get(
-                video_url, allow_redirects=True, timeout=timeout
-            ) as response:
+            async with session.get(video_url, allow_redirects=True, timeout=timeout) as response:
                 if response.status != 200:
                     body = await response.text()
                     raise ProviderAPIError(
@@ -393,6 +393,20 @@ class KlingVideoClient(BaseProviderClient):
                 key = "video" if i == 0 else f"video_{i}"
                 assets[key] = url
         return assets
+
+    @staticmethod
+    def _resolve_motion_video_url(settings: Dict[str, Any]) -> Optional[str]:
+        explicit_url = settings.get("video_url") or settings.get("motion_video_url")
+        if isinstance(explicit_url, str) and explicit_url.strip():
+            return explicit_url.strip()
+
+        inline = settings.get("motion_video_inline_data")
+        if isinstance(inline, dict):
+            mime = inline.get("mime_type") or "video/mp4"
+            data = inline.get("data")
+            if data:
+                return f"data:{mime};base64,{data}"
+        return None
 
     # ------------------------------------------------------------------
     # Image resolution helpers
