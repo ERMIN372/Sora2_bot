@@ -352,6 +352,17 @@ def _init_application(config: Config) -> ApplicationState:
 async def _startup(state: ApplicationState, *, mode: str) -> None:
     log.info("Starting services mode=%s", mode)
 
+    try:
+        me = await state.bot.get_me()
+    except Exception:
+        log.warning("Failed to read bot identity on startup", exc_info=True)
+    else:
+        log.info(
+            "tg.bot.identity id=%s username=%s",
+            getattr(me, "id", None),
+            getattr(me, "username", None),
+        )
+
     if mode == "polling":
         await state.bot.delete_webhook(drop_pending_updates=True)
         log.info("Webhook removed before polling starts")
