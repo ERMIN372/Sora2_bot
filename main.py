@@ -78,7 +78,19 @@ def _configure_logging() -> None:
     root_logger.handlers = [handler]
     root_logger.setLevel(_LOG_LEVEL)
     logging.captureWarnings(True)
-    logging.getLogger("aiogram").setLevel(logging.DEBUG)
+
+    aiogram_level_name = os.getenv("AIOGRAM_LOG_LEVEL", "INFO").upper()
+    aiogram_level = getattr(logging, aiogram_level_name, logging.INFO)
+    if not isinstance(aiogram_level, int):
+        aiogram_level = logging.INFO
+    logging.getLogger("aiogram").setLevel(aiogram_level)
+
+    aiogram_api_level_name = os.getenv("AIOGRAM_API_LOG_LEVEL", "WARNING").upper()
+    aiogram_api_level = getattr(logging, aiogram_api_level_name, logging.WARNING)
+    if not isinstance(aiogram_api_level, int):
+        aiogram_api_level = logging.WARNING
+    logging.getLogger("aiogram.bot.api").setLevel(aiogram_api_level)
+
     logging.getLogger("uvicorn.error").setLevel(logging.INFO)
     logging.getLogger("uvicorn.access").setLevel(logging.INFO)
 

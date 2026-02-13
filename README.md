@@ -71,6 +71,8 @@ curl http://localhost:8080/healthz
 | `WEBHOOK_HOST` | Публичный HTTPS-хост, на который Telegram будет отправлять вебхуки. |
 | `WEBHOOK_PATH` | Путь Telegram вебхука (например, `/tg/webhook`). |
 | `TG_WEBHOOK_SECRET` | Секрет, проверяемый в заголовке `X-Telegram-Bot-Api-Secret-Token` и передаваемый при установке вебхука. Должен соответствовать `^[A-Za-z0-9_-]{1,256}$`. |
+| `AIOGRAM_LOG_LEVEL` | Уровень логирования для `aiogram` (`INFO` по умолчанию). Для глубокого дебага можно поставить `DEBUG`. |
+| `AIOGRAM_API_LOG_LEVEL` | Уровень логирования для `aiogram.bot.api` (`WARNING` по умолчанию, чтобы не засорять логи ответами `getChat`). |
 | `HOST` | Адрес, на котором Uvicorn слушает локальные подключения (обычно `0.0.0.0`). |
 | `PORT` | Порт HTTP-сервера FastAPI/Uvicorn. |
 | `GEMINI_API_VERSION` | Версия API Gemini, используемая SDK (по умолчанию `v1`). |
