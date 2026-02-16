@@ -79,10 +79,81 @@ class KlingVideoClient(BaseProviderClient):
         )
 
     def _build_headers(self) -> Dict[str, str]:
+        token_getter = getattr(self, "_get_token", None)
+        raw_token = ""
+        if callable(token_getter):
+            try:
+                raw_token = token_getter()
+            except Exception:
+                raw_token = ""
+        if not raw_token:
+            # Backward-compatible fallback for mixed/stale deployments where
+            # instance/class shape may miss _get_token.
+            raw_token = _generate_jwt(
+                getattr(self, "_access_key", "") or "",
+                getattr(self, "_secret_key", "") or "",
+            )
+        token = (raw_token or "").strip()
+        if token.lower().startswith("bearer "):
+            auth_value = token
+        else:
+            auth_value = f"Bearer {token}"
         return {
             "Authorization": f"Key {self._fal_key}",
             "Content-Type": "application/json",
         }
+        async with session.request(method, url, headers=headers, json=json_payload) as response:
+            text = await response.text()
+            duration_ms = int((time.monotonic() - started) * 1000)
+            if response.status >= 400:
+                raise ProviderAPIError(
+                    provider="kling",
+                    status_code=response.status,
+                    message="fal.ai submit failed",
+                    error_type="api_error",
+                    provider_message=text,
+                    duration_ms=duration_ms,
+                )
+            if not text:
+                return {}, response.status, duration_ms
+            try:
+                payload = json.loads(text)
+            except json.JSONDecodeError as exc:
+                raise ProviderAPIError(
+                    provider="kling",
+                    status_code=response.status,
+                    message="Unable to decode fal.ai response",
+                    error_type="decode",
+                    provider_message=text,
+                    duration_ms=duration_ms,
+                ) from exc
+            return payload, response.status, duration_ms
+
+    async def _request_with_legacy_fallback(
+        self,
+        method: str,
+        path: str,
+        *,
+        json_payload: Optional[Dict[str, Any]] = None,
+    ) -> tuple[Dict[str, Any], int, int]:
+        try:
+            kwargs: Dict[str, Any] = {}
+            if json_payload is not None:
+                kwargs["json"] = json_payload
+            return await self._request(method, path, **kwargs)
+        except NameError as exc:
+            if "_generate_jwt" not in str(exc):
+                raise
+            log.warning(
+                "kling.request detected legacy JWT NameError; using direct fal HTTP fallback method=%s path=%s",
+                method,
+                path,
+            )
+            return await self._request_via_fal_http(
+                method=method,
+                path=path,
+                json_payload=json_payload,
+            )
 
     async def _request_via_fal_http(
         self,
