@@ -245,3 +245,83 @@ def test_inline_download_failure_refunds(make_openai_video_config) -> None:
     assert any(call[1] == "failed_to_download" for call in db.update_calls)
     assert db.added_credits == [config.generation_cost_credits]
     assert db.jobs["job-2"].status == "failed_to_download"
+
+
+def test_running_poll_requeue_increments_attempt_and_preserves_limit(
+    monkeypatch: pytest.MonkeyPatch, make_openai_video_config
+) -> None:
+    config = make_openai_video_config()
+    db = InlineFakeDB()
+
+    status = ProviderJobStatus(
+        job_id="job-3",
+        status="running",
+        assets={},
+        error=None,
+        data={},
+        status_code=200,
+        duration_ms=55,
+    )
+    provider = FakeProvider(status=status)
+    job_queue = JobQueue(
+        db=db,
+        providers={"openai": provider},
+        default_provider="openai",
+        config=config,
+    )
+    record = GenerationJobRecord(
+        id="job-3",
+        user_id=777,
+        prompt="make video",
+        status="queued",
+        video_url=None,
+        video_id="vid-3",
+        error=None,
+        created_at=datetime.now(timezone.utc),
+        updated_at=datetime.now(timezone.utc),
+        size="720p",
+        model="openai",
+        cost_credits=config.generation_cost_credits,
+        username="tester",
+        corr_id="corr-3",
+        content_type="video",
+    )
+    _run(db.create_job(record))
+
+    enqueue_calls: List[Dict[str, Any]] = []
+
+    async def _capture_enqueue(**kwargs: Any) -> None:
+        enqueue_calls.append(dict(kwargs))
+
+    monkeypatch.setattr(job_queue, "enqueue", _capture_enqueue)
+
+    async def _fast_sleep(_: float) -> None:
+        return None
+
+    monkeypatch.setattr(asyncio, "sleep", _fast_sleep)
+
+    pending = PendingJob(
+        job_id="job-3",
+        user_id=777,
+        prompt="make video",
+        corr_id="corr-3",
+        size="720p",
+        model="openai",
+        provider="openai",
+        username="tester",
+        original_prompt="make video",
+        sanitized_prompt="make video",
+        task_type=ASSET_TASK_RETRIEVE,
+        asset_kind=ASSET_KIND_VIDEO,
+        provider_job_id="job-3",
+        video_id="vid-3",
+        attempt=2,
+        max_attempts=9,
+    )
+
+    _run(job_queue._handle_asset_retrieve(pending))
+
+    assert enqueue_calls, "running poll should requeue the job"
+    assert enqueue_calls[0]["attempt"] == 3
+    assert enqueue_calls[0]["max_attempts"] == 9
+    assert enqueue_calls[0]["asset_kind"] == ASSET_KIND_VIDEO

@@ -2335,9 +2335,11 @@ class JobQueue:
                     preflight_reason=pending.preflight_reason,
                     preflight_scope=pending.preflight_scope,
                     task_type=ASSET_TASK_RETRIEVE,
-                    asset_kind=ASSET_KIND_VIDEO,
+                    asset_kind=asset_kind,
                     provider_job_id=provider_job_id,
                     video_id=pending.video_id,
+                    attempt=attempt + 1,
+                    max_attempts=max_attempts,
                 )
                 return
         finally:
