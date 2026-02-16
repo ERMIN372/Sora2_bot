@@ -103,6 +103,26 @@ python tools/diag_kling_runtime.py
 python -m py_compile providers/kling_video.py
 ```
 
+Проверка, что в runtime действительно ваш последний коммит:
+
+```bash
+echo "RAILWAY_GIT_COMMIT_SHA=$RAILWAY_GIT_COMMIT_SHA"
+```
+
+Если в логах Railway всё ещё видно старую строку с `async with session.request(...)`,
+значит поднялся старый образ/кеш. Сделайте:
+
+1. **Deployments** → откройте последний деплой и проверьте commit SHA.
+2. Нажмите **Redeploy** (или **Deploy Latest Commit**).
+3. Если SHA не меняется, выполните redeploy с очисткой кеша сборки (Clear/Disable build cache).
+4. Сразу после старта контейнера снова запустите:
+
+```bash
+python tools/diag_kling_runtime.py
+```
+
+Если `contains_forbidden_async_with=False`, а `impl_rev` заполнен, runtime уже на новой версии.
+
 Если хотите проверить вручную, что в файле нет проблемного паттерна:
 
 ```bash
