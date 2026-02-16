@@ -267,29 +267,23 @@ def test_kling_direct_fallback_retries_without_status_on_405() -> None:
         def __init__(self, status: int, text: str):
             self.status = status
             self._text = text
+            self.released = False
 
         async def text(self) -> str:
             return self._text
 
-    class _ResponseCtx:
-        def __init__(self, response: _FakeResponse):
-            self._response = response
-
-        async def __aenter__(self):
-            return self._response
-
-        async def __aexit__(self, exc_type, exc, tb):
-            return False
+        def release(self) -> None:
+            self.released = True
 
     class _FakeSession:
         def __init__(self):
             self.calls = []
 
-        def request(self, method, url, headers=None, **kwargs):
+        async def request(self, method, url, headers=None, **kwargs):
             self.calls.append((method, url, kwargs))
             if len(self.calls) == 1:
-                return _ResponseCtx(_FakeResponse(405, "405: Method Not Allowed"))
-            return _ResponseCtx(_FakeResponse(200, '{"status":"COMPLETED"}'))
+                return _FakeResponse(405, "405: Method Not Allowed")
+            return _FakeResponse(200, '{"status":"COMPLETED"}')
 
     class _DirectClient(KlingVideoClient):
         async def _ensure_session(self):  # type: ignore[override]
