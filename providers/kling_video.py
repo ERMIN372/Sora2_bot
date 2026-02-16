@@ -898,9 +898,8 @@ class KlingVideoClient(BaseProviderClient):
                 )
 
         status_variants = [
-            ("GET", f"/{FAL_KLING_MODEL}/requests/{job_id}/status"),
-            ("GET", f"/{FAL_KLING_MODEL}/requests/{job_id}"),
             ("POST", f"/{FAL_KLING_MODEL}/requests/{job_id}/status"),
+            ("POST", f"/{FAL_KLING_MODEL}/requests/{job_id}"),
         ]
         last_error: Optional[ProviderAPIError] = None
         for method, status_path in status_variants:
@@ -929,7 +928,7 @@ class KlingVideoClient(BaseProviderClient):
 
         if status == "completed":
             result_data, _, _ = await self._request_with_legacy_fallback(
-                "GET",
+                "POST",
                 f"/{FAL_KLING_MODEL}/requests/{job_id}",
             )
             self._cache[job_id] = result_data

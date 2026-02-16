@@ -243,7 +243,7 @@ def test_kling_status_recovers_from_legacy_jwt_name_error() -> None:
         async def _request_via_fal_http(  # type: ignore[override]
             self, *, method: str, path: str, json_payload=None
         ):
-            assert method == "GET"
+            assert method == "POST"
             assert json_payload is None
             if path.endswith("/status"):
                 return {"status": "COMPLETED"}, 200, 50
@@ -338,20 +338,12 @@ def test_kling_status_retries_without_status_suffix_on_405() -> None:
     assert client.calls[1][1].endswith("/requests/req-405")
 
 
-def test_kling_status_falls_back_to_post_when_get_is_not_allowed() -> None:
+def test_kling_status_uses_post_method() -> None:
     class _PostStatusClient(KlingVideoClient):
         async def _request_with_legacy_fallback(  # type: ignore[override]
             self, method: str, path: str, *, json_payload=None
         ):
             self.calls.append((method, path, json_payload))
-            if method == "GET":
-                raise ProviderAPIError(
-                    provider="kling",
-                    status_code=405,
-                    message="fal.ai request failed",
-                    error_type="api_error",
-                    provider_message="405: Method Not Allowed",
-                )
             return {"status": "IN_PROGRESS"}, 200, 52
 
     client = _PostStatusClient.__new__(_PostStatusClient)
@@ -362,7 +354,5 @@ def test_kling_status_falls_back_to_post_when_get_is_not_allowed() -> None:
 
     assert result.status == "running"
     assert result.assets == {}
-    assert client.calls[0][:2] == ("GET", f"/{FAL_KLING_MODEL}/requests/req-post/status")
-    assert client.calls[1][:2] == ("GET", f"/{FAL_KLING_MODEL}/requests/req-post")
-    assert client.calls[2][:2] == ("POST", f"/{FAL_KLING_MODEL}/requests/req-post/status")
-    assert len(client.calls) == 3
+    assert client.calls[0][:2] == ("POST", f"/{FAL_KLING_MODEL}/requests/req-post/status")
+    assert len(client.calls) == 1
