@@ -95,25 +95,6 @@ class KlingVideoClient(BaseProviderClient):
         )
 
     def _build_headers(self) -> Dict[str, str]:
-        token_getter = getattr(self, "_get_token", None)
-        raw_token = ""
-        if callable(token_getter):
-            try:
-                raw_token = token_getter()
-            except Exception:
-                raw_token = ""
-        if not raw_token:
-            # Backward-compatible fallback for mixed/stale deployments where
-            # instance/class shape may miss _get_token.
-            raw_token = _generate_jwt(
-                getattr(self, "_access_key", "") or "",
-                getattr(self, "_secret_key", "") or "",
-            )
-        token = (raw_token or "").strip()
-        if token.lower().startswith("bearer "):
-            auth_value = token
-        else:
-            auth_value = f"Bearer {token}"
         return {
             "Authorization": f"Key {self._fal_key}",
             "Content-Type": "application/json",
@@ -926,10 +907,22 @@ class KlingVideoClient(BaseProviderClient):
                     duration_ms=0,
                 )
 
-        data, status_code, duration_ms = await self._request_with_legacy_fallback(
-            "GET",
-            f"/{FAL_KLING_MODEL}/requests/{job_id}/status",
-        )
+        status_path = f"/{FAL_KLING_MODEL}/requests/{job_id}/status"
+        try:
+            data, status_code, duration_ms = await self._request_with_legacy_fallback(
+                "GET",
+                status_path,
+            )
+        except ProviderAPIError as exc:
+            if exc.status_code != 405:
+                raise
+            log.warning(
+                "kling.status endpoint returned 405; retrying without /status suffix job_id=%s", job_id
+            )
+            data, status_code, duration_ms = await self._request_with_legacy_fallback(
+                "GET",
+                f"/{FAL_KLING_MODEL}/requests/{job_id}",
+            )
         status = self._extract_status(data)
 
         if status == "completed":
