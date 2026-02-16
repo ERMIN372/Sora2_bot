@@ -885,6 +885,11 @@ def _image_model_options(config: Config) -> list[ImageModelOption]:
     gemini_model = (config.gemini_model_image or "").strip()
     if config.gemini_enabled and gemini_model:
         _register(gemini_model, "gemini-image", i18n.t("image.model.gemini"))
+        _register(
+            "gemini-3-pro-image-preview",
+            "gemini-image-pro",
+            i18n.t("image.model.gemini_pro"),
+        )
 
     if config.openai_image_enabled:
         for candidate in config.fallback_image_models:
@@ -1026,6 +1031,10 @@ def _resolve_product_key(
     if product_hint:
         return product_hint
     if category == "image":
+        model_key = (model or "").strip().lower()
+        provider_key = (provider or "").strip().lower()
+        if model_key == "gemini-3-pro-image-preview" or provider_key == "gemini-image-pro":
+            return "image_pro"
         return "image"
     provider_key = (provider or "").lower()
     if provider_key in {"gemini-image", "image", "gemini"}:
@@ -1062,6 +1071,8 @@ def _resolve_model_label(model: str, config: Config) -> str:
         return i18n.t("video.models.sora")
     if normalised in {(config.gemini_model_image or "").strip().lower(), "gemini-image", "gemini"}:
         return i18n.t("image.model.gemini")
+    if normalised == "gemini-3-pro-image-preview":
+        return i18n.t("image.model.gemini_pro")
     if normalised == "dall-e-3":
         return i18n.t("image.model.dalle3")
     return model

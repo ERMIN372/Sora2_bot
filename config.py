@@ -128,6 +128,7 @@ PRODUCT_PRICING: Dict[str, Decimal] = {
     "veo31": Decimal("299"),
     "kling_mc": Decimal("79"),
     "image": Decimal("5"),
+    "image_pro": Decimal("25"),
     "tarot": Decimal(TAROT_READING_PRICE_CREDITS),
 }
 
@@ -140,6 +141,8 @@ PRODUCT_PRICE_ALIASES: Dict[str, str] = {
     "kling_video": "kling_mc",
     "kling": "kling_mc",
     "gemini-image": "image",
+    "gemini-image-pro": "image_pro",
+    "gemini-3-pro-image-preview": "image_pro",
     "image_generation": "image",
 }
 
@@ -153,6 +156,7 @@ PRODUCT_PRICING_UI = {
     "veo31": 299,
     "kling_mc": 79,
     "image": 5,
+    "image_pro": 25,
     "tarot": TAROT_READING_PRICE_CREDITS,
 }
 
@@ -415,16 +419,15 @@ class Config:
     veo_poll_interval_max_seconds: float = 6.0
     veo_operation_timeout_seconds: float = 12 * 60.0
     veo_operation_idle_timeout_seconds: float = 120.0
-    kling_access_key: str = ""
-    kling_secret_key: str = ""
+    fal_key: str = ""
     debug_gemini: bool = False
     debug_sora: bool = False
     redis_url: Optional[str] = None
 
     @property
     def kling_video_enabled(self) -> bool:
-        """Return ``True`` if Kling AI credentials are configured."""
-        return bool(self.kling_access_key and self.kling_secret_key)
+        """Return ``True`` if fal.ai key for Kling Motion Control is configured."""
+        return bool(self.fal_key)
 
     @property
     def yookassa_enabled(self) -> bool:
@@ -941,8 +944,7 @@ def load_config() -> Config:
         support_notify_interval=_get_env_int(
             "SUPPORT_NOTIFY_INTERVAL", Config.support_notify_interval
         ),
-        kling_access_key=env_str("KLING_ACCESS_KEY", "").strip(),
-        kling_secret_key=env_str("KLING_SECRET_KEY", "").strip(),
+        fal_key=env_str("FAL_KEY", "").strip(),
         debug_gemini=debug_gemini,
         debug_sora=debug_sora,
         redis_url=redis_url,

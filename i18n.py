@@ -323,6 +323,7 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "image.mode.photo": "📸 По фото",
         "image.models.prompt": "Выберите модель генерации фото:",
         "image.model.gemini": "🍌 Nano Banana — 5 ₽ за 1 изображение",
+        "image.model.gemini_pro": "🍌 Nano Banana Pro — 25 ₽ за 1 изображение",
         "image.model.dalle3": "🌄 DALL·E 3 — 5 ₽ за 1 изображение",
         "image.model.unavailable": "недоступно",
         "video.prompt.text": (
