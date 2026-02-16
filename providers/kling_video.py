@@ -1,23 +1,15 @@
-"""Kling AI Motion Control video generation provider.
-
-Uses the official Kling API (https://api.klingai.com) with JWT (HS256)
-authentication to generate Motion Control videos from character images
-and preset motions.
-"""
+"""Kling AI Motion Control video generation provider via fal.ai queue API."""
 
 from __future__ import annotations
 
 import asyncio
-import base64
-import hashlib
-import hmac
 import json
 import logging
 import os
 import tempfile
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Optional
 
 import aiohttp
 
@@ -27,6 +19,8 @@ from providers.base import (
     ProviderAPIError,
     ProviderJobStatus,
     ProviderJobSubmission,
+    extract_url,
+    iter_nodes,
 )
 
 log = logging.getLogger(__name__)
@@ -37,11 +31,11 @@ FAL_QUEUE_BASE_URL = KLING_BASE_URL
 
 DEFAULT_MODE = "std"  # std = 720p, pro = 1080p
 
-# Kling task status mapping → normalised provider statuses
+# fal queue status mapping → normalised provider statuses
 _STATUS_MAP: Dict[str, str] = {
-    "submitted": "running",
-    "processing": "running",
-    "succeed": "completed",
+    "in_queue": "running",
+    "in_progress": "running",
+    "completed": "completed",
     "failed": "failed",
 }
 
@@ -97,7 +91,132 @@ def _generate_jwt(access_key: str, secret_key: str, expire_seconds: int = 1800) 
 
 
 class KlingVideoClient(BaseProviderClient):
-    """Client for Kling AI Motion Control video generation."""
+    """Client for Kling AI Motion Control generation routed through fal.ai."""
+
+    @staticmethod
+    def _resolve_credentials(config: Config) -> tuple[str, str]:
+        access_key = str(
+            getattr(config, "kling_access_key", "") or os.getenv("KLING_ACCESS_KEY", "")
+        ).strip()
+        secret_key = str(
+            getattr(config, "kling_secret_key", "") or os.getenv("KLING_SECRET_KEY", "")
+        ).strip()
+        return access_key, secret_key
+
+    @staticmethod
+    def _resolve_credentials(config: Config) -> tuple[str, str]:
+        access_key = str(
+            getattr(config, "kling_access_key", "") or os.getenv("KLING_ACCESS_KEY", "")
+        ).strip()
+        secret_key = str(
+            getattr(config, "kling_secret_key", "") or os.getenv("KLING_SECRET_KEY", "")
+        ).strip()
+        return access_key, secret_key
+
+    @staticmethod
+    def _resolve_credentials(config: Config) -> tuple[str, str]:
+        access_key = str(
+            getattr(config, "kling_access_key", "") or os.getenv("KLING_ACCESS_KEY", "")
+        ).strip()
+        secret_key = str(
+            getattr(config, "kling_secret_key", "") or os.getenv("KLING_SECRET_KEY", "")
+        ).strip()
+        return access_key, secret_key
+
+    @staticmethod
+    def _resolve_legacy_fal_key(config: Config) -> str:
+        """Return a legacy FAL key for compatibility with stale deployments.
+
+        Some older runtime bundles referenced ``self._fal_key`` while constructing
+        provider clients. We keep this field initialised to avoid AttributeError
+        under mixed-version rollouts.
+        """
+
+        return str(getattr(config, "fal_key", "") or os.getenv("FAL_KEY", "") or "").strip()
+
+    @staticmethod
+    def _resolve_credentials(config: Config) -> tuple[str, str]:
+        access_key = str(
+            getattr(config, "kling_access_key", "") or os.getenv("KLING_ACCESS_KEY", "")
+        ).strip()
+        secret_key = str(
+            getattr(config, "kling_secret_key", "") or os.getenv("KLING_SECRET_KEY", "")
+        ).strip()
+        return access_key, secret_key
+
+    @staticmethod
+    def _resolve_legacy_fal_key(config: Config) -> str:
+        """Return a legacy FAL key for compatibility with stale deployments.
+
+        Some older runtime bundles referenced ``self._fal_key`` while constructing
+        provider clients. We keep this field initialised to avoid AttributeError
+        under mixed-version rollouts.
+        """
+
+        return str(getattr(config, "fal_key", "") or os.getenv("FAL_KEY", "") or "").strip()
+
+    @staticmethod
+    def _resolve_credentials(config: Config) -> tuple[str, str]:
+        access_key = str(
+            getattr(config, "kling_access_key", "") or os.getenv("KLING_ACCESS_KEY", "")
+        ).strip()
+        secret_key = str(
+            getattr(config, "kling_secret_key", "") or os.getenv("KLING_SECRET_KEY", "")
+        ).strip()
+        return access_key, secret_key
+
+    @staticmethod
+    def _resolve_legacy_fal_key(config: Config) -> str:
+        """Return a legacy FAL key for compatibility with stale deployments.
+
+        Some older runtime bundles referenced ``self._fal_key`` while constructing
+        provider clients. We keep this field initialised to avoid AttributeError
+        under mixed-version rollouts.
+        """
+
+        return str(getattr(config, "fal_key", "") or os.getenv("FAL_KEY", "") or "").strip()
+
+    @staticmethod
+    def _resolve_credentials(config: Config) -> tuple[str, str]:
+        access_key = str(
+            getattr(config, "kling_access_key", "") or os.getenv("KLING_ACCESS_KEY", "")
+        ).strip()
+        secret_key = str(
+            getattr(config, "kling_secret_key", "") or os.getenv("KLING_SECRET_KEY", "")
+        ).strip()
+        return access_key, secret_key
+
+    @staticmethod
+    def _resolve_legacy_fal_key(config: Config) -> str:
+        """Return a legacy FAL key for compatibility with stale deployments.
+
+        Some older runtime bundles referenced ``self._fal_key`` while constructing
+        provider clients. We keep this field initialised to avoid AttributeError
+        under mixed-version rollouts.
+        """
+
+        return str(getattr(config, "fal_key", "") or os.getenv("FAL_KEY", "") or "").strip()
+
+    @staticmethod
+    def _resolve_credentials(config: Config) -> tuple[str, str]:
+        access_key = str(
+            getattr(config, "kling_access_key", "") or os.getenv("KLING_ACCESS_KEY", "")
+        ).strip()
+        secret_key = str(
+            getattr(config, "kling_secret_key", "") or os.getenv("KLING_SECRET_KEY", "")
+        ).strip()
+        return access_key, secret_key
+
+    @staticmethod
+    def _resolve_legacy_fal_key(config: Config) -> str:
+        """Return a legacy FAL key for compatibility with stale deployments.
+
+        Some older runtime bundles referenced ``self._fal_key`` while constructing
+        provider clients. We keep this field initialised to avoid AttributeError
+        under mixed-version rollouts.
+        """
+
+        return str(getattr(config, "fal_key", "") or os.getenv("FAL_KEY", "") or "").strip()
 
     @staticmethod
     def _resolve_credentials(config: Config) -> tuple[str, str]:
@@ -129,30 +248,15 @@ class KlingVideoClient(BaseProviderClient):
             )
         super().__init__(
             config=config,
-            base_url=KLING_BASE_URL,
-            api_key="",  # We use JWT, not a static key
+            base_url=FAL_QUEUE_BASE_URL,
+            api_key=self._fal_key,
             provider_name="kling",
         )
-        self._token: Optional[str] = None
-        self._token_expiry: int = 0
         self._cache: Dict[str, Dict[str, Any]] = {}
         log.info(
-            "KlingVideoClient configured access_key=%s",
-            _mask(self._access_key),
+            "KlingVideoClient configured via fal.ai key=%s",
+            _mask(self._fal_key),
         )
-
-    # ------------------------------------------------------------------
-    # Auth
-    # ------------------------------------------------------------------
-
-    def _get_token(self) -> str:
-        """Return a cached JWT or generate a fresh one."""
-        now = int(time.time())
-        if self._token and now < self._token_expiry - 60:
-            return self._token
-        self._token = _generate_jwt(self._access_key, self._secret_key)
-        self._token_expiry = now + 1800
-        return self._token
 
     def _build_headers(self) -> Dict[str, str]:
         token_getter = getattr(self, "_get_token", None)
@@ -268,7 +372,7 @@ class KlingVideoClient(BaseProviderClient):
             raise ProviderAPIError(
                 provider="kling",
                 status_code=status_code,
-                message="Kling API did not return a task_id",
+                message="fal.ai queue did not return request_id",
                 error_type="protocol",
                 provider_message=json.dumps(data, ensure_ascii=False),
             )
@@ -306,28 +410,18 @@ class KlingVideoClient(BaseProviderClient):
             "GET",
             f"/v1/videos/motion-control/{job_id}",
         )
-
-        api_code = data.get("code")
-        if api_code != 0:
-            error_msg = data.get("message") or f"Kling API error code={api_code}"
-            log.warning(
-                "kling.status error task_id=%s code=%s message=%s",
-                job_id,
-                api_code,
-                error_msg,
-            )
-            return ProviderJobStatus(
-                job_id=job_id,
-                status="failed",
-                error=error_msg,
-                assets={},
-                data=data,
-                status_code=status_code,
-                duration_ms=duration_ms,
-            )
-
-        self._cache[job_id] = data
         status = self._extract_status(data)
+
+        if status == "completed":
+            result_data, _, _ = await self._request(
+                "GET",
+                f"/{FAL_KLING_MODEL}/requests/{job_id}",
+            )
+            self._cache[job_id] = result_data
+            data = result_data
+        else:
+            self._cache[job_id] = data
+
         error = self._extract_error(data)
         assets = self._extract_assets(data)
 
@@ -402,17 +496,17 @@ class KlingVideoClient(BaseProviderClient):
             ) from exc
 
     # ------------------------------------------------------------------
-    # Hooks (extract from Kling response format)
+    # Hooks (extract from fal queue response format)
     # ------------------------------------------------------------------
 
     def _extract_status(self, payload: Dict[str, Any]) -> str:
-        task_data = payload.get("data") or {}
-        raw_status = (task_data.get("task_status") or "").lower()
+        raw_status = str(payload.get("status") or "").strip().lower()
         return _STATUS_MAP.get(raw_status, "running")
 
     def _extract_error(self, payload: Dict[str, Any]) -> Optional[str]:
-        task_data = payload.get("data") or {}
-        msg = task_data.get("task_status_msg")
+        msg = payload.get("error")
+        if isinstance(msg, dict):
+            msg = msg.get("message")
         if msg and isinstance(msg, str) and msg.strip():
             return msg.strip()
         if self._extract_status(payload) == "failed":
@@ -420,15 +514,25 @@ class KlingVideoClient(BaseProviderClient):
         return None
 
     def _extract_assets(self, payload: Dict[str, Any]) -> Dict[str, str]:
-        task_data = payload.get("data") or {}
-        result = task_data.get("task_result") or {}
-        videos = result.get("videos") or []
         assets: Dict[str, str] = {}
-        for i, video in enumerate(videos):
-            url = video.get("url")
-            if url:
-                key = "video" if i == 0 else f"video_{i}"
+        output = payload.get("output")
+        if isinstance(output, dict):
+            candidates = [output]
+        else:
+            candidates = []
+
+        candidates.append(payload)
+        seen: set[str] = set()
+        index = 0
+        for candidate in candidates:
+            for node in iter_nodes(candidate):
+                url = extract_url(node)
+                if not url or url in seen:
+                    continue
+                seen.add(url)
+                key = "video" if index == 0 else f"video_{index}"
                 assets[key] = url
+                index += 1
         return assets
 
     @staticmethod
@@ -457,8 +561,7 @@ class KlingVideoClient(BaseProviderClient):
 
         The handler layer downloads the Telegram photo and puts it in
         ``settings["reference_inline_data"]`` as ``{"mime_type": ..., "data": ...}``
-        (base64-encoded).  We convert that to a data URI accepted by
-        the Kling API.
+        (base64-encoded).  We pass base64 directly as required by the Kling Motion model on fal.ai.
         """
         # Direct URL (for testing / future use)
         explicit_url = settings.get("image_url") or settings.get("kling_image_url")
