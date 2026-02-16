@@ -3523,6 +3523,9 @@ async def _launch_order(
         if order.aspect_ratio:
             provider_settings.setdefault("aspect_ratio", order.aspect_ratio)
     if order.image_file_id:
+        image_url = await build_telegram_file_url(callback.message.bot, order.image_file_id)
+        if image_url:
+            provider_settings["image_url"] = image_url
         inline_data = await build_inline_data_from_telegram_file(
             callback.message.bot, order.image_file_id
         )

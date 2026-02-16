@@ -89,6 +89,60 @@ psql -f migrations/001_initial_schema.sql
 python main.py
 ```
 
+
+## Railway: где запускать диагностические команды
+
+Команды проверки нужно запускать **внутри runtime сервиса Railway**, а не в PowerShell на локальном ПК.
+
+1. Откройте Railway → ваш Project → Service (bot) → **Shell/Terminal**.
+2. Выполните:
+
+```bash
+pwd
+python tools/diag_kling_runtime.py
+python -m py_compile providers/kling_video.py
+nl -ba providers/kling_video.py | sed -n '118,132p'
+```
+
+Проверка, что в runtime действительно ваш последний коммит:
+
+```bash
+echo "RAILWAY_GIT_COMMIT_SHA=$RAILWAY_GIT_COMMIT_SHA"
+```
+
+Если в логах Railway всё ещё видно старую строку с `async with session.request(...)`,
+значит поднялся старый образ/кеш. Сделайте:
+
+1. **Deployments** → откройте последний деплой и проверьте commit SHA.
+2. Нажмите **Redeploy** (или **Deploy Latest Commit**).
+3. Если SHA не меняется, выполните redeploy с очисткой кеша сборки (Clear/Disable build cache).
+4. Сразу после старта контейнера снова запустите:
+
+```bash
+python tools/diag_kling_runtime.py
+```
+
+Если `contains_forbidden_async_with=False`, а `impl_rev` заполнен, runtime уже на новой версии.
+
+Если хотите проверить вручную, что в файле нет проблемного паттерна:
+
+```bash
+python - <<'PY'
+from pathlib import Path
+s = Path('providers/kling_video.py').read_text(encoding='utf-8')
+print('has_async_with_request=', 'async with session.request(' in s)
+PY
+```
+
+### Частая ошибка на Windows PowerShell
+
+Конструкция `python - <<'PY'` — это heredoc для bash/zsh и в PowerShell не работает.
+Эквивалент для PowerShell:
+
+```powershell
+python -c "from pathlib import Path; s=Path('providers/kling_video.py').read_text(encoding='utf-8'); print('has_async_with_request=', 'async with session.request(' in s)"
+```
+
 ## Решение проблем
 
 ### Проблема: Бот не запускается
