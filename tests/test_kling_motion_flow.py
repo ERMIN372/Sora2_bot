@@ -93,3 +93,14 @@ def test_build_telegram_file_url_with_public_token_attr() -> None:
     url = asyncio.run(build_telegram_file_url(bot, "file123"))
 
     assert url == "https://api.telegram.org/file/bot99999:xyz/videos/ref.mp4"
+
+
+def test_kling_resolve_credentials_falls_back_to_env(monkeypatch) -> None:
+    cfg = SimpleNamespace()
+    monkeypatch.setenv("KLING_ACCESS_KEY", "env-ak")
+    monkeypatch.setenv("KLING_SECRET_KEY", "env-sk")
+
+    access_key, secret_key = KlingVideoClient._resolve_credentials(cfg)  # type: ignore[arg-type]
+
+    assert access_key == "env-ak"
+    assert secret_key == "env-sk"

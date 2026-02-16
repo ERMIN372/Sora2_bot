@@ -80,9 +80,18 @@ def _generate_jwt(access_key: str, secret_key: str, expire_seconds: int = 1800) 
 class KlingVideoClient(BaseProviderClient):
     """Client for Kling AI Motion Control generation routed through fal.ai."""
 
+    @staticmethod
+    def _resolve_credentials(config: Config) -> tuple[str, str]:
+        access_key = str(
+            getattr(config, "kling_access_key", "") or os.getenv("KLING_ACCESS_KEY", "")
+        ).strip()
+        secret_key = str(
+            getattr(config, "kling_secret_key", "") or os.getenv("KLING_SECRET_KEY", "")
+        ).strip()
+        return access_key, secret_key
+
     def __init__(self, *, config: Config) -> None:
-        self._access_key = config.kling_access_key
-        self._secret_key = config.kling_secret_key
+        self._access_key, self._secret_key = self._resolve_credentials(config)
         if not self._access_key or not self._secret_key:
             raise RuntimeError(
                 "Kling API credentials not configured; " "set KLING_ACCESS_KEY and KLING_SECRET_KEY"
