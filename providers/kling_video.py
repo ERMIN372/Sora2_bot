@@ -79,6 +79,25 @@ class KlingVideoClient(BaseProviderClient):
         )
 
     def _build_headers(self) -> Dict[str, str]:
+        token_getter = getattr(self, "_get_token", None)
+        raw_token = ""
+        if callable(token_getter):
+            try:
+                raw_token = token_getter()
+            except Exception:
+                raw_token = ""
+        if not raw_token:
+            # Backward-compatible fallback for mixed/stale deployments where
+            # instance/class shape may miss _get_token.
+            raw_token = _generate_jwt(
+                getattr(self, "_access_key", "") or "",
+                getattr(self, "_secret_key", "") or "",
+            )
+        token = (raw_token or "").strip()
+        if token.lower().startswith("bearer "):
+            auth_value = token
+        else:
+            auth_value = f"Bearer {token}"
         return {
             "Authorization": f"Key {self._fal_key}",
             "Content-Type": "application/json",
