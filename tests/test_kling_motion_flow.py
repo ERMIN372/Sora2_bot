@@ -108,3 +108,12 @@ def test_kling_resolve_credentials_falls_back_to_env(monkeypatch) -> None:
 
 def test_kling_base_url_alias_is_defined() -> None:
     assert FAL_QUEUE_BASE_URL == KLING_BASE_URL
+
+
+def test_kling_resolve_legacy_fal_key_falls_back_to_env(monkeypatch) -> None:
+    cfg = SimpleNamespace()
+    monkeypatch.setenv("FAL_KEY", "legacy-fal")
+
+    value = KlingVideoClient._resolve_legacy_fal_key(cfg)  # type: ignore[arg-type]
+
+    assert value == "legacy-fal"
