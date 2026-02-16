@@ -103,6 +103,47 @@ class KlingVideoClient(BaseProviderClient):
             "Content-Type": "application/json",
         }
 
+    async def _submit_via_fal_http(self, body: Dict[str, Any]) -> tuple[Dict[str, Any], int, int]:
+        """Submit a generation task bypassing BaseProviderClient request helpers.
+
+        This is a defensive fallback for rare stale runtime states where legacy
+        JWT helper references may still be invoked from older in-memory code.
+        """
+
+        session = await self._ensure_session()
+        started = time.monotonic()
+        url = f"{self._base_url}/{FAL_KLING_MODEL}"
+        headers = {
+            "Authorization": f"Key {self._fal_key}",
+            "Content-Type": "application/json",
+        }
+        async with session.post(url, headers=headers, json={"input": body}) as response:
+            text = await response.text()
+            duration_ms = int((time.monotonic() - started) * 1000)
+            if response.status >= 400:
+                raise ProviderAPIError(
+                    provider="kling",
+                    status_code=response.status,
+                    message="fal.ai submit failed",
+                    error_type="api_error",
+                    provider_message=text,
+                    duration_ms=duration_ms,
+                )
+            if not text:
+                return {}, response.status, duration_ms
+            try:
+                payload = json.loads(text)
+            except json.JSONDecodeError as exc:
+                raise ProviderAPIError(
+                    provider="kling",
+                    status_code=response.status,
+                    message="Unable to decode fal.ai response",
+                    error_type="decode",
+                    provider_message=text,
+                    duration_ms=duration_ms,
+                ) from exc
+            return payload, response.status, duration_ms
+
     @staticmethod
     def _classify_api_error(message: Optional[str]) -> tuple[int, str, str]:
         text = str(message or "").strip()
@@ -188,18 +229,12 @@ class KlingVideoClient(BaseProviderClient):
         except NameError as exc:
             # Defensive guard for stale runtime code-paths referencing legacy JWT helpers.
             if "_generate_jwt" in str(exc):
-                raise ProviderAPIError(
-                    provider="kling",
-                    status_code=500,
-                    message=(
-                        "Legacy Kling JWT path detected in runtime; restart bot workers to load fal.ai integration"
-                    ),
-                    error_type="misconfigured_runtime",
-                    error_code="legacy_kling_jwt_reference",
-                    provider_message=str(exc),
-                    retryable=False,
-                ) from exc
-            raise
+                log.warning(
+                    "kling.enqueue detected legacy JWT NameError; using direct fal submit fallback"
+                )
+                data, status_code, duration_ms = await self._submit_via_fal_http(body)
+            else:
+                raise
 
         task_id = data.get("request_id")
         if not task_id:

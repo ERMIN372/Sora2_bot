@@ -155,25 +155,27 @@ def test_normalise_fal_key_accepts_prefixed_value() -> None:
     assert _normalise_fal_key('"Key fal_test_123"') == "fal_test_123"
 
 
-def test_kling_enqueue_maps_legacy_jwt_name_error() -> None:
+def test_kling_enqueue_recovers_from_legacy_jwt_name_error() -> None:
     class _NameErrorKlingClient(KlingVideoClient):
         async def _request(self, *_args, **_kwargs):  # type: ignore[override]
             raise NameError("name '_generate_jwt' is not defined")
 
+        async def _submit_via_fal_http(self, _body):  # type: ignore[override]
+            return {"request_id": "req_fallback"}, 200, 123
+
     client = _NameErrorKlingClient.__new__(_NameErrorKlingClient)
+    client._cache = {}
 
-    with pytest.raises(ProviderAPIError) as exc_info:
-        asyncio.run(
-            client.enqueue_job(
-                prompt="test",
-                settings={
-                    "motion_video_url": "https://example.com/ref.mp4",
-                    "reference_inline_data": {"data": "abc"},
-                },
-            )
+    submission = asyncio.run(
+        client.enqueue_job(
+            prompt="test",
+            settings={
+                "motion_video_url": "https://example.com/ref.mp4",
+                "reference_inline_data": {"data": "abc"},
+            },
         )
+    )
 
-    error = exc_info.value
-    assert error.error_type == "misconfigured_runtime"
-    assert error.error_code == "legacy_kling_jwt_reference"
-    assert error.status_code == 500
+    assert submission.job_id == "req_fallback"
+    assert submission.status_code == 200
+    assert submission.duration_ms == 123
