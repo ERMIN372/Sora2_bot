@@ -263,3 +263,5 @@ def test_kling_direct_fallback_retries_without_status_on_405() -> None:
     assert data["status"] == "COMPLETED"
     assert client._session.calls[0][1].endswith("/status")
     assert client._session.calls[1][1].endswith("/requests/abc")
+    assert "json" not in client._session.calls[0][2]
+    assert "json" not in client._session.calls[1][2]
