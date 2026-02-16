@@ -1,4 +1,5 @@
 """Utility helpers for the video generation bot."""
+
 from __future__ import annotations
 
 import asyncio
@@ -58,12 +59,15 @@ async def run_cancellable(task: Awaitable[T]) -> T:
         raise
 
 
-__all__ = ["async_retry", "run_cancellable", "build_inline_data_from_telegram_file"]
+__all__ = [
+    "async_retry",
+    "run_cancellable",
+    "build_inline_data_from_telegram_file",
+    "build_telegram_file_url",
+]
 
 
-async def build_inline_data_from_telegram_file(
-    bot: Bot, file_id: str
-) -> Optional[dict[str, str]]:
+async def build_inline_data_from_telegram_file(bot: Bot, file_id: str) -> Optional[dict[str, str]]:
     """Download *file_id* and return Gemini inline_data payload."""
 
     try:
@@ -90,6 +94,31 @@ async def build_inline_data_from_telegram_file(
     mime = mime or "image/jpeg"
     encoded = base64.b64encode(data).decode("ascii")
     return {"mime_type": mime, "data": encoded}
+
+
+async def build_telegram_file_url(bot: Bot, file_id: str) -> Optional[str]:
+    """Return Telegram file download URL for *file_id*.
+
+    The resulting URL is publicly downloadable and includes bot token.
+    """
+
+    try:
+        telegram_file = await bot.get_file(file_id)
+    except Exception:  # pragma: no cover - Telegram API interaction
+        log.exception("Failed to fetch file metadata for URL file_id=%s", file_id)
+        return None
+    file_path = (telegram_file.file_path or "").strip()
+    if not file_path:
+        return None
+    token = (
+        getattr(bot, "token", "")
+        or getattr(bot, "_token", "")
+        or getattr(bot, "_Bot__token", "")
+        or ""
+    ).strip()
+    if not token:
+        return None
+    return f"https://api.telegram.org/file/bot{token}/{file_path}"
 
 
 async def check_subscription(bot: Bot, user_id: int, config: Config) -> bool:
