@@ -185,6 +185,21 @@ class KlingVideoClient(BaseProviderClient):
                     duration_ms=exc.duration_ms,
                 ) from exc
             raise
+        except NameError as exc:
+            # Defensive guard for stale runtime code-paths referencing legacy JWT helpers.
+            if "_generate_jwt" in str(exc):
+                raise ProviderAPIError(
+                    provider="kling",
+                    status_code=500,
+                    message=(
+                        "Legacy Kling JWT path detected in runtime; restart bot workers to load fal.ai integration"
+                    ),
+                    error_type="misconfigured_runtime",
+                    error_code="legacy_kling_jwt_reference",
+                    provider_message=str(exc),
+                    retryable=False,
+                ) from exc
+            raise
 
         task_id = data.get("request_id")
         if not task_id:

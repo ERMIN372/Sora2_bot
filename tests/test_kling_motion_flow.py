@@ -153,3 +153,27 @@ def test_kling_enqueue_maps_balance_error_to_billing() -> None:
 
 def test_normalise_fal_key_accepts_prefixed_value() -> None:
     assert _normalise_fal_key('"Key fal_test_123"') == "fal_test_123"
+
+
+def test_kling_enqueue_maps_legacy_jwt_name_error() -> None:
+    class _NameErrorKlingClient(KlingVideoClient):
+        async def _request(self, *_args, **_kwargs):  # type: ignore[override]
+            raise NameError("name '_generate_jwt' is not defined")
+
+    client = _NameErrorKlingClient.__new__(_NameErrorKlingClient)
+
+    with pytest.raises(ProviderAPIError) as exc_info:
+        asyncio.run(
+            client.enqueue_job(
+                prompt="test",
+                settings={
+                    "motion_video_url": "https://example.com/ref.mp4",
+                    "reference_inline_data": {"data": "abc"},
+                },
+            )
+        )
+
+    error = exc_info.value
+    assert error.error_type == "misconfigured_runtime"
+    assert error.error_code == "legacy_kling_jwt_reference"
+    assert error.status_code == 500
