@@ -218,6 +218,27 @@ class KlingVideoClient(BaseProviderClient):
 
         return str(getattr(config, "fal_key", "") or os.getenv("FAL_KEY", "") or "").strip()
 
+    @staticmethod
+    def _resolve_credentials(config: Config) -> tuple[str, str]:
+        access_key = str(
+            getattr(config, "kling_access_key", "") or os.getenv("KLING_ACCESS_KEY", "")
+        ).strip()
+        secret_key = str(
+            getattr(config, "kling_secret_key", "") or os.getenv("KLING_SECRET_KEY", "")
+        ).strip()
+        return access_key, secret_key
+
+    @staticmethod
+    def _resolve_legacy_fal_key(config: Config) -> str:
+        """Return a legacy FAL key for compatibility with stale deployments.
+
+        Some older runtime bundles referenced ``self._fal_key`` while constructing
+        provider clients. We keep this field initialised to avoid AttributeError
+        under mixed-version rollouts.
+        """
+
+        return str(getattr(config, "fal_key", "") or os.getenv("FAL_KEY", "") or "").strip()
+
     def __init__(self, *, config: Config) -> None:
         self._fal_key = self._resolve_legacy_fal_key(config)
         self._access_key, self._secret_key = self._resolve_credentials(config)
@@ -261,6 +282,14 @@ class KlingVideoClient(BaseProviderClient):
             "Authorization": auth_value,
             "Content-Type": "application/json",
         }
+
+    @staticmethod
+    def _classify_api_error(message: Optional[str]) -> tuple[int, str, str]:
+        text = str(message or "").strip()
+        lowered = text.lower()
+        if "account balance not enough" in lowered or "balance not enough" in lowered:
+            return 402, "provider_insufficient_balance", "ACCOUNT_BALANCE_NOT_ENOUGH"
+        return 502, "api_error", "KLING_API_ERROR"
 
     # ------------------------------------------------------------------
     # Job management
@@ -323,7 +352,22 @@ class KlingVideoClient(BaseProviderClient):
             json=body,
         )
 
-        task_id = data.get("request_id")
+        # Kling wraps the response in {"code": 0, "data": {"task_id": ...}}
+        api_code = data.get("code")
+        if api_code != 0:
+            error_msg = data.get("message") or f"Kling API error code={api_code}"
+            mapped_status, mapped_type, mapped_code = self._classify_api_error(error_msg)
+            raise ProviderAPIError(
+                provider="kling",
+                status_code=mapped_status if status_code == 200 else status_code,
+                message=error_msg,
+                error_type=mapped_type,
+                error_code=mapped_code if mapped_type != "api_error" else str(api_code),
+                provider_message=json.dumps(data, ensure_ascii=False),
+            )
+
+        task_data = data.get("data") or {}
+        task_id = task_data.get("task_id")
         if not task_id:
             raise ProviderAPIError(
                 provider="kling",

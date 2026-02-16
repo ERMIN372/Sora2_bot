@@ -171,3 +171,21 @@ def test_generate_jwt_works_without_module_stdlib_symbols(monkeypatch: pytest.Mo
     token = kling_module._generate_jwt("ak", "sk")
 
     assert token.count(".") == 2
+
+
+def test_kling_classify_api_error_detects_provider_balance() -> None:
+    status, err_type, err_code = KlingVideoClient._classify_api_error("Account balance not enough")
+
+    assert status == 402
+    assert err_type == "provider_insufficient_balance"
+    assert err_code == "ACCOUNT_BALANCE_NOT_ENOUGH"
+
+
+def test_kling_classify_api_error_defaults_to_api_error() -> None:
+    status, err_type, err_code = KlingVideoClient._classify_api_error(
+        "Some transient upstream issue"
+    )
+
+    assert status == 502
+    assert err_type == "api_error"
+    assert err_code == "KLING_API_ERROR"
