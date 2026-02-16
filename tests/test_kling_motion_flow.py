@@ -179,6 +179,31 @@ def test_kling_as_bool_handles_string_values() -> None:
     assert _as_bool("yes", default=False) is True
 
 
+def test_kling_enqueue_sends_bool_keep_original_sound() -> None:
+    class _CaptureClient(KlingVideoClient):
+        async def _request(self, _method, _path, **kwargs):  # type: ignore[override]
+            self.last_json = kwargs.get("json")
+            return {"request_id": "req_bool"}, 200, 10
+
+    client = _CaptureClient.__new__(_CaptureClient)
+    client._cache = {}
+
+    submission = asyncio.run(
+        client.enqueue_job(
+            prompt="test",
+            settings={
+                "image_url": "https://example.com/ref.png",
+                "motion_video_url": "https://example.com/ref.mp4",
+                "keep_original_sound": "false",
+            },
+        )
+    )
+
+    assert submission.job_id == "req_bool"
+    payload = client.last_json["input"]
+    assert payload["keep_original_sound"] is False
+
+
 def test_kling_enqueue_recovers_from_legacy_jwt_name_error() -> None:
     class _NameErrorKlingClient(KlingVideoClient):
         async def _request(self, *_args, **_kwargs):  # type: ignore[override]
