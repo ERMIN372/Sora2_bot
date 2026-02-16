@@ -62,12 +62,19 @@ def _b64url_encode(data: bytes) -> bytes:
 
 def _generate_jwt(access_key: str, secret_key: str, expire_seconds: int = 1800) -> str:
     """Generate a JWT token for Kling API authentication."""
+    # Local imports guard against mixed/stale runtime states where module globals
+    # may not include stdlib symbols yet.
+    import hashlib as _hashlib
+    import hmac as _hmac
+    import json as _json
+    import time as _time
+
     header = _b64url_encode(
-        json.dumps({"alg": "HS256", "typ": "JWT"}, separators=(",", ":")).encode()
+        _json.dumps({"alg": "HS256", "typ": "JWT"}, separators=(",", ":")).encode()
     )
-    now = int(time.time())
+    now = int(_time.time())
     payload = _b64url_encode(
-        json.dumps(
+        _json.dumps(
             {
                 "iss": access_key,
                 "exp": now + expire_seconds,
@@ -78,7 +85,7 @@ def _generate_jwt(access_key: str, secret_key: str, expire_seconds: int = 1800) 
     )
     signing_input = header + b"." + payload
     signature = _b64url_encode(
-        hmac.new(secret_key.encode(), signing_input, hashlib.sha256).digest()
+        _hmac.new(secret_key.encode(), signing_input, _hashlib.sha256).digest()
     )
     return (signing_input + b"." + signature).decode()
 
@@ -105,6 +112,27 @@ class KlingVideoClient(BaseProviderClient):
             getattr(config, "kling_secret_key", "") or os.getenv("KLING_SECRET_KEY", "")
         ).strip()
         return access_key, secret_key
+
+    @staticmethod
+    def _resolve_credentials(config: Config) -> tuple[str, str]:
+        access_key = str(
+            getattr(config, "kling_access_key", "") or os.getenv("KLING_ACCESS_KEY", "")
+        ).strip()
+        secret_key = str(
+            getattr(config, "kling_secret_key", "") or os.getenv("KLING_SECRET_KEY", "")
+        ).strip()
+        return access_key, secret_key
+
+    @staticmethod
+    def _resolve_legacy_fal_key(config: Config) -> str:
+        """Return a legacy FAL key for compatibility with stale deployments.
+
+        Some older runtime bundles referenced ``self._fal_key`` while constructing
+        provider clients. We keep this field initialised to avoid AttributeError
+        under mixed-version rollouts.
+        """
+
+        return str(getattr(config, "fal_key", "") or os.getenv("FAL_KEY", "") or "").strip()
 
     @staticmethod
     def _resolve_credentials(config: Config) -> tuple[str, str]:

@@ -158,3 +158,16 @@ def test_b64url_encode_works_without_module_base64_symbol(monkeypatch: pytest.Mo
     encoded = kling_module._b64url_encode(b"abc")
 
     assert encoded == b"YWJj"
+
+
+def test_generate_jwt_works_without_module_stdlib_symbols(monkeypatch: pytest.MonkeyPatch) -> None:
+    import providers.kling_video as kling_module
+
+    monkeypatch.delattr(kling_module, "hmac", raising=False)
+    monkeypatch.delattr(kling_module, "hashlib", raising=False)
+    monkeypatch.delattr(kling_module, "json", raising=False)
+    monkeypatch.delattr(kling_module, "time", raising=False)
+
+    token = kling_module._generate_jwt("ak", "sk")
+
+    assert token.count(".") == 2
