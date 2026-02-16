@@ -404,6 +404,12 @@ async def _startup(state: ApplicationState, *, mode: str) -> None:
         log.info("Credit migration disabled on startup")
     await state.job_queue.start()
 
+    if mode == "webhook":
+        guard_interval = int(os.getenv("TG_WEBHOOK_GUARD_INTERVAL_S", "60") or "60")
+        state.background_tasks.append(
+            asyncio.create_task(_webhook_guard_loop(state, interval_s=guard_interval))
+        )
+
     if state.yookassa_processor:
         try:
             yookassa_client.init(state.config)
@@ -449,12 +455,16 @@ async def _log_webhook_info(bot: Bot, *, context: str) -> None:
     )
 
 
-async def _configure_webhook(state: ApplicationState) -> bool:
+async def _configure_webhook(
+    state: ApplicationState,
+    *,
+    drop_pending_updates: bool = True,
+) -> bool:
     webhook_task = asyncio.create_task(
         state.bot.set_webhook(
             CFG.WEBHOOK_URL,
             secret_token=CFG.TG_WEBHOOK_SECRET or None,
-            drop_pending_updates=True,
+            drop_pending_updates=drop_pending_updates,
             allowed_updates=ALLOWED_UPDATES,
         )
     )
@@ -467,6 +477,36 @@ async def _configure_webhook(state: ApplicationState) -> bool:
     log.info("webhook_set url=%s", CFG.WEBHOOK_URL)
     await _log_webhook_info(state.bot, context="after_set_webhook")
     return True
+
+
+async def _webhook_guard_loop(state: ApplicationState, *, interval_s: int = 60) -> None:
+    """Keep Telegram webhook configured in webhook mode.
+
+    Some platforms or parallel processes may clear webhook unexpectedly.
+    This guard periodically verifies current webhook URL and restores it
+    without dropping pending updates.
+    """
+
+    target_url = CFG.WEBHOOK_URL
+    while True:
+        try:
+            await asyncio.sleep(max(15, int(interval_s)))
+            info = await state.bot.get_webhook_info()
+            current_url = (getattr(info, "url", "") or "").strip()
+            if current_url == target_url:
+                continue
+            log.warning(
+                "tg.webhook.guard.repair current=%s target=%s pending=%s",
+                current_url,
+                target_url,
+                getattr(info, "pending_update_count", None),
+            )
+            await _configure_webhook(state, drop_pending_updates=False)
+        except asyncio.CancelledError:
+            log.info("tg.webhook.guard.stopped")
+            raise
+        except Exception:
+            log.warning("tg.webhook.guard.failed", exc_info=True)
 
 
 async def _shutdown(state: ApplicationState, *, mode: str) -> None:
