@@ -13,6 +13,7 @@ import hashlib
 import hmac
 import json
 import logging
+import os
 import tempfile
 import time
 from pathlib import Path
@@ -30,26 +31,11 @@ from providers.base import (
 
 log = logging.getLogger(__name__)
 
-KLING_BASE_URL = "https://api.klingai.com"
-KLING_MODEL_NAME = "kling-v2-6"
+KLING_BASE_URL = os.getenv("KLING_BASE_URL", "https://api-singapore.klingai.com")
+# Backward-compatible alias: some stale deployments may still reference this name.
+FAL_QUEUE_BASE_URL = KLING_BASE_URL
 
-# Available preset motions for Motion Control
-KLING_PRESET_MOTIONS: Tuple[str, ...] = (
-    "Heart Gesture Dance",
-    "Cute Baby Dance",
-    "Running",
-    "Martial Arts",
-    "Ghost Step Dance",
-    "Subject 3 Dance",
-    "Motorcycle Dance",
-    "Nezha",
-    "Poping",
-)
-
-DEFAULT_PRESET_MOTION = "Heart Gesture Dance"
 DEFAULT_MODE = "std"  # std = 720p, pro = 1080p
-DEFAULT_DURATION = 5  # seconds
-DEFAULT_CFG_SCALE = 0.5
 
 # Kling task status mapping → normalised provider statuses
 _STATUS_MAP: Dict[str, str] = {
@@ -69,6 +55,7 @@ def _mask(value: str, visible: int = 4) -> str:
 # ------------------------------------------------------------------
 # JWT generation (HS256) without PyJWT dependency
 # ------------------------------------------------------------------
+
 
 def _b64url_encode(data: bytes) -> bytes:
     """Base64url-encode without padding."""
@@ -101,13 +88,33 @@ def _generate_jwt(access_key: str, secret_key: str, expire_seconds: int = 1800) 
 class KlingVideoClient(BaseProviderClient):
     """Client for Kling AI Motion Control video generation."""
 
+    @staticmethod
+    def _resolve_credentials(config: Config) -> tuple[str, str]:
+        access_key = str(
+            getattr(config, "kling_access_key", "") or os.getenv("KLING_ACCESS_KEY", "")
+        ).strip()
+        secret_key = str(
+            getattr(config, "kling_secret_key", "") or os.getenv("KLING_SECRET_KEY", "")
+        ).strip()
+        return access_key, secret_key
+
+    @staticmethod
+    def _resolve_legacy_fal_key(config: Config) -> str:
+        """Return a legacy FAL key for compatibility with stale deployments.
+
+        Some older runtime bundles referenced ``self._fal_key`` while constructing
+        provider clients. We keep this field initialised to avoid AttributeError
+        under mixed-version rollouts.
+        """
+
+        return str(getattr(config, "fal_key", "") or os.getenv("FAL_KEY", "") or "").strip()
+
     def __init__(self, *, config: Config) -> None:
-        self._access_key = config.kling_access_key
-        self._secret_key = config.kling_secret_key
+        self._fal_key = self._resolve_legacy_fal_key(config)
+        self._access_key, self._secret_key = self._resolve_credentials(config)
         if not self._access_key or not self._secret_key:
             raise RuntimeError(
-                "Kling API credentials not configured; "
-                "set KLING_ACCESS_KEY and KLING_SECRET_KEY"
+                "Kling API credentials not configured; " "set KLING_ACCESS_KEY and KLING_SECRET_KEY"
             )
         super().__init__(
             config=config,
@@ -137,8 +144,13 @@ class KlingVideoClient(BaseProviderClient):
         return self._token
 
     def _build_headers(self) -> Dict[str, str]:
+        token = (self._get_token() or "").strip()
+        if token.lower().startswith("bearer "):
+            auth_value = token
+        else:
+            auth_value = f"Bearer {token}"
         return {
-            "Authorization": f"Bearer {self._get_token()}",
+            "Authorization": auth_value,
             "Content-Type": "application/json",
         }
 
@@ -167,46 +179,39 @@ class KlingVideoClient(BaseProviderClient):
                 error_type="validation",
             )
 
-        # Motion reference: video_url or preset_motion
-        video_url = settings.get("video_url") or settings.get("motion_video_url")
-        preset_motion = settings.get("preset_motion") or settings.get("kling_preset")
-        if not video_url and not preset_motion:
-            preset_motion = DEFAULT_PRESET_MOTION
+        # Motion reference URL is required by Motion Control API
+        video_url = self._resolve_motion_video_url(settings)
+        if not video_url:
+            raise ProviderAPIError(
+                provider="kling",
+                status_code=400,
+                message="Motion Control requires an accessible video_url",
+                error_type="validation",
+            )
 
         mode = settings.get("kling_mode") or DEFAULT_MODE
-        duration = int(settings.get("duration") or settings.get("duration_seconds") or DEFAULT_DURATION)
-        if duration not in (5, 10):
-            duration = DEFAULT_DURATION
 
         body: Dict[str, Any] = {
-            "model_name": KLING_MODEL_NAME,
             "mode": mode,
             "image_url": image_url,
-            "duration": duration,
-            "cfg_scale": float(settings.get("cfg_scale") or DEFAULT_CFG_SCALE),
+            "video_url": video_url,
+            "character_orientation": settings.get("character_orientation") or "video",
+            "keep_original_sound": settings.get("keep_original_sound") or "yes",
         }
-
-        if video_url:
-            body["video_url"] = video_url
-            body["character_orientation"] = settings.get("character_orientation") or "video"
-        elif preset_motion:
-            body["preset_motion"] = preset_motion
 
         if prompt and prompt.strip():
             body["prompt"] = prompt.strip()[:2500]
 
         log.info(
-            "kling.enqueue mode=%s duration=%s preset=%s has_video_url=%s prompt_len=%s",
+            "kling.enqueue mode=%s has_video_url=%s prompt_len=%s",
             mode,
-            duration,
-            preset_motion or "-",
             bool(video_url),
             len(prompt or ""),
         )
 
         data, status_code, duration_ms = await self._request(
             "POST",
-            "/v1/videos/motion",
+            "/v1/videos/motion-control",
             json=body,
         )
 
@@ -265,7 +270,7 @@ class KlingVideoClient(BaseProviderClient):
 
         data, status_code, duration_ms = await self._request(
             "GET",
-            f"/v1/videos/motion/{job_id}",
+            f"/v1/videos/motion-control/{job_id}",
         )
 
         api_code = data.get("code")
@@ -329,9 +334,7 @@ class KlingVideoClient(BaseProviderClient):
         )
         started = time.monotonic()
         try:
-            async with session.get(
-                video_url, allow_redirects=True, timeout=timeout
-            ) as response:
+            async with session.get(video_url, allow_redirects=True, timeout=timeout) as response:
                 if response.status != 200:
                     body = await response.text()
                     raise ProviderAPIError(
@@ -394,6 +397,22 @@ class KlingVideoClient(BaseProviderClient):
                 assets[key] = url
         return assets
 
+    @staticmethod
+    def _resolve_motion_video_url(settings: Dict[str, Any]) -> Optional[str]:
+        explicit_url = settings.get("video_url") or settings.get("motion_video_url")
+        if isinstance(explicit_url, str) and explicit_url.strip():
+            return explicit_url.strip()
+
+        inline = settings.get("motion_video_inline_data")
+        if isinstance(inline, dict):
+            # Backward-compatible fallback: older code paths may still pass inline payload.
+            # API expects URL, but keep this to avoid hard break for legacy callers.
+            mime = inline.get("mime_type") or "video/mp4"
+            data = inline.get("data")
+            if data:
+                return f"data:{mime};base64,{data}"
+        return None
+
     # ------------------------------------------------------------------
     # Image resolution helpers
     # ------------------------------------------------------------------
@@ -415,9 +434,9 @@ class KlingVideoClient(BaseProviderClient):
         # Inline data from Telegram download (base64)
         inline = settings.get("reference_inline_data")
         if isinstance(inline, dict):
-            mime = inline.get("mime_type") or "image/jpeg"
             data = inline.get("data")
             if data:
-                return f"data:{mime};base64,{data}"
+                # Motion Control docs require raw base64 without data: prefix.
+                return str(data)
 
         return None

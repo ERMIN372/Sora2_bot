@@ -1,4 +1,5 @@
 """FSM state groups for all conversation flows."""
+
 from __future__ import annotations
 
 from aiogram.dispatcher.filters.state import State, StatesGroup
@@ -13,6 +14,7 @@ class GenerationStates(StatesGroup):
     image_mode = State()
     text_prompt = State()
     photo_prompt = State()
+    kling_motion_video = State()
 
 
 class AutoStyleStates(StatesGroup):

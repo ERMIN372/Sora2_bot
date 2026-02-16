@@ -131,3 +131,25 @@ def test_available_duration_options_for_veo_returns_empty() -> None:
     )
 
     assert options == ()
+
+
+def test_create_order_for_kling_has_non_fixed_duration(config: Config) -> None:
+    session = UserSession()
+    session.video_duration = 12
+    session.hd_enabled = True
+
+    order = _create_order(
+        category="video",
+        flow="photo",
+        prompt="demo",
+        config=config,
+        session=session,
+        model="kling-v2-6-motion",
+        provider="kling",
+        product="kling_mc",
+        model_label="Kling Motion",
+        include_size=True,
+    )
+
+    assert order.duration_seconds is None
+    assert order.hd is False
