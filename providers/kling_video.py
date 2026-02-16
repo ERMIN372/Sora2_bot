@@ -53,7 +53,11 @@ def _mask(value: str, visible: int = 4) -> str:
 
 def _b64url_encode(data: bytes) -> bytes:
     """Base64url-encode without padding."""
-    return base64.urlsafe_b64encode(data).rstrip(b"=")
+    # Local import guards against mixed/stale runtime states where module globals
+    # may not include `base64` yet.
+    import base64 as _base64
+
+    return _base64.urlsafe_b64encode(data).rstrip(b"=")
 
 
 def _generate_jwt(access_key: str, secret_key: str, expire_seconds: int = 1800) -> str:
@@ -101,6 +105,27 @@ class KlingVideoClient(BaseProviderClient):
             getattr(config, "kling_secret_key", "") or os.getenv("KLING_SECRET_KEY", "")
         ).strip()
         return access_key, secret_key
+
+    @staticmethod
+    def _resolve_credentials(config: Config) -> tuple[str, str]:
+        access_key = str(
+            getattr(config, "kling_access_key", "") or os.getenv("KLING_ACCESS_KEY", "")
+        ).strip()
+        secret_key = str(
+            getattr(config, "kling_secret_key", "") or os.getenv("KLING_SECRET_KEY", "")
+        ).strip()
+        return access_key, secret_key
+
+    @staticmethod
+    def _resolve_legacy_fal_key(config: Config) -> str:
+        """Return a legacy FAL key for compatibility with stale deployments.
+
+        Some older runtime bundles referenced ``self._fal_key`` while constructing
+        provider clients. We keep this field initialised to avoid AttributeError
+        under mixed-version rollouts.
+        """
+
+        return str(getattr(config, "fal_key", "") or os.getenv("FAL_KEY", "") or "").strip()
 
     @staticmethod
     def _resolve_credentials(config: Config) -> tuple[str, str]:

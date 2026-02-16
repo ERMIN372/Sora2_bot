@@ -1,6 +1,8 @@
 import asyncio
 from types import SimpleNamespace
 
+import pytest
+
 from handlers._core import UserSession, _build_video_settings_keyboard
 from providers.kling_video import FAL_QUEUE_BASE_URL, KLING_BASE_URL, KlingVideoClient
 from utils import build_telegram_file_url
@@ -146,3 +148,13 @@ def test_kling_build_headers_falls_back_when_get_token_missing() -> None:
 
     assert headers["Authorization"].startswith("Bearer ")
     assert len(headers["Authorization"].split()) == 2
+
+
+def test_b64url_encode_works_without_module_base64_symbol(monkeypatch: pytest.MonkeyPatch) -> None:
+    import providers.kling_video as kling_module
+
+    monkeypatch.delattr(kling_module, "base64", raising=False)
+
+    encoded = kling_module._b64url_encode(b"abc")
+
+    assert encoded == b"YWJj"
