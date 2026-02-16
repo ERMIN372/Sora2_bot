@@ -211,3 +211,55 @@ def test_kling_status_recovers_from_legacy_jwt_name_error() -> None:
 
     assert status.status == "completed"
     assert status.assets["video"] == "https://cdn.example/v.mp4"
+
+
+def test_kling_direct_fallback_retries_without_status_on_405() -> None:
+    class _FakeResponse:
+        def __init__(self, status: int, text: str):
+            self.status = status
+            self._text = text
+
+        async def text(self) -> str:
+            return self._text
+
+    class _ResponseCtx:
+        def __init__(self, response: _FakeResponse):
+            self._response = response
+
+        async def __aenter__(self):
+            return self._response
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    class _FakeSession:
+        def __init__(self):
+            self.calls = []
+
+        def request(self, method, url, headers=None, **kwargs):
+            self.calls.append((method, url, kwargs))
+            if len(self.calls) == 1:
+                return _ResponseCtx(_FakeResponse(405, "405: Method Not Allowed"))
+            return _ResponseCtx(_FakeResponse(200, '{"status":"COMPLETED"}'))
+
+    class _DirectClient(KlingVideoClient):
+        async def _ensure_session(self):  # type: ignore[override]
+            return self._session
+
+    client = _DirectClient.__new__(_DirectClient)
+    client._base_url = "https://queue.fal.run"
+    client._fal_key = "fal_test"
+    client._session = _FakeSession()
+
+    data, status_code, _ = asyncio.run(
+        client._request_via_fal_http(
+            method="GET",
+            path=f"/{FAL_KLING_MODEL}/requests/abc/status",
+            json_payload=None,
+        )
+    )
+
+    assert status_code == 200
+    assert data["status"] == "COMPLETED"
+    assert client._session.calls[0][1].endswith("/status")
+    assert client._session.calls[1][1].endswith("/requests/abc")
