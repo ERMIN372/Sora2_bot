@@ -135,3 +135,14 @@ def test_kling_build_headers_does_not_double_bearer_prefix() -> None:
     headers = KlingVideoClient._build_headers(client)
 
     assert headers["Authorization"] == "Bearer abc.jwt.token"
+
+
+def test_kling_build_headers_falls_back_when_get_token_missing() -> None:
+    client = object.__new__(KlingVideoClient)
+    client._access_key = "ak"
+    client._secret_key = "sk"
+
+    headers = KlingVideoClient._build_headers(client)
+
+    assert headers["Authorization"].startswith("Bearer ")
+    assert len(headers["Authorization"].split()) == 2
