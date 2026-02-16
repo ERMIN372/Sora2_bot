@@ -78,6 +78,7 @@ ASSET_KIND_IMAGE = "image"
 
 _DOWNLOAD_MAX_ATTEMPTS = 3
 _POLL_MAX_ATTEMPTS = 5
+_POLL_MAX_ATTEMPTS_KLING = 24
 _POLL_BACKOFF_BASE = 1.5
 
 _IMAGE_ARTIFACTS_DIR = Path("attached_assets") / "images"
@@ -137,6 +138,13 @@ class _OperationTracker:
             "last_progress": self.last_progress,
             "last_update_token": self.last_update_token,
         }
+
+
+def _poll_max_attempts_for_provider(*, provider: Optional[str], default_attempts: int) -> int:
+    provider_key = (provider or "").strip().lower()
+    if provider_key.startswith("kling"):
+        return max(default_attempts, _POLL_MAX_ATTEMPTS_KLING)
+    return default_attempts
 
 
 @dataclass(slots=True)
@@ -1510,6 +1518,10 @@ class JobQueue:
         asset_kind = (pending.asset_kind or ASSET_KIND_VIDEO).strip().lower()
         attempt = max(0, pending.attempt or 0)
         max_attempts = pending.max_attempts or _POLL_MAX_ATTEMPTS
+        max_attempts = _poll_max_attempts_for_provider(
+            provider=pending.provider,
+            default_attempts=max_attempts,
+        )
         if asset_kind not in {ASSET_KIND_VIDEO, ASSET_KIND_IMAGE}:
             asset_kind = ASSET_KIND_VIDEO
         key_mask = self._gemini_key_mask if provider_hint.startswith(("veo", "gemini")) else ""
