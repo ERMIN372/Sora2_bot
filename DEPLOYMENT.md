@@ -101,6 +101,7 @@ python main.py
 pwd
 python tools/diag_kling_runtime.py
 python -m py_compile providers/kling_video.py
+nl -ba providers/kling_video.py | sed -n '118,132p'
 ```
 
 Проверка, что в runtime действительно ваш последний коммит:
