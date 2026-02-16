@@ -1,4 +1,5 @@
 """Simple localisation and HTML escaping helpers."""
+
 from __future__ import annotations
 
 import re
@@ -191,7 +192,7 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "video.models.header": "Доступные модели Sora 2:",
         "video.common.init_failed": "Не удалось инициализировать OpenAI Videos API.",
         "video.create.disabled": "Видео через OpenAI Sora недоступно.",
-        "video.create.prompt_hint": "Укажите описание. Пример: /video_create {\"prompt\": \"кот идёт по неону\"}",
+        "video.create.prompt_hint": 'Укажите описание. Пример: /video_create {"prompt": "кот идёт по неону"}',
         "video.common.send_failed": "Не удалось отправить запрос: {error}",
         "video.create.missing_job_id": "API не вернул идентификатор задачи. Повторите попытку позднее.",
         "video.common.response_snippet": "Ответ: {snippet}",
@@ -264,7 +265,7 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "video.common.credits_deducted": "Списано: {credits} ₽",
         "video.common.invalid_json": "Не удалось разобрать параметры. Передайте корректный JSON.",
         "video.common.expected_object": "Ожидался JSON-объект с параметрами.",
-        "video.remix.usage": "Использование: /video_remix <video_id> {\"prompt\": \"описание\"}",
+        "video.remix.usage": 'Использование: /video_remix <video_id> {"prompt": "описание"}',
         "video.remix.missing_video_id": "Укажите video_id исходного ролика.",
         "video.remix.missing_job_id": "API не вернул идентификатор ремикса.",
         "video.remix.registration_failed": "Не удалось зарегистрировать ремикс: {error}",
@@ -356,15 +357,25 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
             "🎭 <b>Motion Control</b> · {model}\n\n"
             "Пришлите <b>фото персонажа</b> — модель перенесёт на него движение.\n"
             "При желании добавьте текстовый промпт для фона/стиля.\n\n"
-            "Длительность: {duration} сек\n"
+            "Длительность: автоматически по видео-референсу\n"
             "Стоимость: {price}"
         ),
         "video.prompt.photo_kling": (
             "🎭 <b>Motion Control</b> · {model}\n\n"
-            "Пришлите <b>фото персонажа</b> и подпись-промпт.\n"
-            "Модель перенесёт движение из эталона на вашего персонажа.\n\n"
-            "Длительность: {duration} сек\n"
+            "Теперь пришлите <b>фото персонажа</b> (можно с подписью-промптом).\n"
+            "Модель перенесёт движение из видео-референса на вашего персонажа.\n\n"
+            "Длительность: автоматически по видео-референсу\n"
             "Стоимость: {price}"
+        ),
+        "video.prompt.kling.reference_video": (
+            "🎭 <b>Motion Control</b> · {model}\n\n"
+            "Сначала пришлите <b>видео-референс</b>, из которого нужно повторить движения."
+        ),
+        "video.prompt.kling.reference_video_invalid": (
+            "Пожалуйста, пришлите именно <b>видео-референс</b> (видео или документ с видео), чтобы продолжить."
+        ),
+        "video.prompt.kling.waiting_photo": (
+            "Видео-референс уже сохранён. Теперь пришлите <b>фото персонажа</b>."
         ),
         "video.prompt.quality_hd": "Качество: HD",
         "video.prompt.quality_sd": "Качество: SD",
@@ -372,12 +383,9 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "video.prompt.current_image": "Изображение: не добавлено",
         "video.prompt.start_hint": "Пришлите описание или фото, чтобы продолжить.",
         "image.prompt.text": (
-            "Опишите, что нужно создать. Модель: {model}.\n"
-            "Пришлите описание сообщением."
+            "Опишите, что нужно создать. Модель: {model}.\n" "Пришлите описание сообщением."
         ),
-        "image.prompt.photo": (
-            "Пришлите фото и, при желании, подпись-промпт для модели {model}."
-        ),
+        "image.prompt.photo": ("Пришлите фото и, при желании, подпись-промпт для модели {model}."),
         "video.confirm.text": (
             "<b>📋 Ваш заказ</b>\n"
             "━━━━━━━━━━━━━━━\n"
@@ -393,6 +401,25 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
             "📎 Фото принято\n"
             "✍️ {prompt}\n\n"
             "🎛 {duration} сек · {aspect} · {quality}\n"
+            "🎞 {size} · {model}\n"
+            "━━━━━━━━━━━━━━━\n"
+            "💰 <b>{price}</b>"
+        ),
+        "video.confirm.text_kling": (
+            "<b>📋 Ваш заказ</b>\n"
+            "━━━━━━━━━━━━━━━\n"
+            "✍️ {prompt}\n\n"
+            "🎭 Motion Control · длительность по видео-референсу\n"
+            "🎞 {size} · {model}\n"
+            "━━━━━━━━━━━━━━━\n"
+            "💰 <b>{price}</b>"
+        ),
+        "video.confirm.photo_kling": (
+            "<b>📋 Ваш заказ</b>\n"
+            "━━━━━━━━━━━━━━━\n"
+            "📎 Фото принято\n"
+            "✍️ {prompt}\n\n"
+            "🎭 Motion Control · длительность по видео-референсу\n"
             "🎞 {size} · {model}\n"
             "━━━━━━━━━━━━━━━\n"
             "💰 <b>{price}</b>"
