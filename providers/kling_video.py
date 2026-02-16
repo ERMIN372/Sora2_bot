@@ -26,6 +26,8 @@ from providers.base import (
 log = logging.getLogger(__name__)
 
 KLING_BASE_URL = os.getenv("KLING_BASE_URL", "https://api-singapore.klingai.com")
+# Backward-compatible alias: some stale deployments may still reference this name.
+FAL_QUEUE_BASE_URL = KLING_BASE_URL
 
 DEFAULT_MODE = "std"  # std = 720p, pro = 1080p
 
@@ -79,6 +81,16 @@ def _generate_jwt(access_key: str, secret_key: str, expire_seconds: int = 1800) 
 
 class KlingVideoClient(BaseProviderClient):
     """Client for Kling AI Motion Control generation routed through fal.ai."""
+
+    @staticmethod
+    def _resolve_credentials(config: Config) -> tuple[str, str]:
+        access_key = str(
+            getattr(config, "kling_access_key", "") or os.getenv("KLING_ACCESS_KEY", "")
+        ).strip()
+        secret_key = str(
+            getattr(config, "kling_secret_key", "") or os.getenv("KLING_SECRET_KEY", "")
+        ).strip()
+        return access_key, secret_key
 
     @staticmethod
     def _resolve_credentials(config: Config) -> tuple[str, str]:

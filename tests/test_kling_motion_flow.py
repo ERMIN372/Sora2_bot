@@ -2,7 +2,7 @@ import asyncio
 from types import SimpleNamespace
 
 from handlers._core import UserSession, _build_video_settings_keyboard
-from providers.kling_video import KlingVideoClient
+from providers.kling_video import FAL_QUEUE_BASE_URL, KLING_BASE_URL, KlingVideoClient
 from utils import build_telegram_file_url
 
 
@@ -104,3 +104,7 @@ def test_kling_resolve_credentials_falls_back_to_env(monkeypatch) -> None:
 
     assert access_key == "env-ak"
     assert secret_key == "env-sk"
+
+
+def test_kling_base_url_alias_is_defined() -> None:
+    assert FAL_QUEUE_BASE_URL == KLING_BASE_URL
