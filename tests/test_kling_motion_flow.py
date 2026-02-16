@@ -308,3 +308,31 @@ def test_kling_direct_fallback_retries_without_status_on_405() -> None:
     assert client._session.calls[1][1].endswith("/requests/abc")
     assert "json" not in client._session.calls[0][2]
     assert "json" not in client._session.calls[1][2]
+
+
+def test_kling_status_retries_without_status_suffix_on_405() -> None:
+    class _StatusRetryClient(KlingVideoClient):
+        async def _request_with_legacy_fallback(  # type: ignore[override]
+            self, method: str, path: str, *, json_payload=None
+        ):
+            self.calls.append((method, path, json_payload))
+            if path.endswith("/status"):
+                raise ProviderAPIError(
+                    provider="kling",
+                    status_code=405,
+                    message="fal.ai request failed",
+                    error_type="api_error",
+                    provider_message="405: Method Not Allowed",
+                )
+            return {"status": "COMPLETED", "output": {"video": {"url": "https://cdn.example/v2.mp4"}}}, 200, 42
+
+    client = _StatusRetryClient.__new__(_StatusRetryClient)
+    client._cache = {}
+    client.calls = []
+
+    result = asyncio.run(client.get_job_status("req-405"))
+
+    assert result.status == "completed"
+    assert result.assets["video"] == "https://cdn.example/v2.mp4"
+    assert client.calls[0][1].endswith("/requests/req-405/status")
+    assert client.calls[1][1].endswith("/requests/req-405")
