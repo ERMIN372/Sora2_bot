@@ -365,3 +365,4 @@ def test_kling_status_falls_back_to_post_when_get_is_not_allowed() -> None:
     assert client.calls[0][:2] == ("GET", f"/{FAL_KLING_MODEL}/requests/req-post/status")
     assert client.calls[1][:2] == ("GET", f"/{FAL_KLING_MODEL}/requests/req-post")
     assert client.calls[2][:2] == ("POST", f"/{FAL_KLING_MODEL}/requests/req-post/status")
+    assert len(client.calls) == 3
