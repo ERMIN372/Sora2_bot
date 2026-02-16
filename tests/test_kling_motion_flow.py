@@ -1,8 +1,11 @@
 import asyncio
 from types import SimpleNamespace
 
+import pytest
+
 from handlers._core import UserSession, _build_video_settings_keyboard
-from providers.kling_video import KlingVideoClient
+from providers.base import ProviderAPIError
+from providers.kling_video import KlingVideoClient, _normalise_fal_key
 from utils import build_telegram_file_url
 
 
@@ -93,3 +96,84 @@ def test_build_telegram_file_url_with_public_token_attr() -> None:
     url = asyncio.run(build_telegram_file_url(bot, "file123"))
 
     assert url == "https://api.telegram.org/file/bot99999:xyz/videos/ref.mp4"
+
+
+def test_kling_extract_status_for_fal_queue() -> None:
+    client = KlingVideoClient.__new__(KlingVideoClient)
+
+    assert client._extract_status({"status": "IN_PROGRESS"}) == "running"
+    assert client._extract_status({"status": "COMPLETED"}) == "completed"
+
+
+def test_kling_extract_assets_for_fal_output() -> None:
+    client = KlingVideoClient.__new__(KlingVideoClient)
+
+    assets = client._extract_assets(
+        {
+            "output": {
+                "video": {
+                    "url": "https://cdn.example/video.mp4",
+                }
+            }
+        }
+    )
+
+    assert assets["video"] == "https://cdn.example/video.mp4"
+
+
+def test_kling_enqueue_maps_balance_error_to_billing() -> None:
+    class _FailingKlingClient(KlingVideoClient):
+        async def _request(self, *_args, **_kwargs):  # type: ignore[override]
+            raise ProviderAPIError(
+                provider="kling",
+                status_code=0,
+                message="Account balance not enough",
+                error_type="provider_unavailable",
+                provider_message="Account balance not enough",
+            )
+
+    client = _FailingKlingClient.__new__(_FailingKlingClient)
+
+    with pytest.raises(ProviderAPIError) as exc_info:
+        asyncio.run(
+            client.enqueue_job(
+                prompt="test",
+                settings={
+                    "motion_video_url": "https://example.com/ref.mp4",
+                    "reference_inline_data": {"data": "abc"},
+                },
+            )
+        )
+
+    error = exc_info.value
+    assert error.error_type == "billing"
+    assert error.error_code == "insufficient_balance"
+    assert error.status_code == 402
+
+
+def test_normalise_fal_key_accepts_prefixed_value() -> None:
+    assert _normalise_fal_key('"Key fal_test_123"') == "fal_test_123"
+
+
+def test_kling_enqueue_maps_legacy_jwt_name_error() -> None:
+    class _NameErrorKlingClient(KlingVideoClient):
+        async def _request(self, *_args, **_kwargs):  # type: ignore[override]
+            raise NameError("name '_generate_jwt' is not defined")
+
+    client = _NameErrorKlingClient.__new__(_NameErrorKlingClient)
+
+    with pytest.raises(ProviderAPIError) as exc_info:
+        asyncio.run(
+            client.enqueue_job(
+                prompt="test",
+                settings={
+                    "motion_video_url": "https://example.com/ref.mp4",
+                    "reference_inline_data": {"data": "abc"},
+                },
+            )
+        )
+
+    error = exc_info.value
+    assert error.error_type == "misconfigured_runtime"
+    assert error.error_code == "legacy_kling_jwt_reference"
+    assert error.status_code == 500
