@@ -5,7 +5,7 @@ import pytest
 
 from handlers._core import UserSession, _build_video_settings_keyboard
 from providers.base import ProviderAPIError
-from providers.kling_video import KlingVideoClient, _normalise_fal_key
+from providers.kling_video import FAL_KLING_MODEL, KlingVideoClient, _normalise_fal_key
 from utils import build_telegram_file_url
 
 
@@ -160,7 +160,12 @@ def test_kling_enqueue_recovers_from_legacy_jwt_name_error() -> None:
         async def _request(self, *_args, **_kwargs):  # type: ignore[override]
             raise NameError("name '_generate_jwt' is not defined")
 
-        async def _submit_via_fal_http(self, _body):  # type: ignore[override]
+        async def _request_via_fal_http(  # type: ignore[override]
+            self, *, method: str, path: str, json_payload=None
+        ):
+            assert method == "POST"
+            assert path == f"/{FAL_KLING_MODEL}"
+            assert isinstance(json_payload, dict)
             return {"request_id": "req_fallback"}, 200, 123
 
     client = _NameErrorKlingClient.__new__(_NameErrorKlingClient)
@@ -179,3 +184,30 @@ def test_kling_enqueue_recovers_from_legacy_jwt_name_error() -> None:
     assert submission.job_id == "req_fallback"
     assert submission.status_code == 200
     assert submission.duration_ms == 123
+
+
+def test_kling_status_recovers_from_legacy_jwt_name_error() -> None:
+    class _NameErrorStatusClient(KlingVideoClient):
+        async def _request(self, *_args, **_kwargs):  # type: ignore[override]
+            raise NameError("name '_generate_jwt' is not defined")
+
+        async def _request_via_fal_http(  # type: ignore[override]
+            self, *, method: str, path: str, json_payload=None
+        ):
+            assert method == "GET"
+            assert json_payload is None
+            if path.endswith("/status"):
+                return {"status": "COMPLETED"}, 200, 50
+            return (
+                {"status": "COMPLETED", "output": {"video": {"url": "https://cdn.example/v.mp4"}}},
+                200,
+                70,
+            )
+
+    client = _NameErrorStatusClient.__new__(_NameErrorStatusClient)
+    client._cache = {}
+
+    status = asyncio.run(client.get_job_status("req_status"))
+
+    assert status.status == "completed"
+    assert status.assets["video"] == "https://cdn.example/v.mp4"

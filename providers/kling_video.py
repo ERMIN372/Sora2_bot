@@ -103,21 +103,27 @@ class KlingVideoClient(BaseProviderClient):
             "Content-Type": "application/json",
         }
 
-    async def _submit_via_fal_http(self, body: Dict[str, Any]) -> tuple[Dict[str, Any], int, int]:
-        """Submit a generation task bypassing BaseProviderClient request helpers.
+    async def _request_via_fal_http(
+        self,
+        *,
+        method: str,
+        path: str,
+        json_payload: Optional[Dict[str, Any]] = None,
+    ) -> tuple[Dict[str, Any], int, int]:
+        """Perform a direct fal.ai HTTP request bypassing BaseProviderClient helpers.
 
-        This is a defensive fallback for rare stale runtime states where legacy
+        Used as a defensive fallback for rare stale runtime states where legacy
         JWT helper references may still be invoked from older in-memory code.
         """
 
         session = await self._ensure_session()
         started = time.monotonic()
-        url = f"{self._base_url}/{FAL_KLING_MODEL}"
+        url = f"{self._base_url}{path}"
         headers = {
             "Authorization": f"Key {self._fal_key}",
             "Content-Type": "application/json",
         }
-        async with session.post(url, headers=headers, json={"input": body}) as response:
+        async with session.request(method, url, headers=headers, json=json_payload) as response:
             text = await response.text()
             duration_ms = int((time.monotonic() - started) * 1000)
             if response.status >= 400:
@@ -144,13 +150,31 @@ class KlingVideoClient(BaseProviderClient):
                 ) from exc
             return payload, response.status, duration_ms
 
-    @staticmethod
-    def _classify_api_error(message: Optional[str]) -> tuple[int, str, str]:
-        text = str(message or "").strip()
-        lowered = text.lower()
-        if "account balance not enough" in lowered or "balance not enough" in lowered:
-            return 402, "provider_insufficient_balance", "ACCOUNT_BALANCE_NOT_ENOUGH"
-        return 502, "api_error", "KLING_API_ERROR"
+    async def _request_with_legacy_fallback(
+        self,
+        method: str,
+        path: str,
+        *,
+        json_payload: Optional[Dict[str, Any]] = None,
+    ) -> tuple[Dict[str, Any], int, int]:
+        try:
+            kwargs: Dict[str, Any] = {}
+            if json_payload is not None:
+                kwargs["json"] = json_payload
+            return await self._request(method, path, **kwargs)
+        except NameError as exc:
+            if "_generate_jwt" not in str(exc):
+                raise
+            log.warning(
+                "kling.request detected legacy JWT NameError; using direct fal HTTP fallback method=%s path=%s",
+                method,
+                path,
+            )
+            return await self._request_via_fal_http(
+                method=method,
+                path=path,
+                json_payload=json_payload,
+            )
 
     # ------------------------------------------------------------------
     # Job management
@@ -208,10 +232,10 @@ class KlingVideoClient(BaseProviderClient):
         )
 
         try:
-            data, status_code, duration_ms = await self._request(
+            data, status_code, duration_ms = await self._request_with_legacy_fallback(
                 "POST",
                 f"/{FAL_KLING_MODEL}",
-                json={"input": body},
+                json_payload={"input": body},
             )
         except ProviderAPIError as exc:
             if _is_balance_error(exc.provider_message) or _is_balance_error(str(exc)):
@@ -226,16 +250,6 @@ class KlingVideoClient(BaseProviderClient):
                     duration_ms=exc.duration_ms,
                 ) from exc
             raise
-        except NameError as exc:
-            # Defensive guard for stale runtime code-paths referencing legacy JWT helpers.
-            if "_generate_jwt" in str(exc):
-                log.warning(
-                    "kling.enqueue detected legacy JWT NameError; using direct fal submit fallback"
-                )
-                data, status_code, duration_ms = await self._submit_via_fal_http(body)
-            else:
-                raise
-
         task_id = data.get("request_id")
         if not task_id:
             raise ProviderAPIError(
@@ -275,14 +289,14 @@ class KlingVideoClient(BaseProviderClient):
                     duration_ms=0,
                 )
 
-        data, status_code, duration_ms = await self._request(
+        data, status_code, duration_ms = await self._request_with_legacy_fallback(
             "GET",
             f"/{FAL_KLING_MODEL}/requests/{job_id}/status",
         )
         status = self._extract_status(data)
 
         if status == "completed":
-            result_data, _, _ = await self._request(
+            result_data, _, _ = await self._request_with_legacy_fallback(
                 "GET",
                 f"/{FAL_KLING_MODEL}/requests/{job_id}",
             )
