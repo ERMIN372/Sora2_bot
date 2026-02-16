@@ -149,64 +149,59 @@ class KlingVideoClient(BaseProviderClient):
         request_kwargs: Dict[str, Any] = {}
         if json_payload is not None:
             request_kwargs["json"] = json_payload
-        response = await session.request(method, url, headers=headers, **request_kwargs)
-        try:
-            text = await response.text()
-            duration_ms = int((time.monotonic() - started) * 1000)
-            if response.status == 405 and method.upper() == "GET" and path.endswith("/status"):
-                fallback_path = path[: -len("/status")]
-                fallback_url = f"{self._base_url}{fallback_path}"
-                fallback_response = await session.request("GET", fallback_url, headers=headers)
-                try:
-                    fallback_text = await fallback_response.text()
-                    fallback_duration_ms = int((time.monotonic() - started) * 1000)
-                    if fallback_response.status >= 400:
-                        raise ProviderAPIError(
-                            provider="kling",
-                            status_code=fallback_response.status,
-                            message="fal.ai request failed",
-                            error_type="api_error",
-                            provider_message=fallback_text,
-                            duration_ms=fallback_duration_ms,
-                        )
-                    if not fallback_text:
-                        return {}, fallback_response.status, fallback_duration_ms
-                    try:
-                        fallback_payload = json.loads(fallback_text)
-                    except json.JSONDecodeError as exc:
-                        raise ProviderAPIError(
-                            provider="kling",
-                            status_code=fallback_response.status,
-                            message="Unable to decode fal.ai response",
-                            error_type="decode",
-                            provider_message=fallback_text,
-                            duration_ms=fallback_duration_ms,
-                        ) from exc
-                    return fallback_payload, fallback_response.status, fallback_duration_ms
-                finally:
-                    fallback_response.release()
-            if response.status >= 400:
+        async def _decode_response_body(raw_response: Any, elapsed_ms: int) -> Dict[str, Any]:
+            raw_text = await raw_response.text()
+            if raw_response.status >= 400:
                 raise ProviderAPIError(
                     provider="kling",
-                    status_code=response.status,
+                    status_code=raw_response.status,
                     message="fal.ai request failed",
                     error_type="api_error",
-                    provider_message=text,
-                    duration_ms=duration_ms,
+                    provider_message=raw_text,
+                    duration_ms=elapsed_ms,
                 )
-            if not text:
-                return {}, response.status, duration_ms
+            if not raw_text:
+                return {}
             try:
-                payload = json.loads(text)
+                return json.loads(raw_text)
             except json.JSONDecodeError as exc:
                 raise ProviderAPIError(
                     provider="kling",
-                    status_code=response.status,
+                    status_code=raw_response.status,
                     message="Unable to decode fal.ai response",
                     error_type="decode",
-                    provider_message=text,
-                    duration_ms=duration_ms,
+                    provider_message=raw_text,
+                    duration_ms=elapsed_ms,
                 ) from exc
+
+        response = await session.request(method, url, headers=headers, **request_kwargs)
+        try:
+            duration_ms = int((time.monotonic() - started) * 1000)
+            if response.status == 405 and method.upper() == "GET" and path.endswith("/status"):
+                fallback_variants = [
+                    ("GET", path[: -len("/status")]),
+                    ("POST", path),
+                    ("POST", path[: -len("/status")]),
+                ]
+                for fallback_method, fallback_path in fallback_variants:
+                    fallback_url = f"{self._base_url}{fallback_path}"
+                    fallback_response = await session.request(
+                        fallback_method,
+                        fallback_url,
+                        headers=headers,
+                    )
+                    try:
+                        fallback_duration_ms = int((time.monotonic() - started) * 1000)
+                        if fallback_response.status >= 400:
+                            continue
+                        fallback_payload = await _decode_response_body(
+                            fallback_response,
+                            fallback_duration_ms,
+                        )
+                        return fallback_payload, fallback_response.status, fallback_duration_ms
+                    finally:
+                        fallback_response.release()
+            payload = await _decode_response_body(response, duration_ms)
             return payload, response.status, duration_ms
         finally:
             response.release()
@@ -907,21 +902,34 @@ class KlingVideoClient(BaseProviderClient):
                     duration_ms=0,
                 )
 
-        status_path = f"/{FAL_KLING_MODEL}/requests/{job_id}/status"
-        try:
-            data, status_code, duration_ms = await self._request_with_legacy_fallback(
-                "GET",
-                status_path,
-            )
-        except ProviderAPIError as exc:
-            if exc.status_code != 405:
-                raise
-            log.warning(
-                "kling.status endpoint returned 405; retrying without /status suffix job_id=%s", job_id
-            )
-            data, status_code, duration_ms = await self._request_with_legacy_fallback(
-                "GET",
-                f"/{FAL_KLING_MODEL}/requests/{job_id}",
+        status_variants = [
+            ("GET", f"/{FAL_KLING_MODEL}/requests/{job_id}/status"),
+            ("GET", f"/{FAL_KLING_MODEL}/requests/{job_id}"),
+            ("POST", f"/{FAL_KLING_MODEL}/requests/{job_id}/status"),
+            ("POST", f"/{FAL_KLING_MODEL}/requests/{job_id}"),
+        ]
+        last_error: Optional[ProviderAPIError] = None
+        for method, status_path in status_variants:
+            try:
+                data, status_code, duration_ms = await self._request_with_legacy_fallback(
+                    method,
+                    status_path,
+                )
+                break
+            except ProviderAPIError as exc:
+                if exc.status_code != 405:
+                    raise
+                last_error = exc
+                continue
+        else:
+            if last_error is not None:
+                raise last_error
+            raise ProviderAPIError(
+                provider="kling",
+                status_code=405,
+                message="fal.ai request failed",
+                error_type="api_error",
+                provider_message="Unable to fetch status from any known endpoint variant",
             )
         status = self._extract_status(data)
 

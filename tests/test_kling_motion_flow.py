@@ -336,3 +336,32 @@ def test_kling_status_retries_without_status_suffix_on_405() -> None:
     assert result.assets["video"] == "https://cdn.example/v2.mp4"
     assert client.calls[0][1].endswith("/requests/req-405/status")
     assert client.calls[1][1].endswith("/requests/req-405")
+
+
+def test_kling_status_falls_back_to_post_when_get_is_not_allowed() -> None:
+    class _PostStatusClient(KlingVideoClient):
+        async def _request_with_legacy_fallback(  # type: ignore[override]
+            self, method: str, path: str, *, json_payload=None
+        ):
+            self.calls.append((method, path, json_payload))
+            if method == "GET":
+                raise ProviderAPIError(
+                    provider="kling",
+                    status_code=405,
+                    message="fal.ai request failed",
+                    error_type="api_error",
+                    provider_message="405: Method Not Allowed",
+                )
+            return {"status": "IN_PROGRESS"}, 200, 52
+
+    client = _PostStatusClient.__new__(_PostStatusClient)
+    client._cache = {}
+    client.calls = []
+
+    result = asyncio.run(client.get_job_status("req-post"))
+
+    assert result.status == "running"
+    assert result.assets == {}
+    assert client.calls[0][:2] == ("GET", f"/{FAL_KLING_MODEL}/requests/req-post/status")
+    assert client.calls[1][:2] == ("GET", f"/{FAL_KLING_MODEL}/requests/req-post")
+    assert client.calls[2][:2] == ("POST", f"/{FAL_KLING_MODEL}/requests/req-post/status")
