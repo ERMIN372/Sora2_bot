@@ -5,7 +5,12 @@ import pytest
 
 from handlers._core import UserSession, _build_video_settings_keyboard
 from providers.base import ProviderAPIError
-from providers.kling_video import FAL_KLING_MODEL, KlingVideoClient, _normalise_fal_key
+from providers.kling_video import (
+    FAL_KLING_MODEL,
+    KlingVideoClient,
+    _as_bool,
+    _normalise_fal_key,
+)
 from utils import build_telegram_file_url
 
 
@@ -81,6 +86,20 @@ def test_kling_resolve_image_url_from_inline_data_returns_raw_base64() -> None:
     assert image_value == "aW1hZ2VfYmFzZTY0"
 
 
+def test_kling_resolve_image_url_prefers_explicit_url() -> None:
+    image_value = KlingVideoClient._resolve_image_url(
+        {
+            "image_url": "https://example.com/ref.png",
+            "reference_inline_data": {
+                "mime_type": "image/jpeg",
+                "data": "aW1hZ2VfYmFzZTY0",
+            },
+        }
+    )
+
+    assert image_value == "https://example.com/ref.png"
+
+
 def test_build_telegram_file_url() -> None:
     bot = _FakeBot()
     url = asyncio.run(build_telegram_file_url(bot, "file123"))
@@ -153,6 +172,11 @@ def test_kling_enqueue_maps_balance_error_to_billing() -> None:
 
 def test_normalise_fal_key_accepts_prefixed_value() -> None:
     assert _normalise_fal_key('"Key fal_test_123"') == "fal_test_123"
+
+
+def test_kling_as_bool_handles_string_values() -> None:
+    assert _as_bool("false", default=True) is False
+    assert _as_bool("yes", default=False) is True
 
 
 def test_kling_enqueue_recovers_from_legacy_jwt_name_error() -> None:

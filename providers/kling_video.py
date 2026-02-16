@@ -59,6 +59,20 @@ def _normalise_fal_key(raw: Optional[str]) -> str:
     return candidate
 
 
+def _as_bool(value: Any, *, default: bool = False) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in {"1", "true", "yes", "on"}:
+            return True
+        if lowered in {"0", "false", "no", "off"}:
+            return False
+    return bool(value)
+
+
 class KlingVideoClient(BaseProviderClient):
     """Client for Kling AI Motion Control generation routed through fal.ai."""
 
@@ -102,14 +116,49 @@ class KlingVideoClient(BaseProviderClient):
             "Authorization": f"Key {self._fal_key}",
             "Content-Type": "application/json",
         }
-        async with session.request(method, url, headers=headers, json=json_payload) as response:
+        request_kwargs: Dict[str, Any] = {}
+        if json_payload is not None:
+            request_kwargs["json"] = json_payload
+
+        async with session.request(method, url, headers=headers, **request_kwargs) as response:
             text = await response.text()
             duration_ms = int((time.monotonic() - started) * 1000)
+            if response.status == 405 and method.upper() == "GET" and path.endswith("/status"):
+                fallback_path = path[: -len("/status")]
+                fallback_url = f"{self._base_url}{fallback_path}"
+                async with session.request(
+                    "GET", fallback_url, headers=headers
+                ) as fallback_response:
+                    fallback_text = await fallback_response.text()
+                    fallback_duration_ms = int((time.monotonic() - started) * 1000)
+                    if fallback_response.status >= 400:
+                        raise ProviderAPIError(
+                            provider="kling",
+                            status_code=fallback_response.status,
+                            message="fal.ai request failed",
+                            error_type="api_error",
+                            provider_message=fallback_text,
+                            duration_ms=fallback_duration_ms,
+                        )
+                    if not fallback_text:
+                        return {}, fallback_response.status, fallback_duration_ms
+                    try:
+                        fallback_payload = json.loads(fallback_text)
+                    except json.JSONDecodeError as exc:
+                        raise ProviderAPIError(
+                            provider="kling",
+                            status_code=fallback_response.status,
+                            message="Unable to decode fal.ai response",
+                            error_type="decode",
+                            provider_message=fallback_text,
+                            duration_ms=fallback_duration_ms,
+                        ) from exc
+                    return fallback_payload, fallback_response.status, fallback_duration_ms
             if response.status >= 400:
                 raise ProviderAPIError(
                     provider="kling",
                     status_code=response.status,
-                    message="fal.ai submit failed",
+                    message="fal.ai request failed",
                     error_type="api_error",
                     provider_message=text,
                     duration_ms=duration_ms,
@@ -413,7 +462,7 @@ class KlingVideoClient(BaseProviderClient):
             "image_url": image_url,
             "video_url": video_url,
             "character_orientation": settings.get("character_orientation") or "video",
-            "keep_original_sound": settings.get("keep_original_sound") or "yes",
+            "keep_original_sound": _as_bool(settings.get("keep_original_sound"), default=False),
         }
 
         if prompt and prompt.strip():
