@@ -89,6 +89,39 @@ psql -f migrations/001_initial_schema.sql
 python main.py
 ```
 
+
+## Railway: где запускать диагностические команды
+
+Команды проверки нужно запускать **внутри runtime сервиса Railway**, а не в PowerShell на локальном ПК.
+
+1. Откройте Railway → ваш Project → Service (bot) → **Shell/Terminal**.
+2. Выполните:
+
+```bash
+pwd
+python tools/diag_kling_runtime.py
+python -m py_compile providers/kling_video.py
+```
+
+Если хотите проверить вручную, что в файле нет проблемного паттерна:
+
+```bash
+python - <<'PY'
+from pathlib import Path
+s = Path('providers/kling_video.py').read_text(encoding='utf-8')
+print('has_async_with_request=', 'async with session.request(' in s)
+PY
+```
+
+### Частая ошибка на Windows PowerShell
+
+Конструкция `python - <<'PY'` — это heredoc для bash/zsh и в PowerShell не работает.
+Эквивалент для PowerShell:
+
+```powershell
+python -c "from pathlib import Path; s=Path('providers/kling_video.py').read_text(encoding='utf-8'); print('has_async_with_request=', 'async with session.request(' in s)"
+```
+
 ## Решение проблем
 
 ### Проблема: Бот не запускается
