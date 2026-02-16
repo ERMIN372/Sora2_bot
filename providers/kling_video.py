@@ -79,6 +79,25 @@ class KlingVideoClient(BaseProviderClient):
         )
 
     def _build_headers(self) -> Dict[str, str]:
+        token_getter = getattr(self, "_get_token", None)
+        raw_token = ""
+        if callable(token_getter):
+            try:
+                raw_token = token_getter()
+            except Exception:
+                raw_token = ""
+        if not raw_token:
+            # Backward-compatible fallback for mixed/stale deployments where
+            # instance/class shape may miss _get_token.
+            raw_token = _generate_jwt(
+                getattr(self, "_access_key", "") or "",
+                getattr(self, "_secret_key", "") or "",
+            )
+        token = (raw_token or "").strip()
+        if token.lower().startswith("bearer "):
+            auth_value = token
+        else:
+            auth_value = f"Bearer {token}"
         return {
             "Authorization": f"Key {self._fal_key}",
             "Content-Type": "application/json",
@@ -124,6 +143,14 @@ class KlingVideoClient(BaseProviderClient):
                     duration_ms=duration_ms,
                 ) from exc
             return payload, response.status, duration_ms
+
+    @staticmethod
+    def _classify_api_error(message: Optional[str]) -> tuple[int, str, str]:
+        text = str(message or "").strip()
+        lowered = text.lower()
+        if "account balance not enough" in lowered or "balance not enough" in lowered:
+            return 402, "provider_insufficient_balance", "ACCOUNT_BALANCE_NOT_ENOUGH"
+        return 502, "api_error", "KLING_API_ERROR"
 
     # ------------------------------------------------------------------
     # Job management

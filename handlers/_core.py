@@ -1302,6 +1302,17 @@ def _map_provider_error(error: ProviderAPIError) -> tuple[str, str, bool, str]:
         hint = "rate_limit"
         message = "Превышен лимит. Подождите и повторите."
         short = "Лимит запросов"
+    elif (
+        error_type in {"provider_insufficient_balance", "insufficient_balance"}
+        or "account balance not enough" in raw_provider_message.lower()
+    ):
+        notify_support = True
+        hint = "provider_billing"
+        message = (
+            "У провайдера сейчас недостаточно баланса для выполнения генерации. "
+            "Мы уже получили сигнал и поправим это как можно быстрее."
+        )
+        short = "Баланс провайдера исчерпан"
     elif status == 400 or "validation" in error_type:
         detail = escape_html(provider_message or (error.args[0] if error.args else ""))
         message = f"Неверные параметры запроса: {detail or 'проверьте входные данные.'}"
