@@ -4,7 +4,8 @@ from types import SimpleNamespace
 import pytest
 
 from handlers._core import UserSession, _build_video_settings_keyboard
-from providers.kling_video import FAL_QUEUE_BASE_URL, KLING_BASE_URL, KlingVideoClient
+from providers.base import ProviderAPIError
+from providers.kling_video import KlingVideoClient, _normalise_fal_key
 from utils import build_telegram_file_url
 
 
@@ -97,95 +98,58 @@ def test_build_telegram_file_url_with_public_token_attr() -> None:
     assert url == "https://api.telegram.org/file/bot99999:xyz/videos/ref.mp4"
 
 
-def test_kling_resolve_credentials_falls_back_to_env(monkeypatch) -> None:
-    cfg = SimpleNamespace()
-    monkeypatch.setenv("KLING_ACCESS_KEY", "env-ak")
-    monkeypatch.setenv("KLING_SECRET_KEY", "env-sk")
+def test_kling_extract_status_for_fal_queue() -> None:
+    client = KlingVideoClient.__new__(KlingVideoClient)
 
-    access_key, secret_key = KlingVideoClient._resolve_credentials(cfg)  # type: ignore[arg-type]
-
-    assert access_key == "env-ak"
-    assert secret_key == "env-sk"
+    assert client._extract_status({"status": "IN_PROGRESS"}) == "running"
+    assert client._extract_status({"status": "COMPLETED"}) == "completed"
 
 
-def test_kling_base_url_alias_is_defined() -> None:
-    assert FAL_QUEUE_BASE_URL == KLING_BASE_URL
+def test_kling_extract_assets_for_fal_output() -> None:
+    client = KlingVideoClient.__new__(KlingVideoClient)
 
-
-def test_kling_resolve_legacy_fal_key_falls_back_to_env(monkeypatch) -> None:
-    cfg = SimpleNamespace()
-    monkeypatch.setenv("FAL_KEY", "legacy-fal")
-
-    value = KlingVideoClient._resolve_legacy_fal_key(cfg)  # type: ignore[arg-type]
-
-    assert value == "legacy-fal"
-
-
-def test_kling_build_headers_adds_bearer_prefix() -> None:
-    client = object.__new__(KlingVideoClient)
-    client._get_token = lambda: "abc.jwt.token"  # type: ignore[method-assign]
-
-    headers = KlingVideoClient._build_headers(client)
-
-    assert headers["Authorization"] == "Bearer abc.jwt.token"
-
-
-def test_kling_build_headers_does_not_double_bearer_prefix() -> None:
-    client = object.__new__(KlingVideoClient)
-    client._get_token = lambda: "Bearer abc.jwt.token"  # type: ignore[method-assign]
-
-    headers = KlingVideoClient._build_headers(client)
-
-    assert headers["Authorization"] == "Bearer abc.jwt.token"
-
-
-def test_kling_build_headers_falls_back_when_get_token_missing() -> None:
-    client = object.__new__(KlingVideoClient)
-    client._access_key = "ak"
-    client._secret_key = "sk"
-
-    headers = KlingVideoClient._build_headers(client)
-
-    assert headers["Authorization"].startswith("Bearer ")
-    assert len(headers["Authorization"].split()) == 2
-
-
-def test_b64url_encode_works_without_module_base64_symbol(monkeypatch: pytest.MonkeyPatch) -> None:
-    import providers.kling_video as kling_module
-
-    monkeypatch.delattr(kling_module, "base64", raising=False)
-
-    encoded = kling_module._b64url_encode(b"abc")
-
-    assert encoded == b"YWJj"
-
-
-def test_generate_jwt_works_without_module_stdlib_symbols(monkeypatch: pytest.MonkeyPatch) -> None:
-    import providers.kling_video as kling_module
-
-    monkeypatch.delattr(kling_module, "hmac", raising=False)
-    monkeypatch.delattr(kling_module, "hashlib", raising=False)
-    monkeypatch.delattr(kling_module, "json", raising=False)
-    monkeypatch.delattr(kling_module, "time", raising=False)
-
-    token = kling_module._generate_jwt("ak", "sk")
-
-    assert token.count(".") == 2
-
-
-def test_kling_classify_api_error_detects_provider_balance() -> None:
-    status, err_type, err_code = KlingVideoClient._classify_api_error("Account balance not enough")
-
-    assert status == 402
-    assert err_type == "provider_insufficient_balance"
-    assert err_code == "ACCOUNT_BALANCE_NOT_ENOUGH"
-
-
-def test_kling_classify_api_error_defaults_to_api_error() -> None:
-    status, err_type, err_code = KlingVideoClient._classify_api_error(
-        "Some transient upstream issue"
+    assets = client._extract_assets(
+        {
+            "output": {
+                "video": {
+                    "url": "https://cdn.example/video.mp4",
+                }
+            }
+        }
     )
 
-    assert status == 502
-    assert err_type == "api_error"
-    assert err_code == "KLING_API_ERROR"
+    assert assets["video"] == "https://cdn.example/video.mp4"
+
+
+def test_kling_enqueue_maps_balance_error_to_billing() -> None:
+    class _FailingKlingClient(KlingVideoClient):
+        async def _request(self, *_args, **_kwargs):  # type: ignore[override]
+            raise ProviderAPIError(
+                provider="kling",
+                status_code=0,
+                message="Account balance not enough",
+                error_type="provider_unavailable",
+                provider_message="Account balance not enough",
+            )
+
+    client = _FailingKlingClient.__new__(_FailingKlingClient)
+
+    with pytest.raises(ProviderAPIError) as exc_info:
+        asyncio.run(
+            client.enqueue_job(
+                prompt="test",
+                settings={
+                    "motion_video_url": "https://example.com/ref.mp4",
+                    "reference_inline_data": {"data": "abc"},
+                },
+            )
+        )
+
+    error = exc_info.value
+    assert error.error_type == "billing"
+    assert error.error_code == "insufficient_balance"
+    assert error.status_code == 402
+
+
+def test_normalise_fal_key_accepts_prefixed_value() -> None:
+    assert _normalise_fal_key('"Key fal_test_123"') == "fal_test_123"
