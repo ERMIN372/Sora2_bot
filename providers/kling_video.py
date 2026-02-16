@@ -539,6 +539,117 @@ class KlingVideoClient(BaseProviderClient):
                 json_payload=json_payload,
             )
 
+    async def _request_via_fal_http(
+        self,
+        *,
+        method: str,
+        path: str,
+        json_payload: Optional[Dict[str, Any]] = None,
+    ) -> tuple[Dict[str, Any], int, int]:
+        """Perform a direct fal.ai HTTP request bypassing BaseProviderClient helpers.
+
+        Used as a defensive fallback for rare stale runtime states where legacy
+        JWT helper references may still be invoked from older in-memory code.
+        """
+
+        session = await self._ensure_session()
+        started = time.monotonic()
+        url = f"{self._base_url}{path}"
+        headers = {
+            "Authorization": f"Key {self._fal_key}",
+            "Content-Type": "application/json",
+        }
+        request_kwargs: Dict[str, Any] = {}
+        if json_payload is not None:
+            request_kwargs["json"] = json_payload
+        response = await session.request(method, url, headers=headers, **request_kwargs)
+        try:
+            text = await response.text()
+            duration_ms = int((time.monotonic() - started) * 1000)
+            if response.status == 405 and method.upper() == "GET" and path.endswith("/status"):
+                fallback_path = path[: -len("/status")]
+                fallback_url = f"{self._base_url}{fallback_path}"
+                fallback_response = await session.request("GET", fallback_url, headers=headers)
+                try:
+                    fallback_text = await fallback_response.text()
+                    fallback_duration_ms = int((time.monotonic() - started) * 1000)
+                    if fallback_response.status >= 400:
+                        raise ProviderAPIError(
+                            provider="kling",
+                            status_code=fallback_response.status,
+                            message="fal.ai request failed",
+                            error_type="api_error",
+                            provider_message=fallback_text,
+                            duration_ms=fallback_duration_ms,
+                        )
+                    if not fallback_text:
+                        return {}, fallback_response.status, fallback_duration_ms
+                    try:
+                        fallback_payload = json.loads(fallback_text)
+                    except json.JSONDecodeError as exc:
+                        raise ProviderAPIError(
+                            provider="kling",
+                            status_code=fallback_response.status,
+                            message="Unable to decode fal.ai response",
+                            error_type="decode",
+                            provider_message=fallback_text,
+                            duration_ms=fallback_duration_ms,
+                        ) from exc
+                    return fallback_payload, fallback_response.status, fallback_duration_ms
+                finally:
+                    fallback_response.release()
+            if response.status >= 400:
+                raise ProviderAPIError(
+                    provider="kling",
+                    status_code=response.status,
+                    message="fal.ai request failed",
+                    error_type="api_error",
+                    provider_message=text,
+                    duration_ms=duration_ms,
+                )
+            if not text:
+                return {}, response.status, duration_ms
+            try:
+                payload = json.loads(text)
+            except json.JSONDecodeError as exc:
+                raise ProviderAPIError(
+                    provider="kling",
+                    status_code=response.status,
+                    message="Unable to decode fal.ai response",
+                    error_type="decode",
+                    provider_message=text,
+                    duration_ms=duration_ms,
+                ) from exc
+            return payload, response.status, duration_ms
+        finally:
+            response.release()
+
+    async def _request_with_legacy_fallback(
+        self,
+        method: str,
+        path: str,
+        *,
+        json_payload: Optional[Dict[str, Any]] = None,
+    ) -> tuple[Dict[str, Any], int, int]:
+        try:
+            kwargs: Dict[str, Any] = {}
+            if json_payload is not None:
+                kwargs["json"] = json_payload
+            return await self._request(method, path, **kwargs)
+        except NameError as exc:
+            if "_generate_jwt" not in str(exc):
+                raise
+            log.warning(
+                "kling.request detected legacy JWT NameError; using direct fal HTTP fallback method=%s path=%s",
+                method,
+                path,
+            )
+            return await self._request_via_fal_http(
+                method=method,
+                path=path,
+                json_payload=json_payload,
+            )
+
     # ------------------------------------------------------------------
     # Job management
     # ------------------------------------------------------------------
