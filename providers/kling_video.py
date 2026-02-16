@@ -25,8 +25,7 @@ from providers.base import (
 
 log = logging.getLogger(__name__)
 
-FAL_QUEUE_BASE_URL = os.getenv("FAL_QUEUE_BASE_URL", "https://queue.fal.run")
-FAL_KLING_MODEL = "fal-ai/kling-video/v2.6/standard/motion-control"
+KLING_BASE_URL = os.getenv("KLING_BASE_URL", "https://api-singapore.klingai.com")
 
 DEFAULT_MODE = "std"  # std = 720p, pro = 1080p
 
@@ -45,13 +44,49 @@ def _mask(value: str, visible: int = 4) -> str:
     return value[:visible] + "***"
 
 
+# ------------------------------------------------------------------
+# JWT generation (HS256) without PyJWT dependency
+# ------------------------------------------------------------------
+
+
+def _b64url_encode(data: bytes) -> bytes:
+    """Base64url-encode without padding."""
+    return base64.urlsafe_b64encode(data).rstrip(b"=")
+
+
+def _generate_jwt(access_key: str, secret_key: str, expire_seconds: int = 1800) -> str:
+    """Generate a JWT token for Kling API authentication."""
+    header = _b64url_encode(
+        json.dumps({"alg": "HS256", "typ": "JWT"}, separators=(",", ":")).encode()
+    )
+    now = int(time.time())
+    payload = _b64url_encode(
+        json.dumps(
+            {
+                "iss": access_key,
+                "exp": now + expire_seconds,
+                "nbf": now - 5,
+            },
+            separators=(",", ":"),
+        ).encode()
+    )
+    signing_input = header + b"." + payload
+    signature = _b64url_encode(
+        hmac.new(secret_key.encode(), signing_input, hashlib.sha256).digest()
+    )
+    return (signing_input + b"." + signature).decode()
+
+
 class KlingVideoClient(BaseProviderClient):
     """Client for Kling AI Motion Control generation routed through fal.ai."""
 
     def __init__(self, *, config: Config) -> None:
-        self._fal_key = config.fal_key
-        if not self._fal_key:
-            raise RuntimeError("fal.ai key is not configured; set FAL_KEY for Kling Motion Control")
+        self._access_key = config.kling_access_key
+        self._secret_key = config.kling_secret_key
+        if not self._access_key or not self._secret_key:
+            raise RuntimeError(
+                "Kling API credentials not configured; " "set KLING_ACCESS_KEY and KLING_SECRET_KEY"
+            )
         super().__init__(
             config=config,
             base_url=FAL_QUEUE_BASE_URL,
@@ -127,8 +162,8 @@ class KlingVideoClient(BaseProviderClient):
 
         data, status_code, duration_ms = await self._request(
             "POST",
-            f"/{FAL_KLING_MODEL}",
-            json={"input": body},
+            "/v1/videos/motion-control",
+            json=body,
         )
 
         task_id = data.get("request_id")
@@ -172,7 +207,7 @@ class KlingVideoClient(BaseProviderClient):
 
         data, status_code, duration_ms = await self._request(
             "GET",
-            f"/{FAL_KLING_MODEL}/requests/{job_id}/status",
+            f"/v1/videos/motion-control/{job_id}",
         )
         status = self._extract_status(data)
 
