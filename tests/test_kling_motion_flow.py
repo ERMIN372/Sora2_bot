@@ -117,3 +117,21 @@ def test_kling_resolve_legacy_fal_key_falls_back_to_env(monkeypatch) -> None:
     value = KlingVideoClient._resolve_legacy_fal_key(cfg)  # type: ignore[arg-type]
 
     assert value == "legacy-fal"
+
+
+def test_kling_build_headers_adds_bearer_prefix() -> None:
+    client = object.__new__(KlingVideoClient)
+    client._get_token = lambda: "abc.jwt.token"  # type: ignore[method-assign]
+
+    headers = KlingVideoClient._build_headers(client)
+
+    assert headers["Authorization"] == "Bearer abc.jwt.token"
+
+
+def test_kling_build_headers_does_not_double_bearer_prefix() -> None:
+    client = object.__new__(KlingVideoClient)
+    client._get_token = lambda: "Bearer abc.jwt.token"  # type: ignore[method-assign]
+
+    headers = KlingVideoClient._build_headers(client)
+
+    assert headers["Authorization"] == "Bearer abc.jwt.token"

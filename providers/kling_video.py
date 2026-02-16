@@ -123,6 +123,27 @@ class KlingVideoClient(BaseProviderClient):
 
         return str(getattr(config, "fal_key", "") or os.getenv("FAL_KEY", "") or "").strip()
 
+    @staticmethod
+    def _resolve_credentials(config: Config) -> tuple[str, str]:
+        access_key = str(
+            getattr(config, "kling_access_key", "") or os.getenv("KLING_ACCESS_KEY", "")
+        ).strip()
+        secret_key = str(
+            getattr(config, "kling_secret_key", "") or os.getenv("KLING_SECRET_KEY", "")
+        ).strip()
+        return access_key, secret_key
+
+    @staticmethod
+    def _resolve_legacy_fal_key(config: Config) -> str:
+        """Return a legacy FAL key for compatibility with stale deployments.
+
+        Some older runtime bundles referenced ``self._fal_key`` while constructing
+        provider clients. We keep this field initialised to avoid AttributeError
+        under mixed-version rollouts.
+        """
+
+        return str(getattr(config, "fal_key", "") or os.getenv("FAL_KEY", "") or "").strip()
+
     def __init__(self, *, config: Config) -> None:
         self._fal_key = self._resolve_legacy_fal_key(config)
         self._access_key, self._secret_key = self._resolve_credentials(config)
@@ -143,8 +164,13 @@ class KlingVideoClient(BaseProviderClient):
         )
 
     def _build_headers(self) -> Dict[str, str]:
+        token = (self._get_token() or "").strip()
+        if token.lower().startswith("bearer "):
+            auth_value = token
+        else:
+            auth_value = f"Bearer {token}"
         return {
-            "Authorization": f"Key {self._fal_key}",
+            "Authorization": auth_value,
             "Content-Type": "application/json",
         }
 
