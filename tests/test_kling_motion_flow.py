@@ -244,7 +244,10 @@ def test_kling_status_recovers_from_legacy_jwt_name_error() -> None:
         async def _request_via_fal_http(  # type: ignore[override]
             self, *, method: str, path: str, json_payload=None
         ):
-            assert method == "GET"
+            if path.endswith("/status"):
+                assert method == "POST"
+            else:
+                assert method == "GET"
             assert json_payload is None
             if path.endswith("/status"):
                 return {"status": "COMPLETED"}, 200, 50
@@ -298,7 +301,7 @@ def test_kling_direct_fallback_retries_without_status_on_405() -> None:
 
     data, status_code, _ = asyncio.run(
         client._request_via_fal_http(
-            method="GET",
+            method="POST",
             path=f"/{FAL_KLING_MODEL}/requests/abc/status",
             json_payload=None,
         )
@@ -306,14 +309,15 @@ def test_kling_direct_fallback_retries_without_status_on_405() -> None:
 
     assert status_code == 200
     assert data["status"] == "COMPLETED"
+    assert client._session.calls[0][0] == "POST"
     assert client._session.calls[0][1].endswith("/status")
     assert client._session.calls[1][1].endswith("/requests/abc")
     assert "json" not in client._session.calls[0][2]
     assert "json" not in client._session.calls[1][2]
 
 
-def test_kling_status_uses_get_with_base_model_path() -> None:
-    """Status polling must use GET and the base model path (no subpath)."""
+def test_kling_status_uses_post_with_base_model_path() -> None:
+    """Status polling must use POST and the base model path (no subpath)."""
     class _StatusClient(KlingVideoClient):
         async def _request_with_legacy_fallback(  # type: ignore[override]
             self, method: str, path: str, *, json_payload=None
@@ -330,7 +334,7 @@ def test_kling_status_uses_get_with_base_model_path() -> None:
 
     assert result.status == "running"
     assert result.assets == {}
-    assert client.calls[0][:2] == ("GET", f"/{FAL_KLING_MODEL_BASE}/requests/req-poll/status")
+    assert client.calls[0][:2] == ("POST", f"/{FAL_KLING_MODEL_BASE}/requests/req-poll/status")
     assert len(client.calls) == 1
 
 
@@ -362,5 +366,5 @@ def test_kling_status_ignores_cached_status_url_uses_full_model_path() -> None:
 
     assert result.status == "running"
     # Must use full model path, NOT the cached base-path status_url
-    assert client.calls[0][:2] == ("GET", f"/{FAL_KLING_MODEL_BASE}/requests/req-cached/status")
+    assert client.calls[0][:2] == ("POST", f"/{FAL_KLING_MODEL_BASE}/requests/req-cached/status")
     assert len(client.calls) == 1
