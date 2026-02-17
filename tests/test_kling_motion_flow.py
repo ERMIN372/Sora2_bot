@@ -8,6 +8,8 @@ from providers.base import ProviderAPIError
 from providers.kling_video import (
     FAL_KLING_MODEL,
     FAL_KLING_MODEL_BASE,
+    FAL_KLING_MODEL_PRO,
+    FAL_KLING_MODEL_STANDARD,
     KlingVideoClient,
     _as_bool,
     _normalise_fal_key,
@@ -152,6 +154,12 @@ def test_kling_enqueue_maps_balance_error_to_billing() -> None:
                 provider_message="Account balance not enough",
             )
 
+        async def _validate_public_asset_url(self, *, url: str, kind: str) -> None:  # type: ignore[override]
+            return None
+
+        async def _probe_video_duration_seconds(self, url: str) -> float:  # type: ignore[override]
+            return 8.0
+
     client = _FailingKlingClient.__new__(_FailingKlingClient)
 
     with pytest.raises(ProviderAPIError) as exc_info:
@@ -171,6 +179,73 @@ def test_kling_enqueue_maps_balance_error_to_billing() -> None:
     assert error.status_code == 402
 
 
+def test_kling_enqueue_maps_missing_ffprobe_to_provider_unavailable() -> None:
+    class _FailingKlingClient(KlingVideoClient):
+        async def _request(self, *_args, **_kwargs):  # type: ignore[override]
+            raise ProviderAPIError(
+                provider="kling",
+                status_code=500,
+                message="ffprobe is required for Kling Motion Control duration validation",
+                error_type="validation",
+            )
+
+        async def _validate_public_asset_url(self, *, url: str, kind: str) -> None:  # type: ignore[override]
+            return None
+
+        async def _probe_video_duration_seconds(self, url: str) -> float:  # type: ignore[override]
+            return 8.0
+
+    client = _FailingKlingClient.__new__(_FailingKlingClient)
+
+    with pytest.raises(ProviderAPIError) as exc_info:
+        asyncio.run(
+            client.enqueue_job(
+                prompt="test",
+                settings={
+                    "motion_video_url": "https://example.com/ref.mp4",
+                    "reference_inline_data": {"data": "abc"},
+                },
+            )
+        )
+
+    error = exc_info.value
+    assert error.error_type == "provider_unavailable"
+    assert error.error_code == "ffprobe_missing"
+    assert "ffprobe" in error.message.lower()
+
+
+def test_kling_enqueue_maps_missing_ffprobe_from_probe_stage() -> None:
+    class _ProbeFailClient(KlingVideoClient):
+        async def _validate_public_asset_url(self, *, url: str, kind: str) -> None:  # type: ignore[override]
+            return None
+
+        async def _probe_video_duration_seconds(self, url: str) -> float:  # type: ignore[override]
+            raise ProviderAPIError(
+                provider="kling",
+                status_code=500,
+                message="ffprobe is required for Kling Motion Control duration validation",
+                error_type="validation",
+            )
+
+    client = _ProbeFailClient.__new__(_ProbeFailClient)
+
+    with pytest.raises(ProviderAPIError) as exc_info:
+        asyncio.run(
+            client.enqueue_job(
+                prompt="test",
+                settings={
+                    "motion_video_url": "https://example.com/ref.mp4",
+                    "reference_inline_data": {"data": "abc"},
+                },
+            )
+        )
+
+    error = exc_info.value
+    assert error.error_type == "provider_unavailable"
+    assert error.error_code == "ffprobe_missing"
+    assert "ffprobe" in error.message.lower()
+
+
 def test_normalise_fal_key_accepts_prefixed_value() -> None:
     assert _normalise_fal_key('"Key fal_test_123"') == "fal_test_123"
 
@@ -182,9 +257,15 @@ def test_kling_as_bool_handles_string_values() -> None:
 
 def test_kling_enqueue_sends_bool_keep_original_sound() -> None:
     class _CaptureClient(KlingVideoClient):
-        async def _request(self, _method, _path, **kwargs):  # type: ignore[override]
-            self.last_json = kwargs.get("json")
+        async def _request_with_legacy_fallback(self, _method, _path, *, json_payload=None):  # type: ignore[override]
+            self.last_json = json_payload
             return {"request_id": "req_bool"}, 200, 10
+
+        async def _validate_public_asset_url(self, *, url: str, kind: str) -> None:  # type: ignore[override]
+            return None
+
+        async def _probe_video_duration_seconds(self, url: str) -> float:  # type: ignore[override]
+            return 8.0
 
     client = _CaptureClient.__new__(_CaptureClient)
     client._cache = {}
@@ -205,6 +286,35 @@ def test_kling_enqueue_sends_bool_keep_original_sound() -> None:
     assert payload["keep_original_sound"] is False
 
 
+def test_kling_enqueue_default_keep_original_sound_true() -> None:
+    class _CaptureClient(KlingVideoClient):
+        async def _request_with_legacy_fallback(self, _method, _path, *, json_payload=None):  # type: ignore[override]
+            self.last_json = json_payload
+            return {"request_id": "req_default_sound"}, 200, 12
+
+        async def _validate_public_asset_url(self, *, url: str, kind: str) -> None:  # type: ignore[override]
+            return None
+
+        async def _probe_video_duration_seconds(self, url: str) -> float:  # type: ignore[override]
+            return 7.0
+
+    client = _CaptureClient.__new__(_CaptureClient)
+    client._cache = {}
+
+    asyncio.run(
+        client.enqueue_job(
+            prompt="test",
+            settings={
+                "image_url": "https://example.com/ref.png",
+                "motion_video_url": "https://example.com/ref.mp4",
+            },
+        )
+    )
+
+    payload = client.last_json["input"]
+    assert payload["keep_original_sound"] is True
+
+
 def test_kling_enqueue_recovers_from_legacy_jwt_name_error() -> None:
     class _NameErrorKlingClient(KlingVideoClient):
         async def _request(self, *_args, **_kwargs):  # type: ignore[override]
@@ -217,6 +327,12 @@ def test_kling_enqueue_recovers_from_legacy_jwt_name_error() -> None:
             assert path == f"/{FAL_KLING_MODEL}"
             assert isinstance(json_payload, dict)
             return {"request_id": "req_fallback"}, 200, 123
+
+        async def _validate_public_asset_url(self, *, url: str, kind: str) -> None:  # type: ignore[override]
+            return None
+
+        async def _probe_video_duration_seconds(self, url: str) -> float:  # type: ignore[override]
+            return 8.0
 
     client = _NameErrorKlingClient.__new__(_NameErrorKlingClient)
     client._cache = {}
@@ -318,6 +434,7 @@ def test_kling_direct_fallback_retries_without_status_on_405() -> None:
 
 def test_kling_status_uses_post_with_base_model_path() -> None:
     """Status polling must use POST and the base model path (no subpath)."""
+
     class _StatusClient(KlingVideoClient):
         async def _request_with_legacy_fallback(  # type: ignore[override]
             self, method: str, path: str, *, json_payload=None
@@ -344,6 +461,7 @@ def test_kling_status_ignores_cached_status_url_uses_full_model_path() -> None:
     fal.ai normalises status_url to the base "fal-ai/kling-video" which resolves
     to a different endpoint that validates motion-control body params → 422.
     """
+
     class _CachedUrlClient(KlingVideoClient):
         async def _request_with_legacy_fallback(  # type: ignore[override]
             self, method: str, path: str, *, json_payload=None
@@ -365,6 +483,11 @@ def test_kling_status_ignores_cached_status_url_uses_full_model_path() -> None:
     result = asyncio.run(client.get_job_status("req-cached"))
 
     assert result.status == "running"
-    # Must use full model path, NOT the cached base-path status_url
+    # Must use base queue model path, NOT any cached status_url value.
     assert client.calls[0][:2] == ("POST", f"/{FAL_KLING_MODEL_BASE}/requests/req-cached/status")
     assert len(client.calls) == 1
+
+
+def test_kling_submit_model_selection() -> None:
+    assert KlingVideoClient._pick_submit_model("std") == FAL_KLING_MODEL_STANDARD
+    assert KlingVideoClient._pick_submit_model("pro") == FAL_KLING_MODEL_PRO

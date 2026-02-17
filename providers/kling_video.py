@@ -10,6 +10,7 @@ import tempfile
 import time
 from pathlib import Path
 from typing import Any, Dict, Optional
+from urllib.parse import urlparse
 
 import aiohttp
 
@@ -21,19 +22,22 @@ from providers.base import (
     ProviderJobSubmission,
     extract_url,
     iter_nodes,
+    validate_download_url,
 )
 
 log = logging.getLogger(__name__)
 
 FAL_QUEUE_BASE_URL = os.getenv("FAL_QUEUE_BASE_URL", "https://queue.fal.run")
-FAL_KLING_MODEL = "fal-ai/kling-video/v2.6/standard/motion-control"
-# fal.ai queue API: status/result polling URLs MUST use the same full app-id
-# that was used for submission.  Using the base "fal-ai/kling-video" causes
-# the endpoint to validate body parameters for a *different* model → 422.
-FAL_KLING_MODEL_BASE = FAL_KLING_MODEL  # keep alias for back-compat
-KLING_FAL_IMPL_REV = "kling-fal-queue-fullpath-v2"
+FAL_KLING_MODEL_STANDARD = "fal-ai/kling-video/v2.6/standard/motion-control"
+FAL_KLING_MODEL_PRO = "fal-ai/kling-video/v2.6/pro/motion-control"
+FAL_KLING_MODEL_BASE = "fal-ai/kling-video"
+FAL_KLING_MODEL = FAL_KLING_MODEL_STANDARD  # back-compat alias for tests/imports
+KLING_FAL_IMPL_REV = "kling-fal-queue-splitpath-v3"
 
 DEFAULT_MODE = "std"  # std = 720p, pro = 1080p
+_ALLOWED_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".avif"}
+_ALLOWED_VIDEO_EXTENSIONS = {".mp4", ".mov", ".webm", ".m4v", ".gif"}
+_ALLOWED_ORIENTATION = {"image", "video"}
 
 # fal queue status mapping → normalised provider statuses
 _STATUS_MAP: Dict[str, str] = {
@@ -103,6 +107,113 @@ class KlingVideoClient(BaseProviderClient):
             "Authorization": f"Key {self._fal_key}",
             "Content-Type": "application/json",
         }
+
+    @staticmethod
+    def _pick_submit_model(mode: str) -> str:
+        return (
+            FAL_KLING_MODEL_PRO if str(mode).strip().lower() == "pro" else FAL_KLING_MODEL_STANDARD
+        )
+
+    @staticmethod
+    def _extension_is_allowed(url: str, allowed: set[str]) -> bool:
+        path = (urlparse(url).path or "").lower()
+        return any(path.endswith(ext) for ext in allowed)
+
+    async def _validate_public_asset_url(self, *, url: str, kind: str) -> None:
+        validate_download_url(url)
+        session = await self._ensure_session()
+        timeout = aiohttp.ClientTimeout(total=20)
+        statuses: list[str] = []
+        for method in ("HEAD", "GET"):
+            request_kwargs: Dict[str, Any] = {"allow_redirects": True, "timeout": timeout}
+            if method == "GET":
+                request_kwargs["headers"] = {"Range": "bytes=0-0"}
+            response = await session.request(method, url, **request_kwargs)
+            try:
+                statuses.append(f"{method}:{response.status}")
+                if response.status >= 400:
+                    continue
+                content_type = str(response.headers.get("Content-Type") or "").lower()
+                if kind == "image":
+                    valid = self._extension_is_allowed(
+                        url, _ALLOWED_IMAGE_EXTENSIONS
+                    ) or content_type.startswith("image/")
+                else:
+                    valid = self._extension_is_allowed(
+                        url, _ALLOWED_VIDEO_EXTENSIONS
+                    ) or content_type.startswith("video/")
+                if not valid:
+                    raise ProviderAPIError(
+                        provider="kling",
+                        status_code=400,
+                        message=f"Invalid {kind}_url format for Kling Motion Control",
+                        error_type="validation",
+                        provider_message=f"content_type={content_type or 'n/a'} url={url}",
+                    )
+                return
+            finally:
+                response.release()
+        raise ProviderAPIError(
+            provider="kling",
+            status_code=400,
+            message=f"{kind}_url is not publicly accessible",
+            error_type="validation",
+            provider_message="; ".join(statuses),
+        )
+
+    async def _probe_video_duration_seconds(self, url: str) -> float:
+        session = await self._ensure_session()
+        with tempfile.NamedTemporaryFile(prefix="kling-probe-", suffix=".mp4", delete=False) as tmp:
+            file_path = Path(tmp.name)
+        try:
+            async with session.get(
+                url, allow_redirects=True, timeout=aiohttp.ClientTimeout(total=120)
+            ) as response:
+                if response.status >= 400:
+                    raise ProviderAPIError(
+                        provider="kling",
+                        status_code=400,
+                        message="video_url is not downloadable",
+                        error_type="validation",
+                        provider_message=f"status={response.status}",
+                    )
+                with open(file_path, "wb") as out:
+                    async for chunk in response.content.iter_chunked(128 * 1024):
+                        out.write(chunk)
+
+            proc = await asyncio.create_subprocess_exec(
+                "ffprobe",
+                "-v",
+                "error",
+                "-show_entries",
+                "format=duration",
+                "-of",
+                "default=noprint_wrappers=1:nokey=1",
+                str(file_path),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await proc.communicate()
+            if proc.returncode != 0:
+                raise ProviderAPIError(
+                    provider="kling",
+                    status_code=400,
+                    message="Unable to detect motion video duration",
+                    error_type="validation",
+                    provider_message=(stderr.decode("utf-8", errors="ignore") or "ffprobe failed")[
+                        :500
+                    ],
+                )
+            return float((stdout or b"0").decode("utf-8", errors="ignore").strip() or "0")
+        except FileNotFoundError as exc:
+            raise ProviderAPIError(
+                provider="kling",
+                status_code=500,
+                message="В контейнере отсутствует ffprobe, установите ffmpeg/ffprobe",
+                error_type="validation",
+            ) from exc
+        finally:
+            file_path.unlink(missing_ok=True)
 
     # ------------------------------------------------------------------
     # HTTP helpers (legacy JWT fallback + direct fal HTTP)
@@ -255,34 +366,74 @@ class KlingVideoClient(BaseProviderClient):
             )
 
         mode = settings.get("kling_mode") or DEFAULT_MODE
-
-        body: Dict[str, Any] = {
-            "mode": mode,
-            "image_url": image_url,
-            "video_url": video_url,
-            "character_orientation": settings.get("character_orientation") or "video",
-            "keep_original_sound": _as_bool(settings.get("keep_original_sound"), default=False),
-        }
-
-        if prompt and prompt.strip():
-            body["prompt"] = prompt.strip()[:2500]
-
-        log.info(
-            "kling.enqueue mode=%s has_image_url=%s has_video_url=%s keep_original_sound=%s prompt_len=%s",
-            mode,
-            bool(image_url),
-            bool(video_url),
-            body.get("keep_original_sound"),
-            len(prompt or ""),
+        submit_model = self._pick_submit_model(str(mode))
+        character_orientation = (
+            str(settings.get("character_orientation") or "video").strip().lower()
         )
+        if character_orientation not in _ALLOWED_ORIENTATION:
+            raise ProviderAPIError(
+                provider="kling",
+                status_code=400,
+                message="character_orientation must be one of: image, video",
+                error_type="validation",
+            )
 
         try:
+            await self._validate_public_asset_url(url=image_url, kind="image")
+            await self._validate_public_asset_url(url=video_url, kind="video")
+            duration_seconds = await self._probe_video_duration_seconds(video_url)
+            max_duration = 10 if character_orientation == "image" else 30
+            if duration_seconds > max_duration:
+                raise ProviderAPIError(
+                    provider="kling",
+                    status_code=400,
+                    message="motion reference video duration exceeds character_orientation limit",
+                    error_type="validation",
+                    provider_message=(
+                        f"character_orientation={character_orientation} duration={duration_seconds:.2f}s "
+                        f"max={max_duration}s"
+                    ),
+                )
+
+            body: Dict[str, Any] = {
+                "image_url": image_url,
+                "video_url": video_url,
+                "character_orientation": character_orientation,
+                "keep_original_sound": _as_bool(settings.get("keep_original_sound"), default=True),
+            }
+
+            if prompt and prompt.strip():
+                body["prompt"] = prompt.strip()[:2500]
+
+            log.info(
+                "kling.enqueue model=%s mode=%s has_image_url=%s has_video_url=%s keep_original_sound=%s prompt_len=%s duration_seconds=%.2f",
+                submit_model,
+                mode,
+                bool(image_url),
+                bool(video_url),
+                body.get("keep_original_sound"),
+                len(prompt or ""),
+                duration_seconds,
+            )
+
             data, status_code, duration_ms = await self._request_with_legacy_fallback(
                 "POST",
-                f"/{FAL_KLING_MODEL}",
+                f"/{submit_model}",
                 json_payload={"input": body},
             )
         except ProviderAPIError as exc:
+            ffprobe_hint = f"{exc.message or ''} {exc.provider_message or ''}".lower()
+            if "ffprobe" in ffprobe_hint and "required" in ffprobe_hint:
+                raise ProviderAPIError(
+                    provider="kling",
+                    status_code=exc.status_code or 503,
+                    message="В контейнере отсутствует ffprobe, установите ffmpeg/ffprobe",
+                    error_type="provider_unavailable",
+                    error_code="ffprobe_missing",
+                    provider_message=exc.provider_message or str(exc),
+                    retryable=False,
+                    duration_ms=exc.duration_ms,
+                ) from exc
             if _is_balance_error(exc.provider_message) or _is_balance_error(str(exc)):
                 raise ProviderAPIError(
                     provider="kling",
@@ -335,11 +486,8 @@ class KlingVideoClient(BaseProviderClient):
                     duration_ms=0,
                 )
 
-        # fal.ai queue: ALWAYS use the full app-id for polling URLs.
-        # Do NOT trust status_url/response_url from enqueue response — fal.ai
-        # normalises them to the base "fal-ai/kling-video" which resolves to a
-        # *different* endpoint that validates motion-control body parameters → 422.
-        status_path = f"/{FAL_KLING_MODEL}/requests/{job_id}/status"
+        # fal.ai queue: submit uses full endpoint, but status/result must use base model path.
+        status_path = f"/{FAL_KLING_MODEL_BASE}/requests/{job_id}/status"
 
         log.info(
             "kling.poll job_id=%s status_path=%s has_cached=%s",
@@ -355,7 +503,7 @@ class KlingVideoClient(BaseProviderClient):
         status = self._extract_status(data)
 
         if status == "completed":
-            result_path = f"/{FAL_KLING_MODEL}/requests/{job_id}"
+            result_path = f"/{FAL_KLING_MODEL_BASE}/requests/{job_id}"
             log.info("kling.result_fetch job_id=%s result_path=%s", job_id, result_path)
             result_data, _, _ = await self._request_with_legacy_fallback(
                 "GET",
@@ -370,12 +518,15 @@ class KlingVideoClient(BaseProviderClient):
         assets = self._extract_assets(data)
 
         log.info(
-            "kling.status task_id=%s status=%s assets=%s duration_ms=%s status_path=%s",
+            "kling.status task_id=%s request_id=%s status=%s queue_position=%s assets=%s duration_ms=%s status_path=%s error=%s",
             job_id,
+            data.get("request_id") or job_id,
             status,
+            data.get("queue_position"),
             list(assets.keys()) if assets else "none",
             duration_ms,
             status_path,
+            error,
         )
         return ProviderJobStatus(
             job_id=job_id,

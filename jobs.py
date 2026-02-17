@@ -1854,6 +1854,16 @@ class JobQueue:
             if isinstance(result.data, dict):
                 provider_data = dict(result.data)
 
+            provider_request_id = str(provider_data.get("request_id") or "").strip()
+            if provider_request_id and provider_request_id != provider_job_id:
+                log.info(
+                    "jobs.poll provider_request_id_switch job_id=%s old_provider_job_id=%s new_provider_job_id=%s",
+                    pending.job_id,
+                    provider_job_id,
+                    provider_request_id,
+                )
+                provider_job_id = provider_request_id
+
             raw_inline = provider_data.get("inline_assets") if provider_data else []
             inline_assets = (
                 [dict(asset) for asset in raw_inline if isinstance(asset, dict)]
