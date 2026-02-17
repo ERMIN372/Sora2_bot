@@ -325,3 +325,77 @@ def test_running_poll_requeue_increments_attempt_and_preserves_limit(
     assert enqueue_calls[0]["attempt"] == 3
     assert enqueue_calls[0]["max_attempts"] == 9
     assert enqueue_calls[0]["asset_kind"] == ASSET_KIND_VIDEO
+
+
+def test_running_poll_stops_when_attempt_limit_reached(
+    monkeypatch: pytest.MonkeyPatch, make_openai_video_config
+) -> None:
+    config = make_openai_video_config()
+    db = InlineFakeDB()
+
+    status = ProviderJobStatus(
+        job_id="job-4",
+        status="running",
+        assets={},
+        error=None,
+        data={},
+        status_code=200,
+        duration_ms=55,
+    )
+    provider = FakeProvider(status=status)
+    job_queue = JobQueue(
+        db=db,
+        providers={"openai": provider},
+        default_provider="openai",
+        config=config,
+    )
+    record = GenerationJobRecord(
+        id="job-4",
+        user_id=778,
+        prompt="make video",
+        status="queued",
+        video_url=None,
+        video_id="vid-4",
+        error=None,
+        created_at=datetime.now(timezone.utc),
+        updated_at=datetime.now(timezone.utc),
+        size="720p",
+        model="openai",
+        cost_credits=config.generation_cost_credits,
+        username="tester",
+        corr_id="corr-4",
+        content_type="video",
+    )
+    _run(db.create_job(record))
+
+    enqueue_calls: List[Dict[str, Any]] = []
+
+    async def _capture_enqueue(**kwargs: Any) -> None:
+        enqueue_calls.append(dict(kwargs))
+
+    monkeypatch.setattr(job_queue, "enqueue", _capture_enqueue)
+
+    pending = PendingJob(
+        job_id="job-4",
+        user_id=778,
+        prompt="make video",
+        corr_id="corr-4",
+        size="720p",
+        model="openai",
+        provider="openai",
+        username="tester",
+        original_prompt="make video",
+        sanitized_prompt="make video",
+        task_type=ASSET_TASK_RETRIEVE,
+        asset_kind=ASSET_KIND_VIDEO,
+        provider_job_id="job-4",
+        video_id="vid-4",
+        attempt=8,
+        max_attempts=9,
+    )
+
+    _run(job_queue._handle_asset_retrieve(pending))
+
+    assert not enqueue_calls
+    assert db.jobs["job-4"].status == "failed"
+    assert db.jobs["job-4"].error == "poll retries exhausted"

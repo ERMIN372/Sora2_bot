@@ -2371,6 +2371,28 @@ class JobQueue:
                 )
             else:
                 # Job still running - requeue for later polling
+                if attempt + 1 >= max_attempts:
+                    final_message = "poll retries exhausted"
+                    log.warning(
+                        "Polling attempts exhausted while running job_id=%s corr_id=%s provider=%s attempts=%s status=%s",
+                        pending.job_id,
+                        pending.corr_id,
+                        provider_key,
+                        max_attempts,
+                        result.status,
+                    )
+                    await self._db.update_job(
+                        pending.job_id,
+                        "failed",
+                        video_id=pending.video_id,
+                        error=final_message,
+                    )
+                    await self._release_gate(
+                        pending,
+                        reason="poll_retry_exhausted",
+                        status="failed",
+                    )
+                    return
                 log.debug(
                     "Job still running job_id=%s corr_id=%s provider=%s status=%s requeueing", 
                     pending.job_id,
