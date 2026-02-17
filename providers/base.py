@@ -568,6 +568,11 @@ class BaseProviderClient:
             context_text,
         )
         try:
+            # fal.ai requires GET/HEAD requests to be sent without Content-Type
+            # when there is no request body.
+            method_upper = method.upper()
+            if method_upper in {"GET", "HEAD"} and not json_payload and not data_payload:
+                headers = {k: v for k, v in headers.items() if k.lower() != "content-type"}
             async with session.request(method, url, headers=headers, **kwargs) as response:
                 text = await response.text()
                 duration_ms = int((time.monotonic() - start) * 1000)
