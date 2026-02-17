@@ -573,6 +573,53 @@ def test_kling_running_202_never_reaches_result_422() -> None:
     assert client.calls == [("GET", f"/{FAL_KLING_MODEL_BASE}/requests/req-202/status", None)]
 
 
+
+
+def test_kling_completed_result_422_missing_fields_treated_as_running() -> None:
+    class _EarlyResultClient(KlingVideoClient):
+        async def _request_with_legacy_fallback(  # type: ignore[override]
+            self, method: str, path: str, *, json_payload=None
+        ):
+            self.calls.append((method, path, json_payload))
+            if path.endswith("/status"):
+                return {
+                    "status": "COMPLETED",
+                    "response_url": "https://queue.fal.run/fal-ai/kling-video/requests/req-early",
+                }, 200, 21
+            raise ProviderAPIError(
+                provider="kling",
+                status_code=422,
+                message="field required",
+                error_type="invalid_request",
+                provider_message=(
+                    '{"detail":[{"loc":["body","image_url"],"msg":"field required"},'
+                    '{"loc":["body","video_url"],"msg":"field required"},'
+                    '{"loc":["body","character_orientation"],"msg":"field required"}]}'
+                ),
+                retryable=False,
+            )
+
+    client = _EarlyResultClient.__new__(_EarlyResultClient)
+    client._cache = {
+        "req-early": {
+            "request_id": "req-early",
+            "status_url": "https://queue.fal.run/fal-ai/kling-video/requests/req-early/status",
+            "response_url": "https://queue.fal.run/fal-ai/kling-video/requests/req-early",
+        }
+    }
+    client._submit_models = {}
+    client._base_url = "https://queue.fal.run"
+    client.calls = []
+
+    result = asyncio.run(client.get_job_status("req-early"))
+
+    assert result.status == "running"
+    assert result.assets == {}
+    assert client.calls == [
+        ("GET", f"/{FAL_KLING_MODEL_BASE}/requests/req-early/status", None),
+        ("GET", f"/{FAL_KLING_MODEL_BASE}/requests/req-early", None),
+    ]
+
 def test_kling_submit_model_selection() -> None:
     assert KlingVideoClient._pick_submit_model("std") == FAL_KLING_MODEL_STANDARD
     assert KlingVideoClient._pick_submit_model("pro") == FAL_KLING_MODEL_PRO

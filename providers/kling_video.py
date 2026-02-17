@@ -33,7 +33,7 @@ FAL_KLING_MODEL_STANDARD = "fal-ai/kling-video/v2.6/standard/motion-control"
 FAL_KLING_MODEL_PRO = "fal-ai/kling-video/v2.6/pro/motion-control"
 FAL_KLING_MODEL_BASE = "fal-ai/kling-video"
 FAL_KLING_MODEL = FAL_KLING_MODEL_STANDARD  # back-compat alias for tests/imports
-KLING_FAL_IMPL_REV = "kling-fal-queue-splitpath-v5"
+KLING_FAL_IMPL_REV = "kling-fal-queue-splitpath-v6"
 
 DEFAULT_MODE = "std"  # std = 720p, pro = 1080p
 _ALLOWED_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".avif"}
@@ -52,6 +52,7 @@ _STATUS_MAP: Dict[str, str] = {
 _RUNNING_STATUSES = {"in_queue", "in_progress", "running"}
 _COMPLETED_STATUSES = {"completed"}
 _FAILED_STATUSES = {"failed", "error", "errored", "cancelled", "canceled"}
+_EARLY_RESULT_MISSING_FIELDS = {"image_url", "video_url", "character_orientation"}
 
 
 def _mask(value: str, visible: int = 4) -> str:
@@ -508,9 +509,7 @@ class KlingVideoClient(BaseProviderClient):
             bool(cached),
         )
 
-        data, status_code, duration_ms = await self._request_with_legacy_fallback(
-            "GET", status_path
-        )
+        data, status_code, duration_ms = await self.poll_status(job_id=job_id, status_path=status_path)
         if isinstance(cached, dict):
             data.setdefault("status_url", cached.get("status_url"))
             data.setdefault("response_url", cached.get("response_url"))
@@ -530,17 +529,32 @@ class KlingVideoClient(BaseProviderClient):
                 data.get("response_url") if isinstance(data, dict) else None,
                 fallback=f"/{poll_model}/requests/{job_id}",
             )
-            log.info("kling.result_fetch job_id=%s result_path=%s", job_id, result_path)
-            result_data, _, _ = await self._request_with_legacy_fallback("GET", result_path)
-            if isinstance(data, dict):
-                result_data.setdefault("status_url", data.get("status_url"))
-                result_data.setdefault("response_url", data.get("response_url"))
-                result_data.setdefault("request_id", data.get("request_id") or job_id)
-            self._cache[job_id] = result_data
-            data = result_data
-            status = self._extract_status(data)
-            error = self._extract_error(data)
-            assets = self._extract_assets(data)
+            try:
+                result_data, _, _ = await self.fetch_result(job_id=job_id, result_path=result_path)
+            except ProviderAPIError as exc:
+                if self._is_early_result_error(exc):
+                    log.info(
+                        "kling.result_not_ready job_id=%s status_code=%s message=%s",
+                        job_id,
+                        exc.status_code,
+                        (exc.message or "")[:300],
+                    )
+                    self._cache[job_id] = data
+                    status = "running"
+                    error = None
+                    assets = {}
+                else:
+                    raise
+            else:
+                if isinstance(data, dict):
+                    result_data.setdefault("status_url", data.get("status_url"))
+                    result_data.setdefault("response_url", data.get("response_url"))
+                    result_data.setdefault("request_id", data.get("request_id") or job_id)
+                self._cache[job_id] = result_data
+                data = result_data
+                status = self._extract_status(data)
+                error = self._extract_error(data)
+                assets = self._extract_assets(data)
         else:
             self._cache[job_id] = data
             if state == "running":
@@ -566,6 +580,34 @@ class KlingVideoClient(BaseProviderClient):
             status_code=status_code,
             duration_ms=duration_ms,
         )
+
+    async def poll_status(self, *, job_id: str, status_path: str) -> tuple[Dict[str, Any], int, int]:
+        """Single status polling request for queue state."""
+
+        data, status_code, duration_ms = await self._request_with_legacy_fallback("GET", status_path)
+        status_value = data.get("status") if isinstance(data, dict) else None
+        log.info(
+            "kling.status_parsed status_code=%s status=%s job_id=%s",
+            status_code,
+            status_value,
+            job_id,
+        )
+        return data, status_code, duration_ms
+
+    async def fetch_result(self, *, job_id: str, result_path: str) -> tuple[Dict[str, Any], int, int]:
+        """Fetch queue response payload only after completed state."""
+
+        log.info("kling.result_fetch job_id=%s result_path=%s", job_id, result_path)
+        return await self._request_with_legacy_fallback("GET", result_path)
+
+    def _is_early_result_error(self, exc: ProviderAPIError) -> bool:
+        if exc.status_code == 400:
+            return True
+        if exc.status_code != 422:
+            return False
+        payload = (exc.provider_message or "") + " " + (exc.message or "")
+        lowered = payload.lower()
+        return all(field in lowered for field in _EARLY_RESULT_MISSING_FIELDS)
 
     def _poll_status(
         self,
