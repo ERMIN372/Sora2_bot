@@ -284,6 +284,7 @@ def test_kling_enqueue_sends_bool_keep_original_sound() -> None:
     assert submission.job_id == "req_bool"
     payload = client.last_json["input"]
     assert payload["keep_original_sound"] is False
+    assert payload["idempotency_key"]
 
 
 def test_kling_enqueue_default_keep_original_sound_true() -> None:
@@ -313,6 +314,37 @@ def test_kling_enqueue_default_keep_original_sound_true() -> None:
 
     payload = client.last_json["input"]
     assert payload["keep_original_sound"] is True
+    assert payload["idempotency_key"]
+
+
+def test_kling_enqueue_uses_provided_idempotency_key() -> None:
+    class _CaptureClient(KlingVideoClient):
+        async def _request_with_legacy_fallback(self, _method, _path, *, json_payload=None):  # type: ignore[override]
+            self.last_json = json_payload
+            return {"request_id": "req_idempotent"}, 200, 10
+
+        async def _validate_public_asset_url(self, *, url: str, kind: str) -> None:  # type: ignore[override]
+            return None
+
+        async def _probe_video_duration_seconds(self, url: str) -> float:  # type: ignore[override]
+            return 8.0
+
+    client = _CaptureClient.__new__(_CaptureClient)
+    client._cache = {}
+
+    asyncio.run(
+        client.enqueue_job(
+            prompt="test",
+            idempotency_key="job-123",
+            settings={
+                "image_url": "https://example.com/ref.png",
+                "motion_video_url": "https://example.com/ref.mp4",
+            },
+        )
+    )
+
+    payload = client.last_json["input"]
+    assert payload["idempotency_key"] == "job-123"
 
 
 def test_kling_enqueue_recovers_from_legacy_jwt_name_error() -> None:
@@ -361,7 +393,7 @@ def test_kling_status_recovers_from_legacy_jwt_name_error() -> None:
             self, *, method: str, path: str, json_payload=None
         ):
             if path.endswith("/status"):
-                assert method == "POST"
+                assert method == "GET"
             else:
                 assert method == "GET"
             assert json_payload is None
@@ -383,57 +415,8 @@ def test_kling_status_recovers_from_legacy_jwt_name_error() -> None:
     assert status.assets["video"] == "https://cdn.example/v.mp4"
 
 
-def test_kling_direct_fallback_retries_without_status_on_405() -> None:
-    class _FakeResponse:
-        def __init__(self, status: int, text: str):
-            self.status = status
-            self._text = text
-            self.released = False
-
-        async def text(self) -> str:
-            return self._text
-
-        def release(self) -> None:
-            self.released = True
-
-    class _FakeSession:
-        def __init__(self):
-            self.calls = []
-
-        async def request(self, method, url, headers=None, **kwargs):
-            self.calls.append((method, url, kwargs))
-            if len(self.calls) == 1:
-                return _FakeResponse(405, "405: Method Not Allowed")
-            return _FakeResponse(200, '{"status":"COMPLETED"}')
-
-    class _DirectClient(KlingVideoClient):
-        async def _ensure_session(self):  # type: ignore[override]
-            return self._session
-
-    client = _DirectClient.__new__(_DirectClient)
-    client._base_url = "https://queue.fal.run"
-    client._fal_key = "fal_test"
-    client._session = _FakeSession()
-
-    data, status_code, _ = asyncio.run(
-        client._request_via_fal_http(
-            method="POST",
-            path=f"/{FAL_KLING_MODEL}/requests/abc/status",
-            json_payload=None,
-        )
-    )
-
-    assert status_code == 200
-    assert data["status"] == "COMPLETED"
-    assert client._session.calls[0][0] == "POST"
-    assert client._session.calls[0][1].endswith("/status")
-    assert client._session.calls[1][1].endswith("/requests/abc")
-    assert "json" not in client._session.calls[0][2]
-    assert "json" not in client._session.calls[1][2]
-
-
-def test_kling_status_uses_post_with_base_model_path() -> None:
-    """Status polling must use POST and the base model path (no subpath)."""
+def test_kling_status_uses_get_with_base_model_path() -> None:
+    """Status polling must use GET and the base model path (no subpath)."""
 
     class _StatusClient(KlingVideoClient):
         async def _request_with_legacy_fallback(  # type: ignore[override]
@@ -451,7 +434,7 @@ def test_kling_status_uses_post_with_base_model_path() -> None:
 
     assert result.status == "running"
     assert result.assets == {}
-    assert client.calls[0][:2] == ("POST", f"/{FAL_KLING_MODEL_BASE}/requests/req-poll/status")
+    assert client.calls[0][:2] == ("GET", f"/{FAL_KLING_MODEL_BASE}/requests/req-poll/status")
     assert len(client.calls) == 1
 
 
@@ -484,7 +467,7 @@ def test_kling_status_ignores_cached_status_url_uses_full_model_path() -> None:
 
     assert result.status == "running"
     # Must use base queue model path, NOT any cached status_url value.
-    assert client.calls[0][:2] == ("POST", f"/{FAL_KLING_MODEL_BASE}/requests/req-cached/status")
+    assert client.calls[0][:2] == ("GET", f"/{FAL_KLING_MODEL_BASE}/requests/req-cached/status")
     assert len(client.calls) == 1
 
 

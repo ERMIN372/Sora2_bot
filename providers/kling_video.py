@@ -8,6 +8,7 @@ import logging
 import os
 import tempfile
 import time
+import uuid
 from pathlib import Path
 from typing import Any, Dict, Optional
 from urllib.parse import urlparse
@@ -246,38 +247,6 @@ class KlingVideoClient(BaseProviderClient):
         try:
             text = await response.text()
             duration_ms = int((time.monotonic() - started) * 1000)
-            if response.status == 405 and path.endswith("/status"):
-                fallback_path = path[: -len("/status")]
-                fallback_url = f"{self._base_url}{fallback_path}"
-                fallback_response = await session.request("GET", fallback_url, headers=headers)
-                try:
-                    fallback_text = await fallback_response.text()
-                    fallback_duration_ms = int((time.monotonic() - started) * 1000)
-                    if fallback_response.status >= 400:
-                        raise ProviderAPIError(
-                            provider="kling",
-                            status_code=fallback_response.status,
-                            message="fal.ai request failed",
-                            error_type="api_error",
-                            provider_message=fallback_text,
-                            duration_ms=fallback_duration_ms,
-                        )
-                    if not fallback_text:
-                        return {}, fallback_response.status, fallback_duration_ms
-                    try:
-                        fallback_payload = json.loads(fallback_text)
-                    except json.JSONDecodeError as exc:
-                        raise ProviderAPIError(
-                            provider="kling",
-                            status_code=fallback_response.status,
-                            message="Unable to decode fal.ai response",
-                            error_type="decode",
-                            provider_message=fallback_text,
-                            duration_ms=fallback_duration_ms,
-                        ) from exc
-                    return fallback_payload, fallback_response.status, fallback_duration_ms
-                finally:
-                    fallback_response.release()
             if response.status >= 400:
                 raise ProviderAPIError(
                     provider="kling",
@@ -405,6 +374,9 @@ class KlingVideoClient(BaseProviderClient):
             if prompt and prompt.strip():
                 body["prompt"] = prompt.strip()[:2500]
 
+            request_idempotency_key = str(idempotency_key or uuid.uuid4())
+            body["idempotency_key"] = request_idempotency_key
+
             log.info(
                 "kling.enqueue model=%s mode=%s has_image_url=%s has_video_url=%s keep_original_sound=%s prompt_len=%s duration_seconds=%.2f",
                 submit_model,
@@ -497,7 +469,7 @@ class KlingVideoClient(BaseProviderClient):
         )
 
         data, status_code, duration_ms = await self._request_with_legacy_fallback(
-            "POST",
+            "GET",
             status_path,
         )
         status = self._extract_status(data)
