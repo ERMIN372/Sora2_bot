@@ -518,7 +518,42 @@ def test_kling_running_202_does_not_fetch_result() -> None:
             self, method: str, path: str, *, json_payload=None
         ):
             self.calls.append((method, path, json_payload))
-            return {"status": "IN_PROGRESS"}, 202, 20
+            if path.endswith("/status"):
+                return {"status": "IN_PROGRESS"}, 202, 20
+            raise AssertionError("response_url must not be requested while queue is running")
+
+    client = _RunningClient.__new__(_RunningClient)
+    client._cache = {
+        "req-202": {
+            "request_id": "req-202",
+            "status_url": "https://queue.fal.run/fal-ai/kling-video/requests/req-202/status",
+            "response_url": "https://queue.fal.run/fal-ai/kling-video/requests/req-202",
+        }
+    }
+    client._submit_models = {}
+    client._base_url = "https://queue.fal.run"
+    client.calls = []
+
+    result = asyncio.run(client.get_job_status("req-202"))
+
+    assert result.status == "running"
+    assert client.calls == [("GET", f"/{FAL_KLING_MODEL_BASE}/requests/req-202/status", None)]
+
+
+def test_kling_running_202_never_reaches_result_422() -> None:
+    class _RunningClient(KlingVideoClient):
+        async def _request_with_legacy_fallback(  # type: ignore[override]
+            self, method: str, path: str, *, json_payload=None
+        ):
+            self.calls.append((method, path, json_payload))
+            if path.endswith("/status"):
+                return {"status": "running"}, 202, 18
+            raise ProviderAPIError(
+                provider="kling",
+                status_code=422,
+                message="field required: image_url/video_url/character_orientation",
+                error_type="invalid_request",
+            )
 
     client = _RunningClient.__new__(_RunningClient)
     client._cache = {

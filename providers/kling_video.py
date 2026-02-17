@@ -44,9 +44,14 @@ _ALLOWED_ORIENTATION = {"image", "video"}
 _STATUS_MAP: Dict[str, str] = {
     "in_queue": "running",
     "in_progress": "running",
+    "running": "running",
     "completed": "completed",
     "failed": "failed",
 }
+
+_RUNNING_STATUSES = {"in_queue", "in_progress", "running"}
+_COMPLETED_STATUSES = {"completed"}
+_FAILED_STATUSES = {"failed", "error", "errored", "cancelled", "canceled"}
 
 
 def _mask(value: str, visible: int = 4) -> str:
@@ -511,8 +516,16 @@ class KlingVideoClient(BaseProviderClient):
             data.setdefault("response_url", cached.get("response_url"))
             data.setdefault("request_id", cached.get("request_id") or job_id)
         status = self._extract_status(data)
+        error = self._extract_error(data)
+        assets = self._extract_assets(data)
+        state, should_fetch_result, _retry_after_seconds = self._poll_status(
+            status_code=status_code,
+            status=status,
+            error=error,
+            assets=assets,
+        )
 
-        if status_code == 200 and status == "completed":
+        if should_fetch_result:
             result_path = self._queue_target(
                 data.get("response_url") if isinstance(data, dict) else None,
                 fallback=f"/{poll_model}/requests/{job_id}",
@@ -525,11 +538,13 @@ class KlingVideoClient(BaseProviderClient):
                 result_data.setdefault("request_id", data.get("request_id") or job_id)
             self._cache[job_id] = result_data
             data = result_data
+            status = self._extract_status(data)
+            error = self._extract_error(data)
+            assets = self._extract_assets(data)
         else:
             self._cache[job_id] = data
-
-        error = self._extract_error(data)
-        assets = self._extract_assets(data)
+            if state == "running":
+                status = "running"
 
         log.info(
             "kling.status task_id=%s request_id=%s status=%s queue_position=%s assets=%s duration_ms=%s status_path=%s error=%s",
@@ -551,6 +566,29 @@ class KlingVideoClient(BaseProviderClient):
             status_code=status_code,
             duration_ms=duration_ms,
         )
+
+    def _poll_status(
+        self,
+        *,
+        status_code: int,
+        status: str,
+        error: Optional[str],
+        assets: Dict[str, str],
+    ) -> tuple[str, bool, float]:
+        """Return (state, should_fetch_result, retry_after_seconds) for queue polling."""
+
+        normalised = (status or "").strip().lower()
+        if error:
+            return "failed", False, 0.0
+        if status_code == 202 or normalised in _RUNNING_STATUSES:
+            return "running", False, 2.0
+        if status_code == 200 and normalised in _COMPLETED_STATUSES:
+            if assets:
+                return "completed", False, 0.0
+            return "completed", True, 0.0
+        if normalised in _FAILED_STATUSES:
+            return "failed", False, 0.0
+        return "running", False, 2.0
 
     async def download_content(self, video_id: str, format: str = "mp4") -> Path:
         """Download video from the asset URL stored in cache."""
