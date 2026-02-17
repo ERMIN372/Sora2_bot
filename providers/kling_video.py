@@ -464,6 +464,7 @@ class KlingVideoClient(BaseProviderClient):
         # fal.ai queue: use the same model path that was used for submission.
         # The base path (fal-ai/kling-video) is a separate model endpoint and
         # returns 422 when used for result fetching of motion-control jobs.
+        # Status endpoint on the full model path requires POST (not GET).
         poll_model = self._submit_models.get(job_id, FAL_KLING_MODEL_STANDARD)
         status_path = f"/{poll_model}/requests/{job_id}/status"
 
@@ -476,7 +477,7 @@ class KlingVideoClient(BaseProviderClient):
         )
 
         data, status_code, duration_ms = await self._request_with_legacy_fallback(
-            "GET",
+            "POST",
             status_path,
         )
         status = self._extract_status(data)
