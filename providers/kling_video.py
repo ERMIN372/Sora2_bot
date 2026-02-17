@@ -27,6 +27,8 @@ log = logging.getLogger(__name__)
 
 FAL_QUEUE_BASE_URL = os.getenv("FAL_QUEUE_BASE_URL", "https://queue.fal.run")
 FAL_KLING_MODEL = "fal-ai/kling-video/v2.6/standard/motion-control"
+# fal.ai docs: subpath must NOT be included in status/result polling URLs.
+FAL_KLING_MODEL_BASE = "fal-ai/kling-video"
 KLING_FAL_IMPL_REV = "kling-fal-no-async-with-v1"
 
 DEFAULT_MODE = "std"  # std = 720p, pro = 1080p
@@ -897,39 +899,30 @@ class KlingVideoClient(BaseProviderClient):
                     duration_ms=0,
                 )
 
-        status_variants = [
-            ("POST", f"/{FAL_KLING_MODEL}/requests/{job_id}/status"),
-            ("POST", f"/{FAL_KLING_MODEL}/requests/{job_id}"),
-        ]
-        last_error: Optional[ProviderAPIError] = None
-        for method, status_path in status_variants:
-            try:
-                data, status_code, duration_ms = await self._request_with_legacy_fallback(
-                    method,
-                    status_path,
-                )
-                break
-            except ProviderAPIError as exc:
-                if exc.status_code != 405:
-                    raise
-                last_error = exc
-                continue
+        # fal.ai docs: subpath must NOT be in status/result URLs; use base model path.
+        # Prefer status_url/response_url from enqueue response when available.
+        status_url = (cached or {}).get("status_url", "")
+        response_url = (cached or {}).get("response_url", "")
+
+        if status_url and status_url.startswith(self._base_url):
+            status_path = status_url[len(self._base_url):]
         else:
-            if last_error is not None:
-                raise last_error
-            raise ProviderAPIError(
-                provider="kling",
-                status_code=405,
-                message="fal.ai request failed",
-                error_type="api_error",
-                provider_message="Unable to fetch status from any known endpoint variant",
-            )
+            status_path = f"/{FAL_KLING_MODEL_BASE}/requests/{job_id}/status"
+
+        data, status_code, duration_ms = await self._request_with_legacy_fallback(
+            "GET",
+            status_path,
+        )
         status = self._extract_status(data)
 
         if status == "completed":
+            if response_url and response_url.startswith(self._base_url):
+                result_path = response_url[len(self._base_url):]
+            else:
+                result_path = f"/{FAL_KLING_MODEL_BASE}/requests/{job_id}"
             result_data, _, _ = await self._request_with_legacy_fallback(
-                "POST",
-                f"/{FAL_KLING_MODEL}/requests/{job_id}",
+                "GET",
+                result_path,
             )
             self._cache[job_id] = result_data
             data = result_data
