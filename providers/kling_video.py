@@ -97,6 +97,7 @@ class KlingVideoClient(BaseProviderClient):
             provider_name="kling",
         )
         self._cache: Dict[str, Dict[str, Any]] = {}
+        self._submit_models: Dict[str, str] = {}  # job_id → submit model path
         log.info(
             "KlingVideoClient configured via fal.ai key=%s impl_rev=%s",
             _mask(self._fal_key),
@@ -429,11 +430,13 @@ class KlingVideoClient(BaseProviderClient):
             )
 
         self._cache[task_id] = data
+        self._submit_models[task_id] = submit_model
         log.info(
-            "kling.enqueue success task_id=%s status_code=%s duration_ms=%s cached_keys=%s",
+            "kling.enqueue success task_id=%s status_code=%s duration_ms=%s submit_model=%s cached_keys=%s",
             task_id,
             status_code,
             duration_ms,
+            submit_model,
             list(data.keys()),
         )
         return ProviderJobSubmission(
@@ -458,13 +461,17 @@ class KlingVideoClient(BaseProviderClient):
                     duration_ms=0,
                 )
 
-        # fal.ai queue: submit uses full endpoint, but status/result must use base model path.
-        status_path = f"/{FAL_KLING_MODEL_BASE}/requests/{job_id}/status"
+        # fal.ai queue: use the same model path that was used for submission.
+        # The base path (fal-ai/kling-video) is a separate model endpoint and
+        # returns 422 when used for result fetching of motion-control jobs.
+        poll_model = self._submit_models.get(job_id, FAL_KLING_MODEL_STANDARD)
+        status_path = f"/{poll_model}/requests/{job_id}/status"
 
         log.info(
-            "kling.poll job_id=%s status_path=%s has_cached=%s",
+            "kling.poll job_id=%s status_path=%s poll_model=%s has_cached=%s",
             job_id,
             status_path,
+            poll_model,
             bool(cached),
         )
 
@@ -475,7 +482,7 @@ class KlingVideoClient(BaseProviderClient):
         status = self._extract_status(data)
 
         if status == "completed":
-            result_path = f"/{FAL_KLING_MODEL_BASE}/requests/{job_id}"
+            result_path = f"/{poll_model}/requests/{job_id}"
             log.info("kling.result_fetch job_id=%s result_path=%s", job_id, result_path)
             result_data, _, _ = await self._request_with_legacy_fallback(
                 "GET",
