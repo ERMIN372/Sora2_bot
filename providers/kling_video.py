@@ -135,7 +135,7 @@ class KlingVideoClient(BaseProviderClient):
         try:
             text = await response.text()
             duration_ms = int((time.monotonic() - started) * 1000)
-            if response.status == 405 and method.upper() == "GET" and path.endswith("/status"):
+            if response.status == 405 and path.endswith("/status"):
                 fallback_path = path[: -len("/status")]
                 fallback_url = f"{self._base_url}{fallback_path}"
                 fallback_response = await session.request("GET", fallback_url, headers=headers)
@@ -349,7 +349,7 @@ class KlingVideoClient(BaseProviderClient):
         )
 
         data, status_code, duration_ms = await self._request_with_legacy_fallback(
-            "GET",
+            "POST",
             status_path,
         )
         status = self._extract_status(data)
