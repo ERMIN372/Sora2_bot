@@ -33,7 +33,7 @@ FAL_KLING_MODEL_STANDARD = "fal-ai/kling-video/v2.6/standard/motion-control"
 FAL_KLING_MODEL_PRO = "fal-ai/kling-video/v2.6/pro/motion-control"
 FAL_KLING_MODEL_BASE = "fal-ai/kling-video"
 FAL_KLING_MODEL = FAL_KLING_MODEL_STANDARD  # back-compat alias for tests/imports
-KLING_FAL_IMPL_REV = "kling-fal-queue-splitpath-v3"
+KLING_FAL_IMPL_REV = "kling-fal-queue-splitpath-v4"
 
 DEFAULT_MODE = "std"  # std = 720p, pro = 1080p
 _ALLOWED_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".avif"}
@@ -106,7 +106,6 @@ class KlingVideoClient(BaseProviderClient):
     def _build_headers(self) -> Dict[str, str]:
         return {
             "Authorization": f"Key {self._fal_key}",
-            "Content-Type": "application/json",
         }
 
     @staticmethod
@@ -236,10 +235,9 @@ class KlingVideoClient(BaseProviderClient):
         session = await self._ensure_session()
         started = time.monotonic()
         url = f"{self._base_url}{path}"
-        headers = {
-            "Authorization": f"Key {self._fal_key}",
-            "Content-Type": "application/json",
-        }
+        headers = {"Authorization": f"Key {self._fal_key}"}
+        if json_payload is not None or method.upper() in {"POST", "PUT", "PATCH"}:
+            headers["Content-Type"] = "application/json"
         request_kwargs: Dict[str, Any] = {}
         if json_payload is not None:
             request_kwargs["json"] = json_payload
@@ -282,6 +280,8 @@ class KlingVideoClient(BaseProviderClient):
     ) -> tuple[Dict[str, Any], int, int]:
         try:
             kwargs: Dict[str, Any] = {}
+            if json_payload is not None or method.upper() in {"POST", "PUT", "PATCH"}:
+                kwargs["headers"] = {"Content-Type": "application/json"}
             if json_payload is not None:
                 kwargs["json"] = json_payload
             return await self._request(method, path, **kwargs)

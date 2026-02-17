@@ -474,3 +474,84 @@ def test_kling_status_ignores_cached_status_url_uses_full_model_path() -> None:
 def test_kling_submit_model_selection() -> None:
     assert KlingVideoClient._pick_submit_model("std") == FAL_KLING_MODEL_STANDARD
     assert KlingVideoClient._pick_submit_model("pro") == FAL_KLING_MODEL_PRO
+
+
+def test_kling_request_via_fal_http_omits_content_type_for_get_without_body() -> None:
+    class _Response:
+        status = 200
+
+        async def text(self) -> str:
+            return "{}"
+
+        def release(self) -> None:
+            return None
+
+    class _Session:
+        def __init__(self) -> None:
+            self.last_headers = None
+
+        async def request(self, _method, _url, *, headers=None, **_kwargs):
+            self.last_headers = dict(headers or {})
+            return _Response()
+
+    client = KlingVideoClient.__new__(KlingVideoClient)
+    client._fal_key = "fal_test"
+    client._base_url = "https://queue.fal.run"
+    session = _Session()
+
+    async def _ensure_session():
+        return session
+
+    client._ensure_session = _ensure_session  # type: ignore[method-assign]
+
+    asyncio.run(
+        client._request_via_fal_http(
+            method="GET",
+            path="/fal-ai/kling-video/requests/req-1/status",
+            json_payload=None,
+        )
+    )
+
+    assert session.last_headers == {"Authorization": "Key fal_test"}
+
+
+def test_kling_request_via_fal_http_sets_content_type_for_post() -> None:
+    class _Response:
+        status = 200
+
+        async def text(self) -> str:
+            return "{}"
+
+        def release(self) -> None:
+            return None
+
+    class _Session:
+        def __init__(self) -> None:
+            self.last_headers = None
+
+        async def request(self, _method, _url, *, headers=None, **_kwargs):
+            self.last_headers = dict(headers or {})
+            return _Response()
+
+    client = KlingVideoClient.__new__(KlingVideoClient)
+    client._fal_key = "fal_test"
+    client._base_url = "https://queue.fal.run"
+    session = _Session()
+
+    async def _ensure_session():
+        return session
+
+    client._ensure_session = _ensure_session  # type: ignore[method-assign]
+
+    asyncio.run(
+        client._request_via_fal_http(
+            method="POST",
+            path="/fal-ai/kling-video/v2.6/standard/motion-control",
+            json_payload={"input": {"foo": "bar"}},
+        )
+    )
+
+    assert session.last_headers == {
+        "Authorization": "Key fal_test",
+        "Content-Type": "application/json",
+    }
