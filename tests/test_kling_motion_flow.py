@@ -179,6 +179,41 @@ def test_kling_enqueue_maps_balance_error_to_billing() -> None:
     assert error.status_code == 402
 
 
+def test_kling_enqueue_maps_missing_ffprobe_to_provider_unavailable() -> None:
+    class _FailingKlingClient(KlingVideoClient):
+        async def _request(self, *_args, **_kwargs):  # type: ignore[override]
+            raise ProviderAPIError(
+                provider="kling",
+                status_code=500,
+                message="ffprobe is required for Kling Motion Control duration validation",
+                error_type="validation",
+            )
+
+        async def _validate_public_asset_url(self, *, url: str, kind: str) -> None:  # type: ignore[override]
+            return None
+
+        async def _probe_video_duration_seconds(self, url: str) -> float:  # type: ignore[override]
+            return 8.0
+
+    client = _FailingKlingClient.__new__(_FailingKlingClient)
+
+    with pytest.raises(ProviderAPIError) as exc_info:
+        asyncio.run(
+            client.enqueue_job(
+                prompt="test",
+                settings={
+                    "motion_video_url": "https://example.com/ref.mp4",
+                    "reference_inline_data": {"data": "abc"},
+                },
+            )
+        )
+
+    error = exc_info.value
+    assert error.error_type == "provider_unavailable"
+    assert error.error_code == "ffprobe_missing"
+    assert "ffprobe" in error.message.lower()
+
+
 def test_normalise_fal_key_accepts_prefixed_value() -> None:
     assert _normalise_fal_key('"Key fal_test_123"') == "fal_test_123"
 

@@ -422,6 +422,18 @@ class KlingVideoClient(BaseProviderClient):
                 json_payload={"input": body},
             )
         except ProviderAPIError as exc:
+            ffprobe_hint = f"{exc.message or ''} {exc.provider_message or ''}".lower()
+            if "ffprobe is required" in ffprobe_hint:
+                raise ProviderAPIError(
+                    provider="kling",
+                    status_code=exc.status_code or 503,
+                    message="В контейнере отсутствует ffprobe, установите ffmpeg/ffprobe",
+                    error_type="provider_unavailable",
+                    error_code="ffprobe_missing",
+                    provider_message=exc.provider_message or str(exc),
+                    retryable=False,
+                    duration_ms=exc.duration_ms,
+                ) from exc
             if _is_balance_error(exc.provider_message) or _is_balance_error(str(exc)):
                 raise ProviderAPIError(
                     provider="kling",
