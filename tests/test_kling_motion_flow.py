@@ -7,6 +7,7 @@ from handlers._core import UserSession, _build_video_settings_keyboard
 from providers.base import ProviderAPIError
 from providers.kling_video import (
     FAL_KLING_MODEL,
+    FAL_KLING_MODEL_BASE,
     KlingVideoClient,
     _as_bool,
     _normalise_fal_key,
@@ -243,7 +244,7 @@ def test_kling_status_recovers_from_legacy_jwt_name_error() -> None:
         async def _request_via_fal_http(  # type: ignore[override]
             self, *, method: str, path: str, json_payload=None
         ):
-            assert method == "POST"
+            assert method == "GET"
             assert json_payload is None
             if path.endswith("/status"):
                 return {"status": "COMPLETED"}, 200, 50
@@ -255,6 +256,7 @@ def test_kling_status_recovers_from_legacy_jwt_name_error() -> None:
 
     client = _NameErrorStatusClient.__new__(_NameErrorStatusClient)
     client._cache = {}
+    client._base_url = "https://queue.fal.run"
 
     status = asyncio.run(client.get_job_status("req_status"))
 
@@ -310,49 +312,50 @@ def test_kling_direct_fallback_retries_without_status_on_405() -> None:
     assert "json" not in client._session.calls[1][2]
 
 
-def test_kling_status_retries_without_status_suffix_on_405() -> None:
-    class _StatusRetryClient(KlingVideoClient):
-        async def _request_with_legacy_fallback(  # type: ignore[override]
-            self, method: str, path: str, *, json_payload=None
-        ):
-            self.calls.append((method, path, json_payload))
-            if path.endswith("/status"):
-                raise ProviderAPIError(
-                    provider="kling",
-                    status_code=405,
-                    message="fal.ai request failed",
-                    error_type="api_error",
-                    provider_message="405: Method Not Allowed",
-                )
-            return {"status": "COMPLETED", "output": {"video": {"url": "https://cdn.example/v2.mp4"}}}, 200, 42
-
-    client = _StatusRetryClient.__new__(_StatusRetryClient)
-    client._cache = {}
-    client.calls = []
-
-    result = asyncio.run(client.get_job_status("req-405"))
-
-    assert result.status == "completed"
-    assert result.assets["video"] == "https://cdn.example/v2.mp4"
-    assert client.calls[0][1].endswith("/requests/req-405/status")
-    assert client.calls[1][1].endswith("/requests/req-405")
-
-
-def test_kling_status_uses_post_method() -> None:
-    class _PostStatusClient(KlingVideoClient):
+def test_kling_status_uses_get_with_base_model_path() -> None:
+    """Status polling must use GET and the base model path (no subpath)."""
+    class _StatusClient(KlingVideoClient):
         async def _request_with_legacy_fallback(  # type: ignore[override]
             self, method: str, path: str, *, json_payload=None
         ):
             self.calls.append((method, path, json_payload))
             return {"status": "IN_PROGRESS"}, 200, 52
 
-    client = _PostStatusClient.__new__(_PostStatusClient)
+    client = _StatusClient.__new__(_StatusClient)
     client._cache = {}
+    client._base_url = "https://queue.fal.run"
     client.calls = []
 
-    result = asyncio.run(client.get_job_status("req-post"))
+    result = asyncio.run(client.get_job_status("req-poll"))
 
     assert result.status == "running"
     assert result.assets == {}
-    assert client.calls[0][:2] == ("POST", f"/{FAL_KLING_MODEL}/requests/req-post/status")
+    assert client.calls[0][:2] == ("GET", f"/{FAL_KLING_MODEL_BASE}/requests/req-poll/status")
+    assert len(client.calls) == 1
+
+
+def test_kling_status_uses_cached_status_url() -> None:
+    """When enqueue response contains status_url, use it for polling."""
+    class _CachedUrlClient(KlingVideoClient):
+        async def _request_with_legacy_fallback(  # type: ignore[override]
+            self, method: str, path: str, *, json_payload=None
+        ):
+            self.calls.append((method, path, json_payload))
+            return {"status": "IN_PROGRESS"}, 200, 40
+
+    client = _CachedUrlClient.__new__(_CachedUrlClient)
+    client._base_url = "https://queue.fal.run"
+    client._cache = {
+        "req-cached": {
+            "status": "IN_QUEUE",
+            "status_url": "https://queue.fal.run/fal-ai/kling-video/requests/req-cached/status",
+            "response_url": "https://queue.fal.run/fal-ai/kling-video/requests/req-cached",
+        }
+    }
+    client.calls = []
+
+    result = asyncio.run(client.get_job_status("req-cached"))
+
+    assert result.status == "running"
+    assert client.calls[0][:2] == ("GET", "/fal-ai/kling-video/requests/req-cached/status")
     assert len(client.calls) == 1
