@@ -209,7 +209,7 @@ class KlingVideoClient(BaseProviderClient):
             raise ProviderAPIError(
                 provider="kling",
                 status_code=500,
-                message="ffprobe is required for Kling Motion Control duration validation",
+                message="В контейнере отсутствует ffprobe, установите ffmpeg/ffprobe",
                 error_type="validation",
             ) from exc
         finally:
@@ -378,44 +378,44 @@ class KlingVideoClient(BaseProviderClient):
                 error_type="validation",
             )
 
-        await self._validate_public_asset_url(url=image_url, kind="image")
-        await self._validate_public_asset_url(url=video_url, kind="video")
-        duration_seconds = await self._probe_video_duration_seconds(video_url)
-        max_duration = 10 if character_orientation == "image" else 30
-        if duration_seconds > max_duration:
-            raise ProviderAPIError(
-                provider="kling",
-                status_code=400,
-                message="motion reference video duration exceeds character_orientation limit",
-                error_type="validation",
-                provider_message=(
-                    f"character_orientation={character_orientation} duration={duration_seconds:.2f}s "
-                    f"max={max_duration}s"
-                ),
+        try:
+            await self._validate_public_asset_url(url=image_url, kind="image")
+            await self._validate_public_asset_url(url=video_url, kind="video")
+            duration_seconds = await self._probe_video_duration_seconds(video_url)
+            max_duration = 10 if character_orientation == "image" else 30
+            if duration_seconds > max_duration:
+                raise ProviderAPIError(
+                    provider="kling",
+                    status_code=400,
+                    message="motion reference video duration exceeds character_orientation limit",
+                    error_type="validation",
+                    provider_message=(
+                        f"character_orientation={character_orientation} duration={duration_seconds:.2f}s "
+                        f"max={max_duration}s"
+                    ),
+                )
+
+            body: Dict[str, Any] = {
+                "image_url": image_url,
+                "video_url": video_url,
+                "character_orientation": character_orientation,
+                "keep_original_sound": _as_bool(settings.get("keep_original_sound"), default=True),
+            }
+
+            if prompt and prompt.strip():
+                body["prompt"] = prompt.strip()[:2500]
+
+            log.info(
+                "kling.enqueue model=%s mode=%s has_image_url=%s has_video_url=%s keep_original_sound=%s prompt_len=%s duration_seconds=%.2f",
+                submit_model,
+                mode,
+                bool(image_url),
+                bool(video_url),
+                body.get("keep_original_sound"),
+                len(prompt or ""),
+                duration_seconds,
             )
 
-        body: Dict[str, Any] = {
-            "image_url": image_url,
-            "video_url": video_url,
-            "character_orientation": character_orientation,
-            "keep_original_sound": _as_bool(settings.get("keep_original_sound"), default=True),
-        }
-
-        if prompt and prompt.strip():
-            body["prompt"] = prompt.strip()[:2500]
-
-        log.info(
-            "kling.enqueue model=%s mode=%s has_image_url=%s has_video_url=%s keep_original_sound=%s prompt_len=%s duration_seconds=%.2f",
-            submit_model,
-            mode,
-            bool(image_url),
-            bool(video_url),
-            body.get("keep_original_sound"),
-            len(prompt or ""),
-            duration_seconds,
-        )
-
-        try:
             data, status_code, duration_ms = await self._request_with_legacy_fallback(
                 "POST",
                 f"/{submit_model}",
@@ -423,7 +423,7 @@ class KlingVideoClient(BaseProviderClient):
             )
         except ProviderAPIError as exc:
             ffprobe_hint = f"{exc.message or ''} {exc.provider_message or ''}".lower()
-            if "ffprobe is required" in ffprobe_hint:
+            if "ffprobe" in ffprobe_hint and "required" in ffprobe_hint:
                 raise ProviderAPIError(
                     provider="kling",
                     status_code=exc.status_code or 503,
