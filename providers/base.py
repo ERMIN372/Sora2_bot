@@ -573,6 +573,15 @@ class BaseProviderClient:
                     data_payload = None
             if method_upper in {"GET", "HEAD"} and not json_payload and not data_payload:
                 headers = {k: v for k, v in headers.items() if k.lower() != "content-type"}
+            if "queue.fal.run" in url:
+                log.info(
+                    "fal.http.request provider=%s method=%s url=%s has_body=%s header_names=%s",
+                    self._provider_name,
+                    method_upper,
+                    url,
+                    bool(json_payload) or bool(data_payload),
+                    sorted(headers.keys()),
+                )
             if "queue.fal.run" in url and (self._config.environment or "").strip().lower() == "dev":
                 log.debug(
                     "fal.queue.request provider=%s method=%s url=%s has_json=%s has_data=%s sent_content_type=%s",

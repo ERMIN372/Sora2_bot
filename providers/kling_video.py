@@ -104,6 +104,27 @@ class KlingVideoClient(BaseProviderClient):
             KLING_FAL_IMPL_REV,
         )
 
+    def _queue_target(self, url_or_path: Optional[str], *, fallback: str) -> str:
+        candidate = str(url_or_path or "").strip()
+        if not candidate:
+            return fallback
+        if candidate.startswith("http://") or candidate.startswith("https://"):
+            parsed = urlparse(candidate)
+            base = urlparse(self._base_url)
+            if parsed.scheme != base.scheme or parsed.netloc != base.netloc:
+                log.warning(
+                    "kling.queue_url_host_mismatch requested=%s expected_base=%s using_fallback=%s",
+                    candidate,
+                    self._base_url,
+                    fallback,
+                )
+                return fallback
+            path = parsed.path or "/"
+            if parsed.query:
+                path = f"{path}?{parsed.query}"
+            return path
+        return candidate
+
     def _build_headers(self) -> Dict[str, str]:
         return {
             "Authorization": f"Key {self._fal_key}",
@@ -429,14 +450,21 @@ class KlingVideoClient(BaseProviderClient):
                 provider_message=json.dumps(data, ensure_ascii=False),
             )
 
-        self._cache[task_id] = data
+        self._cache[task_id] = {
+            **data,
+            "request_id": str(task_id),
+            "status_url": data.get("status_url"),
+            "response_url": data.get("response_url"),
+        }
         self._submit_models[task_id] = submit_model
         log.info(
-            "kling.enqueue success task_id=%s status_code=%s duration_ms=%s submit_model=%s cached_keys=%s",
+            "kling.enqueue success task_id=%s status_code=%s duration_ms=%s submit_model=%s status_url=%s response_url=%s cached_keys=%s",
             task_id,
             status_code,
             duration_ms,
             submit_model,
+            data.get("status_url") or "",
+            data.get("response_url") or "",
             list(data.keys()),
         )
         return ProviderJobSubmission(
@@ -461,11 +489,11 @@ class KlingVideoClient(BaseProviderClient):
                     duration_ms=0,
                 )
 
-        # fal.ai queue contract:
-        # - submit uses the full model subpath (/v2.6/.../motion-control)
-        # - status/result always use the base model id (fal-ai/kling-video)
         poll_model = FAL_KLING_MODEL_BASE
-        status_path = f"/{poll_model}/requests/{job_id}/status"
+        status_path = self._queue_target(
+            cached.get("status_url") if isinstance(cached, dict) else None,
+            fallback=f"/{poll_model}/requests/{job_id}/status",
+        )
 
         log.info(
             "kling.poll job_id=%s status_path=%s poll_model=%s has_cached=%s",
@@ -478,12 +506,23 @@ class KlingVideoClient(BaseProviderClient):
         data, status_code, duration_ms = await self._request_with_legacy_fallback(
             "GET", status_path
         )
+        if isinstance(cached, dict):
+            data.setdefault("status_url", cached.get("status_url"))
+            data.setdefault("response_url", cached.get("response_url"))
+            data.setdefault("request_id", cached.get("request_id") or job_id)
         status = self._extract_status(data)
 
-        if status == "completed":
-            result_path = f"/{poll_model}/requests/{job_id}"
+        if status_code == 200 and status == "completed":
+            result_path = self._queue_target(
+                data.get("response_url") if isinstance(data, dict) else None,
+                fallback=f"/{poll_model}/requests/{job_id}",
+            )
             log.info("kling.result_fetch job_id=%s result_path=%s", job_id, result_path)
             result_data, _, _ = await self._request_with_legacy_fallback("GET", result_path)
+            if isinstance(data, dict):
+                result_data.setdefault("status_url", data.get("status_url"))
+                result_data.setdefault("response_url", data.get("response_url"))
+                result_data.setdefault("request_id", data.get("request_id") or job_id)
             self._cache[job_id] = result_data
             data = result_data
         else:

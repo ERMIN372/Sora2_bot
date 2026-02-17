@@ -1899,7 +1899,7 @@ class JobQueue:
 
             provider_request_id = str(provider_data.get("request_id") or "").strip()
             if provider_request_id and provider_request_id != provider_job_id:
-                if task_type == ASSET_TASK_RETRIEVE:
+                if task_type == ASSET_TASK_RETRIEVE or provider_key == "kling":
                     log.error(
                         "jobs.poll unexpected_request_id_on_status job_id=%s provider=%s provider_job_id=%s incoming_request_id=%s",
                         pending.job_id,
