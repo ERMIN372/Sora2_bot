@@ -61,6 +61,15 @@ def _mask(value: str, visible: int = 4) -> str:
     return value[:visible] + "***"
 
 
+def _mask_url(value: Optional[str], visible: int = 18) -> str:
+    if not isinstance(value, str) or not value.strip():
+        return ""
+    candidate = value.strip()
+    if len(candidate) <= visible:
+        return "***"
+    return candidate[:visible] + "***"
+
+
 def _is_balance_error(text: Optional[str]) -> bool:
     candidate = (text or "").strip().lower()
     return "balance" in candidate and any(
@@ -392,7 +401,7 @@ class KlingVideoClient(BaseProviderClient):
                     ),
                 )
 
-            body: Dict[str, Any] = {
+            input_payload: Dict[str, Any] = {
                 "image_url": image_url,
                 "video_url": video_url,
                 "character_orientation": character_orientation,
@@ -400,10 +409,24 @@ class KlingVideoClient(BaseProviderClient):
             }
 
             if prompt and prompt.strip():
-                body["prompt"] = prompt.strip()[:2500]
+                input_payload["prompt"] = prompt.strip()[:2500]
 
             request_idempotency_key = str(idempotency_key or uuid.uuid4())
-            body["idempotency_key"] = request_idempotency_key
+            input_payload["idempotency_key"] = request_idempotency_key
+            submit_payload = {"input": input_payload}
+
+            input_block = submit_payload.get("input")
+            input_keys = sorted(input_block.keys()) if isinstance(input_block, dict) else []
+            log.debug(
+                "kling.submit_payload has_input=%s input_keys=%s has_image_url=%s has_video_url=%s has_character_orientation=%s image_url=%s video_url=%s",
+                isinstance(input_block, dict),
+                input_keys,
+                bool(input_block.get("image_url")) if isinstance(input_block, dict) else False,
+                bool(input_block.get("video_url")) if isinstance(input_block, dict) else False,
+                bool(input_block.get("character_orientation")) if isinstance(input_block, dict) else False,
+                _mask_url(input_block.get("image_url")) if isinstance(input_block, dict) else "",
+                _mask_url(input_block.get("video_url")) if isinstance(input_block, dict) else "",
+            )
 
             log.info(
                 "kling.enqueue model=%s mode=%s has_image_url=%s has_video_url=%s keep_original_sound=%s prompt_len=%s duration_seconds=%.2f",
@@ -411,7 +434,7 @@ class KlingVideoClient(BaseProviderClient):
                 mode,
                 bool(image_url),
                 bool(video_url),
-                body.get("keep_original_sound"),
+                input_payload.get("keep_original_sound"),
                 len(prompt or ""),
                 duration_seconds,
             )
@@ -419,7 +442,7 @@ class KlingVideoClient(BaseProviderClient):
             data, status_code, duration_ms = await self._request_with_legacy_fallback(
                 "POST",
                 f"/{submit_model}",
-                json_payload={"input": body},
+                json_payload=submit_payload,
             )
         except ProviderAPIError as exc:
             ffprobe_hint = f"{exc.message or ''} {exc.provider_message or ''}".lower()
@@ -517,6 +540,7 @@ class KlingVideoClient(BaseProviderClient):
         status = self._extract_status(data)
         error = self._extract_error(data)
         assets = self._extract_assets(data)
+        polled_status = status
         state, should_fetch_result, _retry_after_seconds = self._poll_status(
             status_code=status_code,
             status=status,
@@ -555,6 +579,15 @@ class KlingVideoClient(BaseProviderClient):
                 status = self._extract_status(data)
                 error = self._extract_error(data)
                 assets = self._extract_assets(data)
+                if polled_status == "completed" and status == "running" and not error:
+                    status = "completed"
+                if status == "completed" and not assets and not error:
+                    log.info(
+                        "kling.result_pending_media job_id=%s result_path=%s",
+                        job_id,
+                        result_path,
+                    )
+                    status = "running"
         else:
             self._cache[job_id] = data
             if state == "running":
@@ -603,11 +636,7 @@ class KlingVideoClient(BaseProviderClient):
     def _is_early_result_error(self, exc: ProviderAPIError) -> bool:
         if exc.status_code == 400:
             return True
-        if exc.status_code != 422:
-            return False
-        payload = (exc.provider_message or "") + " " + (exc.message or "")
-        lowered = payload.lower()
-        return all(field in lowered for field in _EARLY_RESULT_MISSING_FIELDS)
+        return False
 
     def _poll_status(
         self,

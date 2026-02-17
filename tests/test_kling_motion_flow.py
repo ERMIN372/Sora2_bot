@@ -350,6 +350,39 @@ def test_kling_enqueue_uses_provided_idempotency_key() -> None:
     assert payload["idempotency_key"] == "job-123"
 
 
+
+
+def test_kling_enqueue_submit_payload_wraps_required_input_fields() -> None:
+    class _CaptureClient(KlingVideoClient):
+        async def _request_with_legacy_fallback(self, _method, _path, *, json_payload=None):  # type: ignore[override]
+            self.last_json = json_payload
+            return {"request_id": "req_submit"}, 200, 10
+
+        async def _validate_public_asset_url(self, *, url: str, kind: str) -> None:  # type: ignore[override]
+            return None
+
+        async def _probe_video_duration_seconds(self, url: str) -> float:  # type: ignore[override]
+            return 8.0
+
+    client = _CaptureClient.__new__(_CaptureClient)
+    client._cache = {}
+    client._submit_models = {}
+
+    asyncio.run(
+        client.enqueue_job(
+            prompt="",
+            settings={
+                "image_url": "https://example.com/ref.png",
+                "motion_video_url": "https://example.com/ref.mp4",
+            },
+        )
+    )
+
+    assert set(client.last_json.keys()) == {"input"}
+    assert client.last_json["input"]["image_url"] == "https://example.com/ref.png"
+    assert client.last_json["input"]["video_url"] == "https://example.com/ref.mp4"
+    assert client.last_json["input"]["character_orientation"] == "video"
+
 def test_kling_enqueue_recovers_from_legacy_jwt_name_error() -> None:
     class _NameErrorKlingClient(KlingVideoClient):
         async def _request(self, *_args, **_kwargs):  # type: ignore[override]
@@ -575,7 +608,7 @@ def test_kling_running_202_never_reaches_result_422() -> None:
 
 
 
-def test_kling_completed_result_422_missing_fields_treated_as_running() -> None:
+def test_kling_completed_result_422_missing_fields_is_terminal_invalid_request() -> None:
     class _EarlyResultClient(KlingVideoClient):
         async def _request_with_legacy_fallback(  # type: ignore[override]
             self, method: str, path: str, *, json_payload=None
@@ -611,13 +644,51 @@ def test_kling_completed_result_422_missing_fields_treated_as_running() -> None:
     client._base_url = "https://queue.fal.run"
     client.calls = []
 
-    result = asyncio.run(client.get_job_status("req-early"))
+    with pytest.raises(ProviderAPIError) as exc_info:
+        asyncio.run(client.get_job_status("req-early"))
+
+    assert exc_info.value.status_code == 422
+    assert exc_info.value.error_type == "invalid_request"
+    assert exc_info.value.retryable is False
+    assert client.calls == [
+        ("GET", f"/{FAL_KLING_MODEL_BASE}/requests/req-early/status", None),
+        ("GET", f"/{FAL_KLING_MODEL_BASE}/requests/req-early", None),
+    ]
+
+
+
+def test_kling_completed_result_without_video_keeps_polling() -> None:
+    class _NoMediaYetClient(KlingVideoClient):
+        async def _request_with_legacy_fallback(  # type: ignore[override]
+            self, method: str, path: str, *, json_payload=None
+        ):
+            self.calls.append((method, path, json_payload))
+            if path.endswith("/status"):
+                return {
+                    "status": "COMPLETED",
+                    "response_url": "https://queue.fal.run/fal-ai/kling-video/requests/req-empty",
+                }, 200, 21
+            return {"status": "COMPLETED", "output": {}}, 200, 16
+
+    client = _NoMediaYetClient.__new__(_NoMediaYetClient)
+    client._cache = {
+        "req-empty": {
+            "request_id": "req-empty",
+            "status_url": "https://queue.fal.run/fal-ai/kling-video/requests/req-empty/status",
+            "response_url": "https://queue.fal.run/fal-ai/kling-video/requests/req-empty",
+        }
+    }
+    client._submit_models = {}
+    client._base_url = "https://queue.fal.run"
+    client.calls = []
+
+    result = asyncio.run(client.get_job_status("req-empty"))
 
     assert result.status == "running"
     assert result.assets == {}
     assert client.calls == [
-        ("GET", f"/{FAL_KLING_MODEL_BASE}/requests/req-early/status", None),
-        ("GET", f"/{FAL_KLING_MODEL_BASE}/requests/req-early", None),
+        ("GET", f"/{FAL_KLING_MODEL_BASE}/requests/req-empty/status", None),
+        ("GET", f"/{FAL_KLING_MODEL_BASE}/requests/req-empty", None),
     ]
 
 def test_kling_submit_model_selection() -> None:
