@@ -334,8 +334,12 @@ def test_kling_status_uses_get_with_base_model_path() -> None:
     assert len(client.calls) == 1
 
 
-def test_kling_status_uses_cached_status_url() -> None:
-    """When enqueue response contains status_url, use it for polling."""
+def test_kling_status_ignores_cached_status_url_uses_full_model_path() -> None:
+    """Cached status_url from enqueue is ignored; full model path is always used.
+
+    fal.ai normalises status_url to the base "fal-ai/kling-video" which resolves
+    to a different endpoint that validates motion-control body params → 422.
+    """
     class _CachedUrlClient(KlingVideoClient):
         async def _request_with_legacy_fallback(  # type: ignore[override]
             self, method: str, path: str, *, json_payload=None
@@ -357,5 +361,6 @@ def test_kling_status_uses_cached_status_url() -> None:
     result = asyncio.run(client.get_job_status("req-cached"))
 
     assert result.status == "running"
-    assert client.calls[0][:2] == ("GET", "/fal-ai/kling-video/requests/req-cached/status")
+    # Must use full model path, NOT the cached base-path status_url
+    assert client.calls[0][:2] == ("GET", f"/{FAL_KLING_MODEL_BASE}/requests/req-cached/status")
     assert len(client.calls) == 1

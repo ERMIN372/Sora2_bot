@@ -335,16 +335,11 @@ class KlingVideoClient(BaseProviderClient):
                     duration_ms=0,
                 )
 
-        # fal.ai queue: status/result polling URLs MUST use the FULL app-id
-        # (including v2.6/standard/motion-control subpath) – same as the submit URL.
-        # Prefer status_url/response_url from enqueue response when available.
-        status_url = (cached or {}).get("status_url", "")
-        response_url = (cached or {}).get("response_url", "")
-
-        if status_url and status_url.startswith(self._base_url):
-            status_path = status_url[len(self._base_url):]
-        else:
-            status_path = f"/{FAL_KLING_MODEL}/requests/{job_id}/status"
+        # fal.ai queue: ALWAYS use the full app-id for polling URLs.
+        # Do NOT trust status_url/response_url from enqueue response — fal.ai
+        # normalises them to the base "fal-ai/kling-video" which resolves to a
+        # *different* endpoint that validates motion-control body parameters → 422.
+        status_path = f"/{FAL_KLING_MODEL}/requests/{job_id}/status"
 
         log.info(
             "kling.poll job_id=%s status_path=%s has_cached=%s",
@@ -360,10 +355,7 @@ class KlingVideoClient(BaseProviderClient):
         status = self._extract_status(data)
 
         if status == "completed":
-            if response_url and response_url.startswith(self._base_url):
-                result_path = response_url[len(self._base_url):]
-            else:
-                result_path = f"/{FAL_KLING_MODEL}/requests/{job_id}"
+            result_path = f"/{FAL_KLING_MODEL}/requests/{job_id}"
             log.info("kling.result_fetch job_id=%s result_path=%s", job_id, result_path)
             result_data, _, _ = await self._request_with_legacy_fallback(
                 "GET",
