@@ -33,7 +33,7 @@ FAL_KLING_MODEL_STANDARD = "fal-ai/kling-video/v2.6/standard/motion-control"
 FAL_KLING_MODEL_PRO = "fal-ai/kling-video/v2.6/pro/motion-control"
 FAL_KLING_MODEL_BASE = "fal-ai/kling-video"
 FAL_KLING_MODEL = FAL_KLING_MODEL_STANDARD  # back-compat alias for tests/imports
-KLING_FAL_IMPL_REV = "kling-fal-queue-splitpath-v4"
+KLING_FAL_IMPL_REV = "kling-fal-queue-splitpath-v5"
 
 DEFAULT_MODE = "std"  # std = 720p, pro = 1080p
 _ALLOWED_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".avif"}
@@ -461,11 +461,10 @@ class KlingVideoClient(BaseProviderClient):
                     duration_ms=0,
                 )
 
-        # fal.ai queue: use the same model path that was used for submission.
-        # The base path (fal-ai/kling-video) is a separate model endpoint and
-        # returns 422 when used for result fetching of motion-control jobs.
-        # Status endpoint on the full model path requires POST (not GET).
-        poll_model = self._submit_models.get(job_id, FAL_KLING_MODEL_STANDARD)
+        # fal.ai queue contract:
+        # - submit uses the full model subpath (/v2.6/.../motion-control)
+        # - status/result always use the base model id (fal-ai/kling-video)
+        poll_model = FAL_KLING_MODEL_BASE
         status_path = f"/{poll_model}/requests/{job_id}/status"
 
         log.info(
@@ -477,18 +476,14 @@ class KlingVideoClient(BaseProviderClient):
         )
 
         data, status_code, duration_ms = await self._request_with_legacy_fallback(
-            "POST",
-            status_path,
+            "GET", status_path
         )
         status = self._extract_status(data)
 
         if status == "completed":
             result_path = f"/{poll_model}/requests/{job_id}"
             log.info("kling.result_fetch job_id=%s result_path=%s", job_id, result_path)
-            result_data, _, _ = await self._request_with_legacy_fallback(
-                "GET",
-                result_path,
-            )
+            result_data, _, _ = await self._request_with_legacy_fallback("GET", result_path)
             self._cache[job_id] = result_data
             data = result_data
         else:

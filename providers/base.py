@@ -1,4 +1,5 @@
 """Shared provider client utilities."""
+
 from __future__ import annotations
 
 import asyncio
@@ -340,9 +341,7 @@ class BaseProviderClient:
         **kwargs: Any,
     ) -> ProviderJobSubmission:
         payload = self._build_enqueue_payload(**kwargs)
-        return await self._submit_payload(
-            payload=payload, idempotency_key=idempotency_key
-        )
+        return await self._submit_payload(payload=payload, idempotency_key=idempotency_key)
 
     def _build_enqueue_payload(self, **kwargs: Any) -> Dict[str, Any]:
         payload = kwargs.get("payload")
@@ -379,9 +378,7 @@ class BaseProviderClient:
         )
 
     async def get_job_status(self, job_id: str) -> ProviderJobStatus:
-        data, status_code, duration_ms = await self._request(
-            "GET", f"{self._jobs_path()}/{job_id}"
-        )
+        data, status_code, duration_ms = await self._request("GET", f"{self._jobs_path()}/{job_id}")
         status = self._extract_status(data)
         error = self._extract_error(data)
         assets = self._extract_assets(data)
@@ -507,9 +504,7 @@ class BaseProviderClient:
                     url,
                     headers.get("Idempotency-Key"),
                 )
-                return await self._perform_request(
-                    method, url, headers=headers, **kwargs
-                )
+                return await self._perform_request(method, url, headers=headers, **kwargs)
             except ProviderAPIError as exc:
                 last_error = exc
                 if not exc.retryable or attempt == self._config.request_retries:
@@ -553,9 +548,7 @@ class BaseProviderClient:
         data_payload = kwargs.get("data")
         params_payload = kwargs.get("params")
         context = dict(self._pending_log_context or {})
-        context_text = (
-            _serialise_for_log(context) if context else ""
-        )
+        context_text = _serialise_for_log(context) if context else ""
         log.debug(
             "Sending provider request provider=%s method=%s url=%s headers=%s params=%s json=%s data=%s context=%s",
             self._provider_name,
@@ -571,8 +564,27 @@ class BaseProviderClient:
             # fal.ai requires GET/HEAD requests to be sent without Content-Type
             # when there is no request body.
             method_upper = method.upper()
+            if method_upper in {"GET", "HEAD"}:
+                if json_payload in (None, {}):
+                    kwargs.pop("json", None)
+                    json_payload = None
+                if data_payload in (None, b"", ""):
+                    kwargs.pop("data", None)
+                    data_payload = None
             if method_upper in {"GET", "HEAD"} and not json_payload and not data_payload:
                 headers = {k: v for k, v in headers.items() if k.lower() != "content-type"}
+            if "queue.fal.run" in url and (self._config.environment or "").strip().lower() == "dev":
+                log.debug(
+                    "fal.queue.request provider=%s method=%s url=%s has_json=%s has_data=%s sent_content_type=%s",
+                    self._provider_name,
+                    method_upper,
+                    url,
+                    bool(json_payload),
+                    bool(data_payload),
+                    bool(
+                        next((v for k, v in headers.items() if k.lower() == "content-type"), None)
+                    ),
+                )
             async with session.request(method, url, headers=headers, **kwargs) as response:
                 text = await response.text()
                 duration_ms = int((time.monotonic() - start) * 1000)
@@ -708,14 +720,10 @@ class BaseProviderClient:
             if isinstance(nested_error, dict):
                 message = nested_error.get("message") or message
                 error_type = (
-                    nested_error.get("type")
-                    or nested_error.get("error_type")
-                    or error_type
+                    nested_error.get("type") or nested_error.get("error_type") or error_type
                 )
                 error_code = (
-                    nested_error.get("code")
-                    or nested_error.get("error_code")
-                    or error_code
+                    nested_error.get("code") or nested_error.get("error_code") or error_code
                 )
                 for key in ("param", "detail", "details", "help", "url"):
                     value = nested_error.get(key)

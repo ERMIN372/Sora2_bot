@@ -29,7 +29,8 @@ def _request(method: str, url: str, api_key: str, payload: dict | None = None) -
     body = None if payload is None else json.dumps(payload).encode("utf-8")
     req = Request(url=url, data=body, method=method)
     req.add_header("Authorization", f"Key {api_key}")
-    req.add_header("Content-Type", "application/json")
+    if body is not None:
+        req.add_header("Content-Type", "application/json")
     with urlopen(req, timeout=60) as resp:
         raw = resp.read().decode("utf-8")
     return json.loads(raw) if raw else {}
@@ -71,14 +72,24 @@ def main() -> int:
     if not request_id:
         raise SystemExit("No request_id in submit response")
 
-    status_url = f"{QUEUE_BASE}/{submit_model}/requests/{request_id}/status"
-    result_url = f"{QUEUE_BASE}/{submit_model}/requests/{request_id}"
+    poll_model = "fal-ai/kling-video"
+    status_url = f"{QUEUE_BASE}/{poll_model}/requests/{request_id}/status"
+    result_url = f"{QUEUE_BASE}/{poll_model}/requests/{request_id}"
+    start = time.monotonic()
+    last_request_id = request_id
 
     for i in range(1, args.max_polls + 1):
         time.sleep(args.poll_interval)
-        status_data = _request("POST", status_url, api_key)
+        status_data = _request("GET", status_url, api_key)
         status = (status_data.get("status") or "").lower()
-        print(f"poll#{i} status={status} queue={status_data.get('queue_position')}")
+        current_request_id = status_data.get("request_id") or request_id
+        switched = current_request_id != last_request_id
+        last_request_id = current_request_id
+        elapsed = time.monotonic() - start
+        print(
+            f"poll#{i} t={elapsed:.1f}s status={status} queue={status_data.get('queue_position')} "
+            f"request_id={current_request_id} switched={switched}"
+        )
         if status == "completed":
             result = _request("GET", result_url, api_key)
             print("result:", json.dumps(result, ensure_ascii=False))
