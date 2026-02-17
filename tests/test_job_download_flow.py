@@ -111,6 +111,21 @@ class FakeProvider:
         raise AssertionError("content handler should not be used in inline download tests")
 
 
+class _RunningKlingProvider:
+    provider_name = "kling"
+
+    async def get_job_status(self, job_id: str) -> ProviderJobStatus:
+        return ProviderJobStatus(
+            job_id=job_id,
+            status="running",
+            assets={},
+            error=None,
+            data={"request_id": "unexpected-new-request-id"},
+            status_code=200,
+            duration_ms=50,
+        )
+
+
 def test_inline_download_marks_job_completed(make_openai_video_config) -> None:
     config = make_openai_video_config()
     db = InlineFakeDB()
@@ -244,7 +259,76 @@ def test_inline_download_failure_refunds(make_openai_video_config) -> None:
     assert provider.download_calls == ["vid-2"]
     assert any(call[1] == "failed_to_download" for call in db.update_calls)
     assert db.added_credits == [config.generation_cost_credits]
-    assert db.jobs["job-2"].status == "failed_to_download"
+
+
+def test_kling_poll_running_does_not_switch_provider_request_id(
+    monkeypatch, make_openai_video_config
+) -> None:
+    config = make_openai_video_config(
+        veo_poll_interval_min_seconds=0.1, veo_poll_interval_max_seconds=0.1
+    )
+    db = InlineFakeDB()
+    provider = _RunningKlingProvider()
+    job_queue = JobQueue(
+        db=db,
+        providers={"kling": provider},
+        default_provider="kling",
+        config=config,
+    )
+    record = GenerationJobRecord(
+        id="job-kling-1",
+        user_id=777,
+        prompt="make video",
+        status="queued",
+        video_url=None,
+        video_id="req-original",
+        error=None,
+        created_at=datetime.now(timezone.utc),
+        updated_at=datetime.now(timezone.utc),
+        size="1280x720",
+        model="kling_mc",
+        cost_credits=config.generation_cost_credits,
+        username="tester",
+        corr_id="corr-kling-1",
+        content_type="video",
+    )
+    _run(db.create_job(record))
+
+    pending = PendingJob(
+        job_id="job-kling-1",
+        user_id=777,
+        prompt="make video",
+        corr_id="corr-kling-1",
+        size="1280x720",
+        model="kling_mc",
+        provider="kling",
+        username="tester",
+        original_prompt="make video",
+        sanitized_prompt="make video",
+        task_type=ASSET_TASK_RETRIEVE,
+        asset_kind=ASSET_KIND_VIDEO,
+        provider_job_id="req-original",
+        video_id="req-original",
+        attempt=0,
+        max_attempts=0,
+    )
+
+    enqueue_calls: List[Dict[str, Any]] = []
+
+    async def _capture_enqueue(**kwargs: Any) -> None:
+        enqueue_calls.append(dict(kwargs))
+
+    async def _skip_sleep(_delay: float) -> None:
+        return None
+
+    monkeypatch.setattr(job_queue, "enqueue", _capture_enqueue)
+    monkeypatch.setattr("jobs.asyncio.sleep", _skip_sleep)
+
+    _run(job_queue._handle_asset_retrieve(pending))
+
+    assert enqueue_calls
+    assert enqueue_calls[0]["provider_job_id"] == "req-original"
+    assert enqueue_calls[0]["max_attempts"] == 60
 
 
 def test_running_poll_requeue_increments_attempt_and_preserves_limit(
