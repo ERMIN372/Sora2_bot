@@ -269,6 +269,7 @@ def test_kling_enqueue_sends_bool_keep_original_sound() -> None:
 
     client = _CaptureClient.__new__(_CaptureClient)
     client._cache = {}
+    client._submit_models = {}
 
     submission = asyncio.run(
         client.enqueue_job(
@@ -301,6 +302,7 @@ def test_kling_enqueue_default_keep_original_sound_true() -> None:
 
     client = _CaptureClient.__new__(_CaptureClient)
     client._cache = {}
+    client._submit_models = {}
 
     asyncio.run(
         client.enqueue_job(
@@ -331,6 +333,7 @@ def test_kling_enqueue_uses_provided_idempotency_key() -> None:
 
     client = _CaptureClient.__new__(_CaptureClient)
     client._cache = {}
+    client._submit_models = {}
 
     asyncio.run(
         client.enqueue_job(
@@ -368,6 +371,7 @@ def test_kling_enqueue_recovers_from_legacy_jwt_name_error() -> None:
 
     client = _NameErrorKlingClient.__new__(_NameErrorKlingClient)
     client._cache = {}
+    client._submit_models = {}
 
     submission = asyncio.run(
         client.enqueue_job(
@@ -407,6 +411,7 @@ def test_kling_status_recovers_from_legacy_jwt_name_error() -> None:
 
     client = _NameErrorStatusClient.__new__(_NameErrorStatusClient)
     client._cache = {}
+    client._submit_models = {}
     client._base_url = "https://queue.fal.run"
 
     status = asyncio.run(client.get_job_status("req_status"))
@@ -415,8 +420,8 @@ def test_kling_status_recovers_from_legacy_jwt_name_error() -> None:
     assert status.assets["video"] == "https://cdn.example/v.mp4"
 
 
-def test_kling_status_uses_get_with_base_model_path() -> None:
-    """Status polling must use GET and the base model path (no subpath)."""
+def test_kling_status_uses_get_with_submit_model_path() -> None:
+    """Status polling must use GET and the full submit model path."""
 
     class _StatusClient(KlingVideoClient):
         async def _request_with_legacy_fallback(  # type: ignore[override]
@@ -427,6 +432,7 @@ def test_kling_status_uses_get_with_base_model_path() -> None:
 
     client = _StatusClient.__new__(_StatusClient)
     client._cache = {}
+    client._submit_models = {}
     client._base_url = "https://queue.fal.run"
     client.calls = []
 
@@ -434,12 +440,13 @@ def test_kling_status_uses_get_with_base_model_path() -> None:
 
     assert result.status == "running"
     assert result.assets == {}
-    assert client.calls[0][:2] == ("GET", f"/{FAL_KLING_MODEL_BASE}/requests/req-poll/status")
+    # Falls back to FAL_KLING_MODEL_STANDARD when submit model is unknown
+    assert client.calls[0][:2] == ("GET", f"/{FAL_KLING_MODEL_STANDARD}/requests/req-poll/status")
     assert len(client.calls) == 1
 
 
-def test_kling_status_ignores_cached_status_url_uses_full_model_path() -> None:
-    """Cached status_url from enqueue is ignored; full model path is always used.
+def test_kling_status_ignores_cached_status_url_uses_submit_model_path() -> None:
+    """Cached status_url from enqueue is ignored; submit model path is always used.
 
     fal.ai normalises status_url to the base "fal-ai/kling-video" which resolves
     to a different endpoint that validates motion-control body params → 422.
@@ -461,13 +468,14 @@ def test_kling_status_ignores_cached_status_url_uses_full_model_path() -> None:
             "response_url": "https://queue.fal.run/fal-ai/kling-video/requests/req-cached",
         }
     }
+    client._submit_models = {"req-cached": FAL_KLING_MODEL_PRO}
     client.calls = []
 
     result = asyncio.run(client.get_job_status("req-cached"))
 
     assert result.status == "running"
-    # Must use base queue model path, NOT any cached status_url value.
-    assert client.calls[0][:2] == ("GET", f"/{FAL_KLING_MODEL_BASE}/requests/req-cached/status")
+    # Must use submit model path, NOT any cached status_url value or base path.
+    assert client.calls[0][:2] == ("GET", f"/{FAL_KLING_MODEL_PRO}/requests/req-cached/status")
     assert len(client.calls) == 1
 
 

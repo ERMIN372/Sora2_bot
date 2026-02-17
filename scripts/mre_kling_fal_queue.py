@@ -23,7 +23,6 @@ SUBMIT_MODELS = {
     "standard": "fal-ai/kling-video/v2.6/standard/motion-control",
     "pro": "fal-ai/kling-video/v2.6/pro/motion-control",
 }
-REQUEST_BASE = "fal-ai/kling-video"
 
 
 def _request(method: str, url: str, api_key: str, payload: dict | None = None) -> dict:
@@ -72,8 +71,8 @@ def main() -> int:
     if not request_id:
         raise SystemExit("No request_id in submit response")
 
-    status_url = f"{QUEUE_BASE}/{REQUEST_BASE}/requests/{request_id}/status"
-    result_url = f"{QUEUE_BASE}/{REQUEST_BASE}/requests/{request_id}"
+    status_url = f"{QUEUE_BASE}/{submit_model}/requests/{request_id}/status"
+    result_url = f"{QUEUE_BASE}/{submit_model}/requests/{request_id}"
 
     for i in range(1, args.max_polls + 1):
         time.sleep(args.poll_interval)
