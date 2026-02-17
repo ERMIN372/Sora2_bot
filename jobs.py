@@ -1717,6 +1717,70 @@ class JobQueue:
                         status="failed",
                     )
                     return
+                # 4xx client errors (400, 401, 422) are never retryable – the
+                # request is structurally wrong and will never succeed.
+                is_client_error = 400 <= exc.status_code < 500 and exc.status_code not in {
+                    408,  # Request Timeout – may succeed on retry
+                    429,  # Too Many Requests – may succeed after backoff
+                }
+                if is_client_error:
+                    terminal_reason = "invalid_request"
+                    terminal_message = f"Provider rejected request ({exc.status_code}); not retryable"
+                    log.warning(
+                        "poll_terminal_client_error job_id=%s corr_id=%s provider=%s status_code=%s message=%s provider_message=%s",
+                        pending.job_id,
+                        pending.corr_id,
+                        provider_key,
+                        exc.status_code,
+                        terminal_message,
+                        (exc.provider_message or "")[:300],
+                    )
+                    log_event(
+                        level="WARNING",
+                        event="poll_terminal",
+                        corr_id=pending.corr_id,
+                        job_id=pending.job_id,
+                        user_id=pending.user_id,
+                        username=pending.username,
+                        model=pending.model,
+                        provider=provider_key,
+                        size=pending.size,
+                        status_code=exc.status_code,
+                        error_type=exc.error_type,
+                        error_code=exc.error_code,
+                        error_msg_short=terminal_message,
+                        duration_ms=exc.duration_ms,
+                        extra={
+                            "provider_message": exc.provider_message,
+                            "asset_kind": asset_kind,
+                        },
+                    )
+                    try:
+                        await self._db.update_job(
+                            pending.job_id,
+                            "failed",
+                            video_id=pending.video_id,
+                            error=terminal_message,
+                        )
+                    except Exception:
+                        log.exception("Failed to mark job %s as failed", pending.job_id)
+                    try:
+                        await self._db.add_credits(
+                            pending.user_id, self._config.generation_cost_credits
+                        )
+                        increment_metric("refunds_total")
+                        increment_metric("refund_total")
+                    except Exception:
+                        log.exception("Refunding credits failed for job %s", pending.job_id)
+                    job_extra.setdefault("reason", terminal_reason)
+                    job_extra["reason_message"] = terminal_message
+                    job_extra["provider_message"] = exc.provider_message
+                    await self._release_gate(
+                        pending,
+                        reason=terminal_reason,
+                        status="failed",
+                    )
+                    return
                 log.warning(
                     "Provider polling failed job_id=%s corr_id=%s provider=%s status=%s error_type=%s error_code=%s message=%s",
                     pending.job_id,
