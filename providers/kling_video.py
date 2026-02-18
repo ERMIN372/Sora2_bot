@@ -53,6 +53,7 @@ _RUNNING_STATUSES = {"in_queue", "in_progress", "running"}
 _COMPLETED_STATUSES = {"completed"}
 _FAILED_STATUSES = {"failed", "error", "errored", "cancelled", "canceled"}
 _EARLY_RESULT_MISSING_FIELDS = {"image_url", "video_url", "character_orientation"}
+_EMPTY_RESULT_MAX_POLLS = 10
 
 
 def _mask(value: str, visible: int = 4) -> str:
@@ -68,6 +69,20 @@ def _mask_url(value: Optional[str], visible: int = 18) -> str:
     if len(candidate) <= visible:
         return "***"
     return candidate[:visible] + "***"
+
+
+def _safe_url_preview(value: Optional[str]) -> str:
+    if not isinstance(value, str) or not value.strip():
+        return ""
+    candidate = value.strip()
+    parsed = urlparse(candidate)
+    host = parsed.netloc or "inline"
+    path = (parsed.path or "").strip("/")
+    if not path:
+        return f"{host}/***"
+    if len(path) <= 12:
+        return f"{host}/{path}"
+    return f"{host}/{path[:6]}...{path[-6:]}"
 
 
 def _is_balance_error(text: Optional[str]) -> bool:
@@ -427,17 +442,40 @@ class KlingVideoClient(BaseProviderClient):
             input_payload["idempotency_key"] = request_idempotency_key
             submit_payload = {"input": input_payload}
 
+            video_url_source = "none"
+            for candidate_key in ("video_url", "motion_video_url", "motion_video_inline_data"):
+                candidate = settings.get(candidate_key)
+                if isinstance(candidate, str) and candidate.strip():
+                    video_url_source = candidate_key
+                    break
+                if isinstance(candidate, dict) and candidate:
+                    video_url_source = candidate_key
+                    break
+            image_url_source = "none"
+            for candidate_key in ("image_url", "kling_image_url", "reference_inline_data"):
+                candidate = settings.get(candidate_key)
+                if isinstance(candidate, str) and candidate.strip():
+                    image_url_source = candidate_key
+                    break
+                if isinstance(candidate, dict) and candidate:
+                    image_url_source = candidate_key
+                    break
+
+            payload_keys = sorted(submit_payload.keys())
             input_block = submit_payload.get("input")
             input_keys = sorted(input_block.keys()) if isinstance(input_block, dict) else []
             log.debug(
-                "kling.submit_payload has_input=%s input_keys=%s has_image_url=%s has_video_url=%s has_character_orientation=%s image_url=%s video_url=%s",
+                "kling.submit_payload submit_payload_keys=%s has_input=%s input_keys=%s has_image_url=%s has_video_url=%s has_character_orientation=%s image_url=%s video_url=%s image_url_source=%s video_url_source=%s",
+                payload_keys,
                 isinstance(input_block, dict),
                 input_keys,
                 bool(input_block.get("image_url")) if isinstance(input_block, dict) else False,
                 bool(input_block.get("video_url")) if isinstance(input_block, dict) else False,
                 bool(input_block.get("character_orientation")) if isinstance(input_block, dict) else False,
-                _mask_url(input_block.get("image_url")) if isinstance(input_block, dict) else "",
-                _mask_url(input_block.get("video_url")) if isinstance(input_block, dict) else "",
+                _safe_url_preview(input_block.get("image_url")) if isinstance(input_block, dict) else "",
+                _safe_url_preview(input_block.get("video_url")) if isinstance(input_block, dict) else "",
+                image_url_source,
+                video_url_source,
             )
 
             log.info(
@@ -543,10 +581,7 @@ class KlingVideoClient(BaseProviderClient):
             bool(cached),
         )
 
-        data, status_code, duration_ms = await self._request_with_legacy_fallback(
-            "GET",
-            status_path,
-        )
+        data, status_code, duration_ms = await self.poll_status(job_id=job_id, status_path=status_path)
         status = self._extract_status(data)
         error = self._extract_error(data)
         assets = self._extract_assets(data)
@@ -560,27 +595,21 @@ class KlingVideoClient(BaseProviderClient):
 
         if status == "completed":
             result_path = f"/{FAL_KLING_MODEL_BASE}/requests/{job_id}"
-            log.info("kling.result_fetch job_id=%s result_path=%s", job_id, result_path)
-            result_data, _, _ = await self._request_with_legacy_fallback(
-                "GET",
-                result_path,
-            )
+            previous_empty_count = int((self._cache.get(job_id) or {}).get("empty_result_polls") or 0)
             try:
                 result_data, _, _ = await self.fetch_result(job_id=job_id, result_path=result_path)
             except ProviderAPIError as exc:
-                if self._is_early_result_error(exc):
-                    log.info(
-                        "kling.result_not_ready job_id=%s status_code=%s message=%s",
-                        job_id,
-                        exc.status_code,
-                        (exc.message or "")[:300],
-                    )
-                    self._cache[job_id] = data
-                    status = "running"
-                    error = None
-                    assets = {}
-                else:
-                    raise
+                if exc.status_code == 422 and self._is_missing_motion_fields_error(exc):
+                    raise ProviderAPIError(
+                        provider="kling",
+                        status_code=422,
+                        message="Kling result rejected as invalid motion-control request",
+                        error_type="invalid_request",
+                        error_code="missing_motion_fields",
+                        provider_message=exc.provider_message or exc.message,
+                        retryable=False,
+                    ) from exc
+                raise
             else:
                 if isinstance(data, dict):
                     result_data.setdefault("status_url", data.get("status_url"))
@@ -594,12 +623,24 @@ class KlingVideoClient(BaseProviderClient):
                 if polled_status == "completed" and status == "running" and not error:
                     status = "completed"
                 if status == "completed" and not assets and not error:
+                    empty_count = self._increase_empty_result_count(
+                        job_id=job_id, payload=data, previous=previous_empty_count
+                    )
                     log.info(
-                        "kling.result_pending_media job_id=%s result_path=%s",
+                        "kling.result_pending_media job_id=%s result_path=%s empty_assets_attempt=%s/%s",
                         job_id,
                         result_path,
+                        empty_count,
+                        _EMPTY_RESULT_MAX_POLLS,
                     )
-                    status = "running"
+                    if empty_count >= _EMPTY_RESULT_MAX_POLLS:
+                        status = "failed"
+                        error = "no_media"
+                        data["no_media_confirmed"] = True
+                    else:
+                        status = "running"
+                elif assets:
+                    self._reset_empty_result_count(job_id)
         else:
             self._cache[job_id] = data
             if state == "running":
@@ -649,6 +690,27 @@ class KlingVideoClient(BaseProviderClient):
         if exc.status_code == 400:
             return True
         return False
+
+    @staticmethod
+    def _is_missing_motion_fields_error(exc: ProviderAPIError) -> bool:
+        detail = f"{exc.message or ''} {exc.provider_message or ''}".lower()
+        return all(field in detail for field in _EARLY_RESULT_MISSING_FIELDS)
+
+    def _increase_empty_result_count(
+        self, *, job_id: str, payload: Dict[str, Any], previous: int = 0
+    ) -> int:
+        cached = self._cache.setdefault(job_id, {})
+        if isinstance(payload, dict):
+            cached.update(payload)
+        current = max(int(cached.get("empty_result_polls") or 0), int(previous or 0)) + 1
+        cached["empty_result_polls"] = current
+        return current
+
+    def _reset_empty_result_count(self, job_id: str) -> None:
+        cached = self._cache.get(job_id)
+        if not isinstance(cached, dict):
+            return
+        cached.pop("empty_result_polls", None)
 
     def _poll_status(
         self,

@@ -11,6 +11,7 @@ from providers.kling_video import (
     FAL_KLING_MODEL_PRO,
     FAL_KLING_MODEL_STANDARD,
     KlingVideoClient,
+    _EMPTY_RESULT_MAX_POLLS,
     _as_bool,
     _normalise_fal_key,
 )
@@ -649,6 +650,7 @@ def test_kling_completed_result_422_missing_fields_is_terminal_invalid_request()
 
     assert exc_info.value.status_code == 422
     assert exc_info.value.error_type == "invalid_request"
+    assert exc_info.value.error_code == "missing_motion_fields"
     assert exc_info.value.retryable is False
     assert client.calls == [
         ("GET", f"/{FAL_KLING_MODEL_BASE}/requests/req-early/status", None),
@@ -689,6 +691,34 @@ def test_kling_completed_result_without_video_keeps_polling() -> None:
     assert client.calls == [
         ("GET", f"/{FAL_KLING_MODEL_BASE}/requests/req-empty/status", None),
         ("GET", f"/{FAL_KLING_MODEL_BASE}/requests/req-empty", None),
+    ]
+
+
+
+def test_kling_completed_result_without_video_reaches_terminal_no_media_after_limit() -> None:
+    class _NoMediaLimitClient(KlingVideoClient):
+        async def _request_with_legacy_fallback(  # type: ignore[override]
+            self, method: str, path: str, *, json_payload=None
+        ):
+            self.calls.append((method, path, json_payload))
+            if path.endswith("/status"):
+                return {"status": "COMPLETED"}, 200, 11
+            return {"status": "COMPLETED", "output": {}}, 200, 12
+
+    client = _NoMediaLimitClient.__new__(_NoMediaLimitClient)
+    client._cache = {"req-no-media": {"empty_result_polls": _EMPTY_RESULT_MAX_POLLS - 1}}
+    client._submit_models = {}
+    client._base_url = "https://queue.fal.run"
+    client.calls = []
+
+    result = asyncio.run(client.get_job_status("req-no-media"))
+
+    assert result.status == "failed"
+    assert result.error == "no_media"
+    assert result.data.get("no_media_confirmed") is True
+    assert client.calls == [
+        ("GET", f"/{FAL_KLING_MODEL_BASE}/requests/req-no-media/status", None),
+        ("GET", f"/{FAL_KLING_MODEL_BASE}/requests/req-no-media", None),
     ]
 
 def test_kling_submit_model_selection() -> None:

@@ -1026,6 +1026,13 @@ class JobQueue:
             request_settings.setdefault("image_file_id", image_file_id)
         effective_prompt = sanitized_prompt or prompt
         content_type_value = content_type or "video"
+        reference_video_url = None
+        if _is_kling_provider(provider_key):
+            candidate_video_url = request_settings.get("video_url") or request_settings.get(
+                "motion_video_url"
+            )
+            if isinstance(candidate_video_url, str) and candidate_video_url.strip():
+                reference_video_url = candidate_video_url.strip()
         stable_idempotency_key = idempotency_key or compute_generation_idempotency_key(
             user_id=user_id,
             prompt=effective_prompt,
@@ -1176,7 +1183,7 @@ class JobQueue:
             user_id=user_id,
             prompt=effective_prompt,
             status="queued",
-            video_url=None,
+            video_url=reference_video_url,
             video_id=video_id,
             error=None,
             created_at=now,

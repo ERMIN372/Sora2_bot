@@ -29,8 +29,7 @@ def _request(method: str, url: str, api_key: str, payload: dict | None = None) -
     body = None if payload is None else json.dumps(payload).encode("utf-8")
     req = Request(url=url, data=body, method=method)
     req.add_header("Authorization", f"Key {api_key}")
-    if body is not None:
-        req.add_header("Content-Type", "application/json")
+    req.add_header("Content-Type", "application/json")
     with urlopen(req, timeout=60) as resp:
         status_code = int(resp.status)
         raw = resp.read().decode("utf-8")
