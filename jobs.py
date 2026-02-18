@@ -152,6 +152,23 @@ def _is_kling_provider(provider: Optional[str]) -> bool:
     return (provider or "").strip().lower().startswith("kling")
 
 
+def _extract_kling_motion_video_reference(*sources: Optional[Mapping[str, Any]]) -> Optional[str]:
+    for source in sources:
+        if not isinstance(source, Mapping):
+            continue
+        for key in ("video_url", "motion_video_url"):
+            candidate = source.get(key)
+            if isinstance(candidate, str) and candidate.strip():
+                return candidate.strip()
+        input_payload = source.get("input")
+        if isinstance(input_payload, Mapping):
+            for key in ("video_url", "motion_video_url"):
+                candidate = input_payload.get(key)
+                if isinstance(candidate, str) and candidate.strip():
+                    return candidate.strip()
+    return None
+
+
 @dataclass(slots=True)
 class _FallbackSubmissionResult:
     submission: ProviderJobSubmission
@@ -1028,11 +1045,7 @@ class JobQueue:
         content_type_value = content_type or "video"
         reference_video_url = None
         if _is_kling_provider(provider_key):
-            candidate_video_url = request_settings.get("video_url") or request_settings.get(
-                "motion_video_url"
-            )
-            if isinstance(candidate_video_url, str) and candidate_video_url.strip():
-                reference_video_url = candidate_video_url.strip()
+            reference_video_url = _extract_kling_motion_video_reference(request_settings, payload)
         stable_idempotency_key = idempotency_key or compute_generation_idempotency_key(
             user_id=user_id,
             prompt=effective_prompt,
@@ -1098,6 +1111,12 @@ class JobQueue:
             model_key = fallback.model
             request_settings = fallback.settings
             stable_idempotency_key = fallback.idempotency_key
+            if _is_kling_provider(provider_key):
+                reference_video_url = _extract_kling_motion_video_reference(
+                    request_settings,
+                    payload,
+                    submission.data if isinstance(submission.data, dict) else None,
+                )
         submission_payload = submission.data if isinstance(submission.data, dict) else {}
         extras_payload = dict(extra or {})
         inline_assets_payload = []

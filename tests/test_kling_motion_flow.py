@@ -284,7 +284,7 @@ def test_kling_enqueue_sends_bool_keep_original_sound() -> None:
     )
 
     assert submission.job_id == "req_bool"
-    payload = client.last_json["input"]
+    payload = client.last_json
     assert payload["keep_original_sound"] is False
     assert payload["idempotency_key"]
 
@@ -315,7 +315,7 @@ def test_kling_enqueue_default_keep_original_sound_true() -> None:
         )
     )
 
-    payload = client.last_json["input"]
+    payload = client.last_json
     assert payload["keep_original_sound"] is True
     assert payload["idempotency_key"]
 
@@ -347,13 +347,13 @@ def test_kling_enqueue_uses_provided_idempotency_key() -> None:
         )
     )
 
-    payload = client.last_json["input"]
+    payload = client.last_json
     assert payload["idempotency_key"] == "job-123"
 
 
 
 
-def test_kling_enqueue_submit_payload_wraps_required_input_fields() -> None:
+def test_kling_enqueue_submit_payload_contains_required_root_fields() -> None:
     class _CaptureClient(KlingVideoClient):
         async def _request_with_legacy_fallback(self, _method, _path, *, json_payload=None):  # type: ignore[override]
             self.last_json = json_payload
@@ -379,10 +379,9 @@ def test_kling_enqueue_submit_payload_wraps_required_input_fields() -> None:
         )
     )
 
-    assert set(client.last_json.keys()) == {"input"}
-    assert client.last_json["input"]["image_url"] == "https://example.com/ref.png"
-    assert client.last_json["input"]["video_url"] == "https://example.com/ref.mp4"
-    assert client.last_json["input"]["character_orientation"] == "video"
+    assert client.last_json["image_url"] == "https://example.com/ref.png"
+    assert client.last_json["video_url"] == "https://example.com/ref.mp4"
+    assert client.last_json["character_orientation"] == "video"
 
 def test_kling_enqueue_recovers_from_legacy_jwt_name_error() -> None:
     class _NameErrorKlingClient(KlingVideoClient):
@@ -800,7 +799,7 @@ def test_kling_request_via_fal_http_sets_content_type_for_post() -> None:
         client._request_via_fal_http(
             method="POST",
             path="/fal-ai/kling-video/v2.6/standard/motion-control",
-            json_payload={"input": {"foo": "bar"}},
+            json_payload={"foo": "bar"},
         )
     )
 
