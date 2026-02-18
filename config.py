@@ -422,6 +422,7 @@ class Config:
     fal_key: str = ""
     debug_gemini: bool = False
     debug_sora: bool = False
+    delivery_mode: str = "default"
     redis_url: Optional[str] = None
 
     @property
@@ -947,6 +948,9 @@ def load_config() -> Config:
         fal_key=env_str("FAL_KEY", "").strip(),
         debug_gemini=debug_gemini,
         debug_sora=debug_sora,
+        delivery_mode=(os.getenv("DELIVERY_MODE", Config.delivery_mode) or Config.delivery_mode)
+        .strip()
+        .lower(),
         redis_url=redis_url,
         db_log_jobs=db_log_jobs,
     )

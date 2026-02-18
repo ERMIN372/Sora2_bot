@@ -86,6 +86,9 @@ def _extract_file_name(asset_url: str) -> str:
         return base.split(":", 1)[0]
 
     parsed = urlparse(cleaned)
+    host = (parsed.hostname or "").lower()
+    if host and host != "generativelanguage.googleapis.com":
+        raise ValueError("Gemini Files API URL must use generativelanguage.googleapis.com host")
     path = parsed.path or ""
     marker = "/files/"
     marker_index = path.find(marker)

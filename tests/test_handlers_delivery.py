@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import sys
 import types
-from datetime import datetime
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
 
@@ -26,6 +26,7 @@ if "yookassa_client" not in sys.modules:
 
 from db import GenerationJobRecord
 from handlers import _send_job_update
+import handlers._core as handlers_core
 from services.gemini_downloader import DownloadedAsset, GeminiDownloadError
 
 
@@ -86,6 +87,7 @@ class _FakeBot:
                 "user_id": user_id,
                 "supports_streaming": supports_streaming,
                 "duration": duration,
+                "file": file,
             }
         )
         video = SimpleNamespace(
@@ -132,7 +134,7 @@ class _FakeErrorReporter:
 
 
 def _make_job(*, status: str = "completed", cost: int = 7) -> GenerationJobRecord:
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     job = GenerationJobRecord(
         id="job-1",
         user_id=42,
@@ -153,7 +155,7 @@ def _make_job(*, status: str = "completed", cost: int = 7) -> GenerationJobRecor
         "assets_meta": [
             {
                 "key": "primary",
-                "url": "https://cdn.example/video.mp4",
+                "url": "https://generativelanguage.googleapis.com/v1beta/files/file-123:download?alt=media",
                 "mime": "video/mp4",
             }
         ]
@@ -183,11 +185,11 @@ def test_send_job_update_remote_success(
     bot = _FakeBot(file_size=downloaded.size)
     dp = _FakeDispatcher(bot)
 
-    monkeypatch.setattr("handlers.STATUS_MESSAGES", status_stub)
-    monkeypatch.setattr("handlers.download_asset", fake_download_asset)
-    monkeypatch.setattr("handlers.increment_metric", lambda *a, **k: None)
-    monkeypatch.setattr("handlers.log_event", lambda *a, **k: None)
-    monkeypatch.setattr("handlers.record_timing_metric", lambda *a, **k: None)
+    monkeypatch.setattr(handlers_core, "STATUS_MESSAGES", status_stub)
+    monkeypatch.setattr(handlers_core, "download_asset", fake_download_asset)
+    monkeypatch.setattr(handlers_core, "increment_metric", lambda *a, **k: None)
+    monkeypatch.setattr(handlers_core, "log_event", lambda *a, **k: None)
+    monkeypatch.setattr(handlers_core, "record_timing_metric", lambda *a, **k: None)
 
     _run(
         _send_job_update(
@@ -223,11 +225,11 @@ def test_send_job_update_remote_failure(
     bot = _FakeBot(file_size=2048)
     dp = _FakeDispatcher(bot)
 
-    monkeypatch.setattr("handlers.STATUS_MESSAGES", status_stub)
-    monkeypatch.setattr("handlers.download_asset", failing_download_asset)
-    monkeypatch.setattr("handlers.increment_metric", lambda *a, **k: None)
-    monkeypatch.setattr("handlers.log_event", lambda *a, **k: None)
-    monkeypatch.setattr("handlers.record_timing_metric", lambda *a, **k: None)
+    monkeypatch.setattr(handlers_core, "STATUS_MESSAGES", status_stub)
+    monkeypatch.setattr(handlers_core, "download_asset", failing_download_asset)
+    monkeypatch.setattr(handlers_core, "increment_metric", lambda *a, **k: None)
+    monkeypatch.setattr(handlers_core, "log_event", lambda *a, **k: None)
+    monkeypatch.setattr(handlers_core, "record_timing_metric", lambda *a, **k: None)
 
     _run(
         _send_job_update(
@@ -247,3 +249,96 @@ def test_send_job_update_remote_failure(
     assert any(call["status"] == "failed" for call in db.update_calls)
     assert job.status == "failed"
 
+
+
+def test_delivery_routes_fal_media_to_http_not_gemini(
+    monkeypatch: pytest.MonkeyPatch, make_openai_video_config
+) -> None:
+    config = make_openai_video_config()
+    job = _make_job(cost=5)
+    job.model = "kling-v2.6"
+    job.extra["provider"] = "kling"
+    job.extra["assets_meta"][0]["url"] = "https://v3b.fal.media/files/b/abc/output.mp4"
+
+    status_stub = _StubStatusMessages()
+    db = _FakeDB()
+    reporter = _FakeErrorReporter()
+    bot = _FakeBot(file_size=1024)
+    dp = _FakeDispatcher(bot)
+
+    async def fail_gemini(*_args: Any, **_kwargs: Any) -> DownloadedAsset:
+        raise AssertionError("gemini downloader must not be called for fal.media")
+
+    async def fail_http(*_args: Any, **_kwargs: Any) -> DownloadedAsset:
+        raise AssertionError("HTTP fallback should not be called when Telegram accepts URL")
+
+    monkeypatch.setattr(handlers_core, "STATUS_MESSAGES", status_stub)
+    monkeypatch.setattr(handlers_core, "download_asset", fail_gemini)
+    monkeypatch.setattr(handlers_core, "_download_remote_asset_http", fail_http)
+    monkeypatch.setattr(handlers_core, "increment_metric", lambda *a, **k: None)
+    monkeypatch.setattr(handlers_core, "log_event", lambda *a, **k: None)
+    monkeypatch.setattr(handlers_core, "record_timing_metric", lambda *a, **k: None)
+
+    _run(
+        _send_job_update(
+            dp=dp,
+            job=job,
+            archive=None,
+            config=config,
+            db=db,
+            error_reporter=reporter,
+        )
+    )
+
+    assert bot.sent
+    assert bot.sent[0]["method"] == "video"
+    assert bot.sent[0].get("file") == "https://v3b.fal.media/files/b/abc/output.mp4"
+
+
+def test_delivery_accepts_gemini_files_only_for_generativelanguage_host(
+    monkeypatch: pytest.MonkeyPatch, make_openai_video_config
+) -> None:
+    config = make_openai_video_config()
+    job = _make_job(cost=5)
+    job.model = "veo-3.0-generate-001"
+    job.extra["provider"] = "veo"
+    job.extra["assets_meta"][0]["url"] = (
+        "https://generativelanguage.googleapis.com/v1beta/files/abc123:download?alt=media"
+    )
+
+    status_stub = _StubStatusMessages()
+    db = _FakeDB()
+    reporter = _FakeErrorReporter()
+    bot = _FakeBot(file_size=4096)
+    dp = _FakeDispatcher(bot)
+
+    calls: List[str] = []
+
+    async def fake_gemini(*_args: Any, **_kwargs: Any) -> DownloadedAsset:
+        calls.append("gemini")
+        return DownloadedAsset(
+            content=b"video-bytes",
+            mime="video/mp4",
+            filename="gemini.mp4",
+            size=4096,
+            key_mask="MASK",
+        )
+
+    monkeypatch.setattr(handlers_core, "STATUS_MESSAGES", status_stub)
+    monkeypatch.setattr(handlers_core, "download_asset", fake_gemini)
+    monkeypatch.setattr(handlers_core, "increment_metric", lambda *a, **k: None)
+    monkeypatch.setattr(handlers_core, "log_event", lambda *a, **k: None)
+    monkeypatch.setattr(handlers_core, "record_timing_metric", lambda *a, **k: None)
+
+    _run(
+        _send_job_update(
+            dp=dp,
+            job=job,
+            archive=None,
+            config=config,
+            db=db,
+            error_reporter=reporter,
+        )
+    )
+
+    assert calls == ["gemini"]
