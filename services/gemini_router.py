@@ -193,7 +193,7 @@ class GeminiRouter:
                     "Эта модель предназначена для видео. Выбрана video-модель, но задача не video."
                 )
             return
-        if lower.endswith("-image"):
+        if "-image" in lower:
             if task != "image":
                 raise GeminiRoutingError(
                     "Эта модель не поддерживает данный метод. Выбрана image-модель, но вы вызвали text. Поменяй модель или метод."
