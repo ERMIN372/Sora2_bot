@@ -86,6 +86,11 @@ def _as_bool(value: Any, *, default: bool = False) -> bool:
 class KlingVideoClient(BaseProviderClient):
     """Client for Kling AI Motion Control generation routed through fal.ai."""
 
+    # fal.ai queue result endpoint requires Content-Type: application/json
+    # even for GET requests; without it the request is routed to the model
+    # handler which validates body fields and returns 422.
+    _keep_content_type_on_get = True
+
     def __init__(self, *, config: Config) -> None:
         self._fal_key = _normalise_fal_key(config.fal_key or os.getenv("FAL_API_KEY", ""))
         if not self._fal_key:
@@ -105,8 +110,11 @@ class KlingVideoClient(BaseProviderClient):
         )
 
     def _build_headers(self) -> Dict[str, str]:
+        # Content-Type is required even for GET requests so that fal.ai
+        # routes the request to the queue system instead of the model handler.
         return {
             "Authorization": f"Key {self._fal_key}",
+            "Content-Type": "application/json",
         }
 
     @staticmethod
@@ -236,9 +244,14 @@ class KlingVideoClient(BaseProviderClient):
         session = await self._ensure_session()
         started = time.monotonic()
         url = f"{self._base_url}{path}"
-        headers = {"Authorization": f"Key {self._fal_key}"}
-        if json_payload is not None or method.upper() in {"POST", "PUT", "PATCH"}:
-            headers["Content-Type"] = "application/json"
+        # fal.ai queue endpoints require Content-Type: application/json for
+        # ALL requests (including GET) to correctly route to the queue system.
+        # Without it, GET to /requests/{id} falls through to the model handler
+        # which validates body fields and returns 422.
+        headers = {
+            "Authorization": f"Key {self._fal_key}",
+            "Content-Type": "application/json",
+        }
         request_kwargs: Dict[str, Any] = {}
         if json_payload is not None:
             request_kwargs["json"] = json_payload
@@ -281,8 +294,7 @@ class KlingVideoClient(BaseProviderClient):
     ) -> tuple[Dict[str, Any], int, int]:
         try:
             kwargs: Dict[str, Any] = {}
-            if json_payload is not None or method.upper() in {"POST", "PUT", "PATCH"}:
-                kwargs["headers"] = {"Content-Type": "application/json"}
+            kwargs["headers"] = {"Content-Type": "application/json"}
             if json_payload is not None:
                 kwargs["json"] = json_payload
             return await self._request(method, path, **kwargs)
@@ -461,29 +473,27 @@ class KlingVideoClient(BaseProviderClient):
                     duration_ms=0,
                 )
 
-        # fal.ai queue: use the same model path that was used for submission.
-        # The base path (fal-ai/kling-video) is a separate model endpoint and
-        # returns 422 when used for result fetching of motion-control jobs.
-        # Status endpoint on the full model path requires POST (not GET).
-        poll_model = self._submit_models.get(job_id, FAL_KLING_MODEL_STANDARD)
-        status_path = f"/{poll_model}/requests/{job_id}/status"
+        # fal.ai queue: status polling uses base model path with GET.
+        # Result fetching also uses base path but requires Content-Type:
+        # application/json to route to the queue system (handled by
+        # _keep_content_type_on_get flag).
+        status_path = f"/{FAL_KLING_MODEL_BASE}/requests/{job_id}/status"
 
         log.info(
-            "kling.poll job_id=%s status_path=%s poll_model=%s has_cached=%s",
+            "kling.poll job_id=%s status_path=%s has_cached=%s",
             job_id,
             status_path,
-            poll_model,
             bool(cached),
         )
 
         data, status_code, duration_ms = await self._request_with_legacy_fallback(
-            "POST",
+            "GET",
             status_path,
         )
         status = self._extract_status(data)
 
         if status == "completed":
-            result_path = f"/{poll_model}/requests/{job_id}"
+            result_path = f"/{FAL_KLING_MODEL_BASE}/requests/{job_id}"
             log.info("kling.result_fetch job_id=%s result_path=%s", job_id, result_path)
             result_data, _, _ = await self._request_with_legacy_fallback(
                 "GET",
