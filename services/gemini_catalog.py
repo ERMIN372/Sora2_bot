@@ -19,7 +19,7 @@ _CACHE_TTL_SECONDS = 900.0
 _CACHE_LOCK = threading.Lock()
 _CACHE: dict[str, tuple[float, List[str]]] = {}
 _SUPPORTED_PREFIXES = ("veo-3.0-", "veo-3.1-")
-_VIDEO_METHOD_ALIASES = {"generate_videos", "predict_long_running"}
+_VIDEO_METHOD_ALIASES = {"generate_videos", "predict_long_running", "predict_longrunning"}
 
 
 @dataclass(frozen=True)
@@ -80,8 +80,10 @@ def _list_veo_model_methods(config: Config) -> dict[str, set[str]]:
             if not _is_supported_model(short):
                 continue
             supported = getattr(entry, "supported_generation_methods", None)
+            if supported is None:
+                supported = getattr(entry, "supportedGenerationMethods", None)
             if supported is None and isinstance(entry, dict):
-                supported = entry.get("supported_generation_methods")
+                supported = entry.get("supported_generation_methods") or entry.get("supportedGenerationMethods")
             methods = {
                 _normalise_method_name(value)
                 for value in (supported or [])
@@ -250,8 +252,10 @@ def list_models_with_capability(
     for response in responses:
         for entry in _iter_response(response):
             supported = getattr(entry, "supported_generation_methods", None)
+            if supported is None:
+                supported = getattr(entry, "supportedGenerationMethods", None)
             if supported is None and isinstance(entry, dict):
-                supported = entry.get("supported_generation_methods")
+                supported = entry.get("supported_generation_methods") or entry.get("supportedGenerationMethods")
             method_names = {
                 _normalise_method_name(value)
                 for value in (supported or [])
@@ -329,7 +333,20 @@ def preflight_check_veo_model(config: Config, model_id: str) -> VeoPreflightResu
             api_used=api_used,
             reason="model_not_found",
         )
+    sorted_methods = sorted(matched_methods)
+    log.info(
+        "veo.preflight model_id=%s supportedGenerationMethods=%s",
+        normalised_model,
+        sorted_methods,
+    )
     if not _contains_video_method(matched_methods):
+        if normalised_model.lower().startswith("veo-"):
+            return VeoPreflightResult(
+                available=True,
+                model_id=normalised_model,
+                api_used=api_used,
+                reason="ok",
+            )
         return VeoPreflightResult(
             available=False,
             model_id=normalised_model,

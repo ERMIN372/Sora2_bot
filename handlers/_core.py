@@ -278,7 +278,7 @@ _PRO_REQUEST_PATTERN = re.compile(
 )
 
 _SUPPORTED_VEO_PREFIXES: Tuple[str, ...] = ("veo-3.0-", "veo-3.1-")
-_DEFAULT_VEO3_MODEL = "veo-3.0-generate-001"
+_DEFAULT_VEO3_MODEL = "veo-3.1-fast-generate-preview"
 _DEFAULT_VEO31_MODEL = "veo-3.1-generate-preview"
 _SUPPORTED_SORA_PREFIXES: Tuple[str, ...] = (
     "sora-",
@@ -708,6 +708,16 @@ def _is_veo31_model(name: str) -> bool:
     return normalised.lower().startswith("veo-3.1-")
 
 
+
+
+def _veo_provider_tag(model_name: str) -> str:
+    normalised = _normalise_video_model_name(model_name).lower()
+    if normalised.startswith("veo-3.1-fast-"):
+        return "veo"
+    if normalised.startswith("veo-3.1-"):
+        return "veo31"
+    return "veo"
+
 def _veo_series_label(model: Optional[str], provider: Optional[str]) -> str:
     if _is_veo31_model(model or "") or (provider or "").strip().lower() == "veo31":
         return "Veo 3.1"
@@ -850,13 +860,11 @@ def _video_model_options(config: Config) -> list[VideoModelOption]:
     if config.gemini_video_enabled:
         default_name = _normalise_video_model_name(config.gemini_model_video)
         if default_name:
-            provider_tag = "veo31" if _is_veo31_model(default_name) else "veo"
-            _register(default_name, provider_tag)
+            _register(default_name, _veo_provider_tag(default_name))
         for candidate in list_veo_video_models(config):
             normalised = _normalise_video_model_name(candidate)
             if _is_veo_video_model_name(normalised):
-                provider_tag = "veo31" if _is_veo31_model(normalised) else "veo"
-                _register(normalised, provider_tag)
+                _register(normalised, _veo_provider_tag(normalised))
         # Always offer core Veo generations even if listModels is temporarily empty.
         _register(_DEFAULT_VEO3_MODEL, "veo")
         _register(_DEFAULT_VEO31_MODEL, "veo31")
@@ -1123,6 +1131,14 @@ def _resolve_product_key(
     if _is_sora_video_model_name(model_key):
         return "sora"
     return "sora"
+
+
+def _resolve_task_label(category: str, provider: Optional[str]) -> str:
+    if category == "image":
+        provider_key = (provider or "").strip().lower()
+        if provider_key in {"gemini-image", "gemini-image-pro", "dall-e-3"}:
+            return "image_generate"
+    return "video_generate"
 
 
 def _resolve_model_label(model: str, config: Config) -> str:
@@ -3497,9 +3513,7 @@ async def _launch_order(
         last_name=user.last_name,
     )
     provider_key = order.provider or order.model
-    task_label = (
-        "image_generate" if provider_key in {"gemini-image", "dall-e-3"} else "video_generate"
-    )
+    task_label = _resolve_task_label(order.category, provider_key)
     credits_cost = order.credits_cost or config.generation_cost_credits
 
     normalized = normalize_prompt(order.prompt)
@@ -3591,9 +3605,8 @@ async def _launch_order(
         )
         if not veo_preflight.available:
             await _release_lock("submit_failed", "provider_unavailable")
-            model_series = _veo_series_label(order.model, provider_key)
             await callback.message.answer(
-                i18n.t("errors.veo_model_unavailable_no_charge", model_name=model_series)
+                i18n.t("errors.veo_model_unavailable_no_charge", model_name=selected_label)
             )
             return
 

@@ -32,7 +32,7 @@ def test_veo_preflight_blocks_charge_when_model_missing(monkeypatch) -> None:
     config = _config()
     monkeypatch.setattr(
         "services.gemini_catalog._list_veo_model_methods",
-        lambda *_args, **_kwargs: {"veo-3.0-generate-001": {"generate_videos"}},
+        lambda *_args, **_kwargs: {"veo-3.1-fast-generate-preview": {"predictLongRunning"}},
     )
 
     charge_called = False
@@ -89,29 +89,29 @@ def test_veo_option_routing_keeps_veo3_and_veo31_separate(monkeypatch) -> None:
     )
     options = _video_model_options(_config())
 
-    veo3 = next((item for item in options if item.model == "veo-3.0-generate-001"), None)
+    veo3 = next((item for item in options if item.model == "veo-3.1-fast-generate-preview"), None)
     veo31 = next((item for item in options if item.model == "veo-3.1-generate-preview"), None)
 
     assert veo3 is not None
     assert veo3.provider == "veo"
-    assert "veo-3.1" not in veo3.model
+    assert "fast" in veo3.model
 
     assert veo31 is not None
     assert veo31.provider == "veo31"
     assert "veo-3.1" in veo31.model
 
 
-def test_veo_preflight_reports_method_not_supported(monkeypatch) -> None:
+def test_veo_preflight_allows_veo_model_without_advertised_predict_method(monkeypatch) -> None:
     config = _config()
     monkeypatch.setattr(
         "services.gemini_catalog._list_veo_model_methods",
-        lambda _config: {"veo-3.0-generate-001": {"generate_content"}},
+        lambda _config: {"veo-3.1-fast-generate-preview": {"generate_content"}},
     )
 
-    preflight = preflight_check_veo_model(config, "veo-3.0-generate-001")
+    preflight = preflight_check_veo_model(config, "veo-3.1-fast-generate-preview")
 
-    assert preflight.available is False
-    assert preflight.reason == "method_not_supported"
+    assert preflight.reason == "ok"
+    assert preflight.available is True
 
 
 def test_trend_veo_choice_does_not_resolve_to_veo31_model(monkeypatch) -> None:
@@ -126,5 +126,5 @@ def test_trend_veo_choice_does_not_resolve_to_veo31_model(monkeypatch) -> None:
     provider, model = _resolve_trend_model("veo", config)
 
     assert provider == "veo"
-    assert model == "veo-3.0-generate-001"
-    assert "veo-3.1" not in model
+    assert model == "veo-3.1-fast-generate-preview"
+    assert "fast" in model
