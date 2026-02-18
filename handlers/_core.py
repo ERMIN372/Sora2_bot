@@ -719,6 +719,10 @@ def _veo_provider_tag(model_name: str) -> str:
     return "veo"
 
 def _veo_series_label(model: Optional[str], provider: Optional[str]) -> str:
+    normalised = _normalise_video_model_name(model or "").lower()
+    # veo-3.1-fast-* is the "Veo 3" (cheap) tier; only non-fast veo-3.1-* is "Veo 3.1"
+    if normalised.startswith("veo-3.1-fast-"):
+        return "Veo 3"
     if _is_veo31_model(model or "") or (provider or "").strip().lower() == "veo31":
         return "Veo 3.1"
     return "Veo 3"
@@ -877,7 +881,17 @@ def _video_model_options(config: Config) -> list[VideoModelOption]:
     if config.kling_video_enabled:
         _register("kling-v2-6-motion", "kling_mc")
 
-    return options
+    # Deduplicate options that resolved to the same UI label (e.g. two
+    # different model IDs both labelled "💚Gemini veo3 — 89 ₽").
+    seen_labels: Set[str] = set()
+    deduped: list[VideoModelOption] = []
+    for opt in options:
+        if opt.label in seen_labels:
+            continue
+        seen_labels.add(opt.label)
+        deduped.append(opt)
+
+    return deduped
 
 
 def _image_model_options(config: Config) -> list[ImageModelOption]:
@@ -1135,9 +1149,7 @@ def _resolve_product_key(
 
 def _resolve_task_label(category: str, provider: Optional[str]) -> str:
     if category == "image":
-        provider_key = (provider or "").strip().lower()
-        if provider_key in {"gemini-image", "gemini-image-pro", "dall-e-3"}:
-            return "image_generate"
+        return "image_generate"
     return "video_generate"
 
 
