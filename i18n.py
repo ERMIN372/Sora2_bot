@@ -119,7 +119,7 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
             "├ ☁️ Sora 2 — от 99 ₽\n"
             "├ 💚 veo 3 — 89 ₽\n"
             "├ 💎 veo 3.1 — 299 ₽\n"
-            "├ 🎭 Kling MC — 79 ₽\n"
+            "├ 🎭 Kling MC — 110 ₽\n"
             "├ 🖼 Фото — 5 ₽\n"
             "└ 🔮 Таро — {tarot_price}\n\n"
             "<b>🎁 Бонусы при пополнении</b>\n"
@@ -445,6 +445,7 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "flow.price_tag": "{credits} (~{approx})",
         "flow.no_prompt": "Добавьте описание. Пример: <code>кот идёт по неону, киберпанк</code>",
         "flow.order_submitted": "✅ <b>Заказ принят!</b>\n\n📍 Место в очереди: <b>{queue_pos}</b>\n⏱ Ожидание: ~1–3 мин.\n\nПришлю видео сюда, как будет готово.",
+        "flow.order_submitted_kling": "✅ <b>Заказ принят!</b>\n\n📍 Место в очереди: <b>{queue_pos}</b>\n⏱ Ожидание: ~7–10 мин.\n\nПришлю видео сюда, как будет готово.",
         "flow.order_submitted_image": "✅ <b>Заказ принят!</b>\n\n📍 Место в очереди: <b>{queue_pos}</b>\n⏱ Ожидание: ~30 сек.\n\nПришлю фото сюда, как будет готово.",
         "flow.nano_image_progress": "Генерация изображения…",
         "flow.nano_image_done": "Готово!",
