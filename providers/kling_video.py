@@ -428,7 +428,7 @@ class KlingVideoClient(BaseProviderClient):
                     ),
                 )
 
-            input_payload: Dict[str, Any] = {
+            submit_payload: Dict[str, Any] = {
                 "image_url": image_url,
                 "video_url": video_url,
                 "character_orientation": character_orientation,
@@ -436,11 +436,10 @@ class KlingVideoClient(BaseProviderClient):
             }
 
             if prompt and prompt.strip():
-                input_payload["prompt"] = prompt.strip()[:2500]
+                submit_payload["prompt"] = prompt.strip()[:2500]
 
             request_idempotency_key = str(idempotency_key or uuid.uuid4())
-            input_payload["idempotency_key"] = request_idempotency_key
-            submit_payload = {"input": input_payload}
+            submit_payload["idempotency_key"] = request_idempotency_key
 
             video_url_source = "none"
             for candidate_key in ("video_url", "motion_video_url", "motion_video_inline_data"):
@@ -462,18 +461,14 @@ class KlingVideoClient(BaseProviderClient):
                     break
 
             payload_keys = sorted(submit_payload.keys())
-            input_block = submit_payload.get("input")
-            input_keys = sorted(input_block.keys()) if isinstance(input_block, dict) else []
             log.debug(
-                "kling.submit_payload submit_payload_keys=%s has_input=%s input_keys=%s has_image_url=%s has_video_url=%s has_character_orientation=%s image_url=%s video_url=%s image_url_source=%s video_url_source=%s",
+                "kling.submit_payload submit_payload_top_keys=%s has_root_image_url=%s has_root_video_url=%s has_root_character_orientation=%s image_url=%s video_url=%s image_url_source=%s video_url_source=%s",
                 payload_keys,
-                isinstance(input_block, dict),
-                input_keys,
-                bool(input_block.get("image_url")) if isinstance(input_block, dict) else False,
-                bool(input_block.get("video_url")) if isinstance(input_block, dict) else False,
-                bool(input_block.get("character_orientation")) if isinstance(input_block, dict) else False,
-                _safe_url_preview(input_block.get("image_url")) if isinstance(input_block, dict) else "",
-                _safe_url_preview(input_block.get("video_url")) if isinstance(input_block, dict) else "",
+                bool(submit_payload.get("image_url")),
+                bool(submit_payload.get("video_url")),
+                bool(submit_payload.get("character_orientation")),
+                _safe_url_preview(submit_payload.get("image_url")),
+                _safe_url_preview(submit_payload.get("video_url")),
                 image_url_source,
                 video_url_source,
             )
@@ -484,7 +479,7 @@ class KlingVideoClient(BaseProviderClient):
                 mode,
                 bool(image_url),
                 bool(video_url),
-                input_payload.get("keep_original_sound"),
+                submit_payload.get("keep_original_sound"),
                 len(prompt or ""),
                 duration_seconds,
             )

@@ -538,3 +538,44 @@ def test_register_external_job_persists_extras(monkeypatch, config: Config, fake
         assert any(event.get("extra", {}).get("duration_seconds") == 9 for event in events)
 
     asyncio.run(_run())
+
+
+def test_submit_kling_persists_motion_video_reference_url(config: Config, fake_db: FakeDB) -> None:
+    async def _run() -> None:
+        class _KlingProvider:
+            async def enqueue_job(self, **kwargs: Any) -> ProviderJobSubmission:
+                return ProviderJobSubmission(
+                    job_id="kling-job-1",
+                    status_code=200,
+                    duration_ms=32,
+                    data={},
+                )
+
+            async def close(self) -> None:  # pragma: no cover
+                return None
+
+        queue = JobQueue(
+            db=fake_db,
+            providers={"kling": _KlingProvider()},
+            default_provider="kling",
+            config=config,
+            gate=None,
+        )
+
+        record = await queue.submit(
+            user_id=99,
+            prompt="animate",
+            size="1280x720",
+            model="kling-v2-6-motion",
+            corr_id="corr-kling",
+            provider="kling",
+            settings={
+                "image_url": "https://example.com/ref.png",
+                "motion_video_url": "https://cdn.example.com/motion-ref.mp4",
+            },
+        )
+
+        assert record.video_url == "https://cdn.example.com/motion-ref.mp4"
+        assert fake_db.jobs["kling-job-1"].video_url == "https://cdn.example.com/motion-ref.mp4"
+
+    asyncio.run(_run())

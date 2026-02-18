@@ -55,15 +55,13 @@ def main() -> int:
     submit_model = SUBMIT_MODELS[args.model]
     submit_url = f"{QUEUE_BASE}/{submit_model}"
     payload = {
-        "input": {
-            "image_url": args.image_url,
-            "video_url": args.video_url,
-            "character_orientation": args.character_orientation,
-            "keep_original_sound": bool(args.keep_original_sound),
-        }
+        "image_url": args.image_url,
+        "video_url": args.video_url,
+        "character_orientation": args.character_orientation,
+        "keep_original_sound": bool(args.keep_original_sound),
     }
     if args.prompt.strip():
-        payload["input"]["prompt"] = args.prompt.strip()
+        payload["prompt"] = args.prompt.strip()
 
     print("[submit]", submit_url)
     submit_status, submit = _request("POST", submit_url, api_key, payload)
