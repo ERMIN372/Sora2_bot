@@ -315,7 +315,10 @@ def test_submit_retries_failed_job(monkeypatch, config: Config, fake_db: FakeDB)
         assert record.id == "job-2"
         assert record.status == "queued"
         assert provider.submissions and provider.submissions[0].job_id == "job-2"
-        assert fake_db.jobs["job-2"].idempotency_key == fake_db.jobs["job-1"].idempotency_key
+        assert fake_db.jobs["job-2"].idempotency_key != fake_db.jobs["job-1"].idempotency_key
+        assert str(fake_db.jobs["job-2"].idempotency_key).startswith(
+            f"{fake_db.jobs['job-1'].idempotency_key}:retry-"
+        )
         assert any(event.get("event") == "request" for event in events)
 
     asyncio.run(_run())
@@ -441,7 +444,7 @@ def test_submit_gemini_flash_inline_returns_inline_result(
         assert record.status == "completed"
         assert isinstance(record.extra.get("inline_result"), dict)
         assert record.extra["inline_result"]["inline_assets"][0]["data_uri"] == data_uri
-        assert set(fake_db.jobs.keys()) == {"job-1"}
+        assert set(fake_db.jobs.keys()) == {"job-1", record.id}
         assert queue._queue.empty()
         assert provider.calls, "provider should be invoked"
 
@@ -577,5 +580,71 @@ def test_submit_kling_persists_motion_video_reference_url(config: Config, fake_d
 
         assert record.video_url == "https://cdn.example.com/motion-ref.mp4"
         assert fake_db.jobs["kling-job-1"].video_url == "https://cdn.example.com/motion-ref.mp4"
+
+    asyncio.run(_run())
+
+
+def test_submit_manual_retry_creates_new_job_rows(config: Config, fake_db: FakeDB) -> None:
+    async def _run() -> None:
+        class _SequencedProvider:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            async def enqueue_job(self, **kwargs: Any) -> ProviderJobSubmission:
+                self.calls += 1
+                return ProviderJobSubmission(
+                    job_id=f"retry-job-{self.calls}",
+                    status_code=200,
+                    duration_ms=15,
+                    data={},
+                )
+
+            async def close(self) -> None:  # pragma: no cover
+                return None
+
+        provider = _SequencedProvider()
+        queue = JobQueue(
+            db=fake_db,
+            providers={"veo": provider},
+            default_provider="veo",
+            config=config,
+            gate=None,
+        )
+
+        existing = fake_db.jobs["job-1"]
+        existing.status = "failed"
+        base_idempotency_key = compute_generation_idempotency_key(
+            user_id=existing.user_id,
+            prompt=existing.prompt,
+            size=existing.size or "",
+            model=existing.model or config.gemini_model_video,
+            content_type=existing.content_type,
+        )
+        existing.idempotency_key = base_idempotency_key
+        fake_db.idempotency_index[base_idempotency_key] = existing.id
+
+        first_retry = await queue.submit(
+            user_id=existing.user_id,
+            prompt=existing.prompt,
+            size=existing.size or "",
+            model=existing.model,
+            corr_id="corr-retry-1",
+            username=existing.username,
+        )
+        fake_db.jobs[first_retry.id].status = "failed"
+
+        second_retry = await queue.submit(
+            user_id=existing.user_id,
+            prompt=existing.prompt,
+            size=existing.size or "",
+            model=existing.model,
+            corr_id="corr-retry-2",
+            username=existing.username,
+        )
+
+        assert first_retry.id != second_retry.id
+        assert first_retry.id in fake_db.jobs
+        assert second_retry.id in fake_db.jobs
+        assert fake_db.jobs[first_retry.id].idempotency_key != fake_db.jobs[second_retry.id].idempotency_key
 
     asyncio.run(_run())

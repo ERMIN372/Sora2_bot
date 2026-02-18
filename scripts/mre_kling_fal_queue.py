@@ -63,7 +63,18 @@ def main() -> int:
     if args.prompt.strip():
         payload["prompt"] = args.prompt.strip()
 
+    payload_top_keys = sorted(payload.keys())
     print("[submit]", submit_url)
+    print(
+        "submit_payload_top_keys=",
+        payload_top_keys,
+        "has_root_image_url=",
+        bool(payload.get("image_url")),
+        "has_root_video_url=",
+        bool(payload.get("video_url")),
+        "has_root_character_orientation=",
+        bool(payload.get("character_orientation")),
+    )
     submit_status, submit = _request("POST", submit_url, api_key, payload)
     request_id = submit.get("request_id")
     print(f"submit status={submit_status}:", json.dumps(submit, ensure_ascii=False))

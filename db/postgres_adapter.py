@@ -582,11 +582,7 @@ class PostgresDatabase(DatabaseInterface):
                         $23, $24
                     )
                     ON CONFLICT (idempotency_key) WHERE idempotency_key IS NOT NULL
-                    DO UPDATE SET
-                        job_id = EXCLUDED.job_id,
-                        operation_name = EXCLUDED.operation_name,
-                        status = EXCLUDED.status,
-                        updated_at = EXCLUDED.updated_at
+                    DO NOTHING
                     """,
                     job.id,
                     job.user_id,

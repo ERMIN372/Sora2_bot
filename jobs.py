@@ -15,6 +15,7 @@ import re
 import time
 import uuid
 from dataclasses import dataclass
+from urllib.parse import urlparse
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Mapping, Optional, Tuple
@@ -79,7 +80,7 @@ ASSET_KIND_IMAGE = "image"
 
 _DOWNLOAD_MAX_ATTEMPTS = 3
 _POLL_MAX_ATTEMPTS = 5
-_POLL_MAX_ATTEMPTS_KLING = 60
+_POLL_MAX_ATTEMPTS_KLING = 180
 _POLL_BACKOFF_BASE = 1.5
 
 _IMAGE_ARTIFACTS_DIR = Path("attached_assets") / "images"
@@ -167,6 +168,24 @@ def _extract_kling_motion_video_reference(*sources: Optional[Mapping[str, Any]])
                 if isinstance(candidate, str) and candidate.strip():
                     return candidate.strip()
     return None
+
+
+def _safe_url_preview(value: Optional[str]) -> str:
+    if not isinstance(value, str) or not value.strip():
+        return ""
+    parsed = urlparse(value.strip())
+    host = parsed.netloc or "inline"
+    path = (parsed.path or "").strip("/")
+    if not path:
+        return f"{host}/***"
+    if len(path) <= 12:
+        return f"{host}/{path}"
+    return f"{host}/{path[:6]}...{path[-6:]}"
+
+
+def _build_retry_idempotency_key(base_key: str) -> str:
+    suffix = f"retry-{int(time.time() * 1000)}-{uuid.uuid4().hex[:8]}"
+    return f"{base_key}:{suffix}"
 
 
 @dataclass(slots=True)
@@ -1046,6 +1065,13 @@ class JobQueue:
         reference_video_url = None
         if _is_kling_provider(provider_key):
             reference_video_url = _extract_kling_motion_video_reference(request_settings, payload)
+            log.info(
+                "kling.motion_ref_persisted corr_id=%s user_id=%s has_video_url=%s video_url=%s source=settings_or_payload",
+                corr_id,
+                user_id,
+                bool(reference_video_url),
+                _safe_url_preview(reference_video_url),
+            )
         stable_idempotency_key = idempotency_key or compute_generation_idempotency_key(
             user_id=user_id,
             prompt=effective_prompt,
@@ -1056,13 +1082,17 @@ class JobQueue:
         existing_job = await self._db.find_job_by_idempotency_key(stable_idempotency_key)
         if existing_job is not None:
             if _should_retry_idempotency(existing_job.status):
+                retry_key = _build_retry_idempotency_key(stable_idempotency_key)
                 log.info(
-                    "Retrying submission after previous failure corr_id=%s user_id=%s existing_job_id=%s status=%s",
+                    "Retrying submission after previous failure corr_id=%s user_id=%s existing_job_id=%s status=%s old_idempotency_key=%s new_idempotency_key=%s",
                     corr_id,
                     user_id,
                     existing_job.id,
                     existing_job.status,
+                    stable_idempotency_key,
+                    retry_key,
                 )
+                stable_idempotency_key = retry_key
             else:
                 log.info(
                     "Duplicate submission suppressed corr_id=%s user_id=%s existing_job_id=%s status=%s",
@@ -1116,6 +1146,13 @@ class JobQueue:
                     request_settings,
                     payload,
                     submission.data if isinstance(submission.data, dict) else None,
+                )
+                log.info(
+                    "kling.motion_ref_persisted corr_id=%s user_id=%s has_video_url=%s video_url=%s source=fallback",
+                    corr_id,
+                    user_id,
+                    bool(reference_video_url),
+                    _safe_url_preview(reference_video_url),
                 )
         submission_payload = submission.data if isinstance(submission.data, dict) else {}
         extras_payload = dict(extra or {})
@@ -1633,6 +1670,47 @@ class JobQueue:
             async def _schedule_retry(provider_key: str) -> None:
                 if attempt + 1 >= max_attempts:
                     final_message = "poll retries exhausted"
+                    if _is_kling_provider(provider_key):
+                        log.warning(
+                            "Polling attempts exhausted but keeping Kling job running job_id=%s corr_id=%s provider=%s attempts=%s",
+                            pending.job_id,
+                            pending.corr_id,
+                            provider_key,
+                            max_attempts,
+                        )
+                        try:
+                            await self._db.update_job(
+                                pending.job_id,
+                                "running",
+                                video_id=pending.video_id,
+                                error="still_in_progress_longer_than_usual",
+                            )
+                        except Exception:
+                            log.exception("Failed to keep Kling job %s as running", pending.job_id)
+                        delay = self._poll_sleep_seconds(provider=provider_key, attempt=attempt)
+                        await asyncio.sleep(delay)
+                        await self.enqueue(
+                            job_id=pending.job_id,
+                            user_id=pending.user_id,
+                            prompt=pending.prompt,
+                            corr_id=pending.corr_id,
+                            size=pending.size,
+                            model=pending.model,
+                            provider=provider_key,
+                            username=pending.username,
+                            original_prompt=pending.original_prompt,
+                            sanitized_prompt=pending.sanitized_prompt,
+                            auto_sanitized=pending.auto_sanitized,
+                            preflight_reason=pending.preflight_reason,
+                            preflight_scope=pending.preflight_scope,
+                            task_type=pending.task_type or ASSET_TASK_RETRIEVE,
+                            asset_kind=asset_kind,
+                            provider_job_id=provider_job_id,
+                            video_id=pending.video_id,
+                            attempt=max(0, max_attempts - 1),
+                            max_attempts=max_attempts,
+                        )
+                        return
                     log.warning(
                         "Polling attempts exhausted job_id=%s corr_id=%s provider=%s attempts=%s",
                         pending.job_id,
@@ -2461,6 +2539,44 @@ class JobQueue:
             else:
                 # Job still running - requeue for later polling
                 if attempt + 1 >= max_attempts:
+                    if _is_kling_provider(provider_key):
+                        log.warning(
+                            "Polling attempts exhausted while running Kling job; keeping running job_id=%s corr_id=%s provider=%s attempts=%s status=%s",
+                            pending.job_id,
+                            pending.corr_id,
+                            provider_key,
+                            max_attempts,
+                            result.status,
+                        )
+                        await self._db.update_job(
+                            pending.job_id,
+                            "running",
+                            video_id=pending.video_id,
+                            error="still_in_progress_longer_than_usual",
+                        )
+                        await asyncio.sleep(self._poll_sleep_seconds(provider=provider_key, attempt=attempt))
+                        await self.enqueue(
+                            job_id=pending.job_id,
+                            user_id=pending.user_id,
+                            prompt=pending.prompt,
+                            corr_id=pending.corr_id,
+                            size=pending.size,
+                            model=pending.model,
+                            provider=provider_key,
+                            username=pending.username,
+                            original_prompt=pending.original_prompt,
+                            sanitized_prompt=pending.sanitized_prompt,
+                            auto_sanitized=pending.auto_sanitized,
+                            preflight_reason=pending.preflight_reason,
+                            preflight_scope=pending.preflight_scope,
+                            task_type=ASSET_TASK_RETRIEVE,
+                            asset_kind=asset_kind,
+                            provider_job_id=provider_job_id,
+                            video_id=pending.video_id,
+                            attempt=max(0, max_attempts - 1),
+                            max_attempts=max_attempts,
+                        )
+                        return
                     final_message = "poll retries exhausted"
                     log.warning(
                         "Polling attempts exhausted while running job_id=%s corr_id=%s provider=%s attempts=%s status=%s",
