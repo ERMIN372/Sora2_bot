@@ -5,6 +5,7 @@ import logging
 import re
 import threading
 import time
+from dataclasses import dataclass
 from typing import Iterable, List, Optional
 
 from google.genai import errors as _genai_errors
@@ -14,10 +15,18 @@ from services.gemini_client import get_media_client, get_text_client
 
 log = logging.getLogger(__name__)
 
-_CACHE_TTL_SECONDS = 300.0
+_CACHE_TTL_SECONDS = 900.0
 _CACHE_LOCK = threading.Lock()
 _CACHE: dict[str, tuple[float, List[str]]] = {}
 _SUPPORTED_PREFIXES = ("veo-3.0-", "veo-3.1-")
+
+
+@dataclass(frozen=True)
+class VeoPreflightResult:
+    available: bool
+    model_id: str
+    api_used: str
+    reason: str
 
 
 def _is_supported_model(name: str) -> bool:
@@ -221,4 +230,43 @@ def list_veo_video_models(config: Config) -> List[str]:
     return list(unique_sorted)
 
 
-__all__ = ["list_models_with_capability", "list_veo_video_models"]
+def preflight_check_veo_model(config: Config, model_id: str) -> VeoPreflightResult:
+    """Check whether *model_id* is available for Veo generation before submit/charge."""
+
+    normalised_model = _normalise_model_name(model_id)
+    mode = (config.gemini_api_mode or "developer").strip().lower()
+    api_used = "vertex-ai" if mode == "vertex" else "generative-language"
+    if mode == "vertex":
+        if not (config.vertex_project_id and config.vertex_location):
+            return VeoPreflightResult(
+                available=False,
+                model_id=normalised_model,
+                api_used=api_used,
+                reason="vertex_not_configured",
+            )
+
+    available = list_veo_video_models(config)
+    if not available:
+        return VeoPreflightResult(
+            available=False,
+            model_id=normalised_model,
+            api_used=api_used,
+            reason="no_models",
+        )
+    lookup = {name.lower(): name for name in available}
+    if normalised_model.lower() not in lookup:
+        return VeoPreflightResult(
+            available=False,
+            model_id=normalised_model,
+            api_used=api_used,
+            reason="model_not_found",
+        )
+    return VeoPreflightResult(
+        available=True,
+        model_id=lookup[normalised_model.lower()],
+        api_used=api_used,
+        reason="ok",
+    )
+
+
+__all__ = ["VeoPreflightResult", "list_models_with_capability", "list_veo_video_models", "preflight_check_veo_model"]

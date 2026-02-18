@@ -132,7 +132,7 @@ from providers.gemini import dump_gemini_case
 from providers.openai_chat import OpenAIChatClient
 from providers.openai_video import OpenAIVideoClient
 import services
-from services.gemini_catalog import list_veo_video_models
+from services.gemini_catalog import list_veo_video_models, preflight_check_veo_model
 
 
 _BASE_DIR = Path(__file__).resolve().parent.parent  # project root
@@ -850,7 +850,7 @@ def _video_model_options(config: Config) -> list[VideoModelOption]:
                 provider_tag = "veo31" if _is_veo31_model(normalised) else "veo"
                 _register(normalised, provider_tag)
         # Always offer veo-3.1 if it wasn't discovered automatically
-        _register("veo-3.1-generate-001", "veo31")
+        _register("veo-3.1-generate-preview", "veo31")
 
     if config.sora_video_enabled:
         default_sora = _normalise_video_model_name(config.sora_model_video)
@@ -3546,6 +3546,20 @@ async def _launch_order(
             "task": task_label,
         },
     )
+
+    if order.category == "video" and _is_veo_context(provider_key, order.product, order.model):
+        veo_preflight = preflight_check_veo_model(config, order.model)
+        log.info(
+            "veo.preflight result available=%s model_id=%s api_used=%s reason=%s",
+            veo_preflight.available,
+            veo_preflight.model_id,
+            veo_preflight.api_used,
+            veo_preflight.reason,
+        )
+        if not veo_preflight.available:
+            await _release_lock("submit_failed", "provider_unavailable")
+            await callback.message.answer(i18n.t("errors.veo_model_unavailable_no_charge"))
+            return
 
     if not await db.deduct_credit(user_id, credits_cost):
         log_event(
