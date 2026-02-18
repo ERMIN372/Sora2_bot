@@ -20,6 +20,9 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Literal, Mapping, Optional, Sequence, Set, Tuple
+from urllib.parse import urlparse
+
+import aiohttp
 
 from aiogram import Bot, Dispatcher
 from aiogram.dispatcher import FSMContext
@@ -140,6 +143,7 @@ from services.gemini_downloader import (
     GeminiKeyMismatchError,
     download_asset,
 )
+from services.download_router import AssetUrlRoute, classify_asset_url
 from services.sora_downloader import SoraDownloadError, download_sora_asset
 from services.error_reporter import ErrorReporter
 from services.status_tracker import StatusMessageManager
@@ -992,6 +996,65 @@ def _infer_category_from_model(model: Optional[str], config: Config) -> str:
     return "video"
 
 
+
+
+def _provider_from_job(job: GenerationJobRecord, config: Config) -> str:
+    extra = getattr(job, "extra", {}) or {}
+    if isinstance(extra, dict):
+        provider = extra.get("provider")
+        if isinstance(provider, str) and provider.strip():
+            return provider.strip().lower()
+    return _provider_for_model(job.model, config)
+
+
+def _mask_asset_url_for_log(url: str) -> str:
+    parsed = urlparse(url)
+    host = parsed.hostname or ""
+    suffix = (parsed.path or "").rsplit("/", 1)[-1]
+    if suffix and len(suffix) > 48:
+        suffix = suffix[:24] + "…" + suffix[-12:]
+    if suffix:
+        return f"{host}/{suffix}"
+    return host or "<unknown>"
+
+
+async def _download_remote_asset_http(
+    *,
+    asset_url: str,
+    config: Config,
+    asset_name: str,
+    mime_hint: Optional[str],
+    filename_hint: Optional[str],
+) -> DownloadedAsset:
+    timeout = aiohttp.ClientTimeout(total=max(20.0, float(config.request_timeout or 20.0)))
+    headers = {"User-Agent": "sora2-bot-delivery/1.0"}
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        try:
+            async with session.get(asset_url, headers=headers) as response:
+                body = await response.read()
+                if response.status >= 400:
+                    raise GeminiDownloadError(
+                        f"Не удалось скачать remote asset: {response.status}",
+                        status_code=response.status,
+                        error_status="HTTP_ERROR",
+                    )
+                mime = (mime_hint or response.headers.get("Content-Type") or "video/mp4").strip()
+                parsed = urlparse(asset_url)
+                fallback_name = (parsed.path or "").rstrip("/").rsplit("/", 1)[-1]
+                filename = filename_hint or fallback_name or f"{asset_name}.mp4"
+                return DownloadedAsset(
+                    content=body,
+                    mime=mime,
+                    filename=filename,
+                    size=len(body),
+                    key_mask="",
+                )
+        except aiohttp.ClientError as exc:
+            raise GeminiDownloadError(
+                "Сетевая ошибка при скачивании remote asset",
+                status_code=0,
+                error_status="NETWORK_ERROR",
+            ) from exc
 def _provider_for_model(model: Optional[str], config: Config) -> str:
     name = _normalise_video_model_name(model or "")
     if name and _is_veo_video_model_name(name):
@@ -4791,8 +4854,13 @@ async def _deliver_remote_media(
         )
         return None
     expected_mask = _expected_key_mask(job)
-    provider_key = _provider_for_model(job.model, config)
+    provider_key = _provider_from_job(job, config)
     target_media = (job.content_type or "video").lower()
+    asset_route = (
+        AssetUrlRoute.GENERIC_HTTP
+        if asset_reference.startswith("/tmp/")
+        else classify_asset_url(str(asset_reference))
+    )
 
     if asset_reference.startswith("/tmp/"):
         from pathlib import Path
@@ -4841,6 +4909,101 @@ async def _deliver_remote_media(
             )
             return None
     else:
+        masked_asset = _mask_asset_url_for_log(str(asset_reference))
+        log.info(
+            "delivery.download route=%s provider=%s job_id=%s asset=%s",
+            asset_route.value,
+            provider_key,
+            job.id,
+            masked_asset,
+        )
+
+        if config.delivery_mode == "link":
+            message = await dp.bot.send_message(
+                job.user_id,
+                i18n.t("status.completed_file") + "\n" + str(asset_reference),
+                disable_web_page_preview=True,
+            )
+            increment_metric("delivery_success")
+            log_event(
+                level="INFO",
+                event="delivery",
+                corr_id=job.corr_id,
+                job_id=job.id,
+                user_id=job.user_id,
+                username=job.username,
+                model=job.model,
+                provider=provider_key,
+                size=job.size,
+                extra={
+                    "delivery_method": "link",
+                    "delivery_route": asset_route.value,
+                    "archive_status": "skipped",
+                },
+            )
+            return SentMediaInfo(
+                message=message,
+                method="document",
+                file_id="",
+                file_size=0,
+                duration_seconds=None,
+                mime_type=mime_hint,
+                file_bytes=None,
+                filename=filename_hint,
+            )
+
+        if (
+            asset_route == AssetUrlRoute.FAL_MEDIA_HTTP
+            and target_media != "image"
+            and str(asset_reference).startswith(("http://", "https://"))
+        ):
+            try:
+                message = await dp.bot.send_video(
+                    job.user_id,
+                    str(asset_reference),
+                    supports_streaming=True,
+                    duration=_extract_video_duration(job) or None,
+                )
+                increment_metric("delivery_success")
+                log_event(
+                    level="INFO",
+                    event="delivery",
+                    corr_id=job.corr_id,
+                    job_id=job.id,
+                    user_id=job.user_id,
+                    username=job.username,
+                    model=job.model,
+                    provider=provider_key,
+                    size=job.size,
+                    extra={
+                        "delivery_method": "video_url",
+                        "delivery_route": asset_route.value,
+                        "archive_status": "pending",
+                    },
+                )
+                video = message.video
+                file_size = video.file_size if video else 0
+                duration_seconds = video.duration if video else _extract_video_duration(job)
+                return SentMediaInfo(
+                    message=message,
+                    method="video",
+                    file_id=video.file_id if video else "",
+                    file_size=file_size or 0,
+                    duration_seconds=duration_seconds,
+                    mime_type=mime_hint or "video/mp4",
+                    file_bytes=None,
+                    filename=filename_hint or "video.mp4",
+                )
+            except TelegramAPIError:
+                log.warning(
+                    "delivery.video_url_failed route=%s provider=%s job_id=%s asset=%s",
+                    asset_route.value,
+                    provider_key,
+                    job.id,
+                    masked_asset,
+                    exc_info=True,
+                )
+
         try:
             if provider_key == "sora":
                 downloaded = await download_sora_asset(
@@ -4852,13 +5015,21 @@ async def _deliver_remote_media(
                     mime_hint=mime_hint,
                     filename_hint=filename_hint,
                 )
-            else:
+            elif asset_route == AssetUrlRoute.GEMINI_FILE_API:
                 downloaded = await download_asset(
                     asset_url=str(asset_reference),
                     config=config,
                     corr_id=corr_id or "",
                     asset_name=asset_name,
                     expected_mask=expected_mask,
+                    mime_hint=mime_hint,
+                    filename_hint=filename_hint,
+                )
+            else:
+                downloaded = await _download_remote_asset_http(
+                    asset_url=str(asset_reference),
+                    config=config,
+                    asset_name=asset_name,
                     mime_hint=mime_hint,
                     filename_hint=filename_hint,
                 )
@@ -4917,8 +5088,9 @@ async def _deliver_remote_media(
             return None
         except GeminiDownloadError as exc:
             log.warning(
-                "Gemini download failed corr_id=%s status=%s error=%s",
+                "download failed corr_id=%s route=%s status=%s error=%s",
                 corr_id,
+                asset_route.value,
                 exc.status_code,
                 exc.error_status,
             )
@@ -4933,11 +5105,11 @@ async def _deliver_remote_media(
                 extra_log={
                     "status_code": exc.status_code,
                     "error_status": exc.error_status,
+                    "delivery_route": asset_route.value,
                 },
                 key_mask=expected_mask,
             )
             return None
-
     if downloaded.size <= 0:
         log.warning(
             "Downloaded asset is empty provider=%s job_id=%s corr_id=%s",
@@ -5156,7 +5328,7 @@ async def _deliver_remote_media(
             if provider_key == "sora"
             else i18n.t("status.delivery_generic")
         )
-        extra_payload = {"asset_bytes": downloaded.size, **error_details}
+        extra_payload = {"asset_bytes": downloaded.size, "delivery_route": asset_route.value, **error_details}
         await _handle_delivery_failure(
             dp,
             job,
@@ -5196,6 +5368,7 @@ async def _deliver_remote_media(
                 "asset_bytes": downloaded.size,
                 "telegram_exception": exc.__class__.__name__,
                 "telegram_error_message": generic_error,
+                "delivery_route": asset_route.value,
             },
             key_mask=downloaded.key_mask or expected_mask,
         )
@@ -5245,6 +5418,7 @@ async def _deliver_remote_media(
             "gemini_key_mask": downloaded.key_mask or expected_mask,
             "archive_status": "pending",
             "duration_seconds": duration_seconds,
+            "delivery_route": asset_route.value,
         },
     )
     return SentMediaInfo(
@@ -5306,7 +5480,7 @@ async def _handle_delivery_failure(
         stage = "poll"
     status_code_value = None
     provider_error_code = ""
-    provider_key = _provider_for_model(job.model, config)
+    provider_key = _provider_from_job(job, config)
     if isinstance(extra_log, dict):
         raw_status = extra_log.get("status_code")
         if isinstance(raw_status, int):
