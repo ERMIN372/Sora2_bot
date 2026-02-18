@@ -25,14 +25,16 @@ SUBMIT_MODELS = {
 }
 
 
-def _request(method: str, url: str, api_key: str, payload: dict | None = None) -> dict:
+def _request(method: str, url: str, api_key: str, payload: dict | None = None) -> tuple[int, dict]:
     body = None if payload is None else json.dumps(payload).encode("utf-8")
     req = Request(url=url, data=body, method=method)
     req.add_header("Authorization", f"Key {api_key}")
-    req.add_header("Content-Type", "application/json")
+    if body is not None:
+        req.add_header("Content-Type", "application/json")
     with urlopen(req, timeout=60) as resp:
+        status_code = int(resp.status)
         raw = resp.read().decode("utf-8")
-    return json.loads(raw) if raw else {}
+    return status_code, (json.loads(raw) if raw else {})
 
 
 def main() -> int:
@@ -65,23 +67,33 @@ def main() -> int:
         payload["input"]["prompt"] = args.prompt.strip()
 
     print("[submit]", submit_url)
-    submit = _request("POST", submit_url, api_key, payload)
+    submit_status, submit = _request("POST", submit_url, api_key, payload)
     request_id = submit.get("request_id")
-    print("submit:", json.dumps(submit, ensure_ascii=False))
+    print(f"submit status={submit_status}:", json.dumps(submit, ensure_ascii=False))
     if not request_id:
         raise SystemExit("No request_id in submit response")
 
-    status_url = f"{QUEUE_BASE}/{submit_model}/requests/{request_id}/status"
-    result_url = f"{QUEUE_BASE}/{submit_model}/requests/{request_id}"
+    status_url = submit.get("status_url") or f"{QUEUE_BASE}/fal-ai/kling-video/requests/{request_id}/status"
+    response_url = submit.get("response_url") or f"{QUEUE_BASE}/fal-ai/kling-video/requests/{request_id}"
+    print(f"queue urls: status_url={status_url} response_url={response_url}")
 
+    start = time.monotonic()
     for i in range(1, args.max_polls + 1):
         time.sleep(args.poll_interval)
-        status_data = _request("POST", status_url, api_key)
-        status = (status_data.get("status") or "").lower()
-        print(f"poll#{i} status={status} queue={status_data.get('queue_position')}")
-        if status == "completed":
-            result = _request("GET", result_url, api_key)
-            print("result:", json.dumps(result, ensure_ascii=False))
+        status_code, status_data = _request("GET", status_url, api_key)
+        status = str(status_data.get("status") or "").lower()
+        elapsed = time.monotonic() - start
+        if status_data.get("response_url"):
+            response_url = status_data["response_url"]
+        print(
+            f"poll#{i} t={elapsed:.1f}s code={status_code} status={status} "
+            f"queue={status_data.get('queue_position')} request_id={request_id}"
+        )
+        if status_code == 202 or status in {"in_queue", "in_progress", "running"}:
+            continue
+        if status_code == 200 and status == "completed":
+            result_code, result = _request("GET", response_url, api_key)
+            print(f"result status={result_code}:", json.dumps(result, ensure_ascii=False))
             return 0
         if status == "failed":
             print("failed:", json.dumps(status_data, ensure_ascii=False))

@@ -33,7 +33,7 @@ FAL_KLING_MODEL_STANDARD = "fal-ai/kling-video/v2.6/standard/motion-control"
 FAL_KLING_MODEL_PRO = "fal-ai/kling-video/v2.6/pro/motion-control"
 FAL_KLING_MODEL_BASE = "fal-ai/kling-video"
 FAL_KLING_MODEL = FAL_KLING_MODEL_STANDARD  # back-compat alias for tests/imports
-KLING_FAL_IMPL_REV = "kling-fal-queue-splitpath-v4"
+KLING_FAL_IMPL_REV = "kling-fal-queue-splitpath-v6"
 
 DEFAULT_MODE = "std"  # std = 720p, pro = 1080p
 _ALLOWED_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".avif"}
@@ -44,15 +44,30 @@ _ALLOWED_ORIENTATION = {"image", "video"}
 _STATUS_MAP: Dict[str, str] = {
     "in_queue": "running",
     "in_progress": "running",
+    "running": "running",
     "completed": "completed",
     "failed": "failed",
 }
+
+_RUNNING_STATUSES = {"in_queue", "in_progress", "running"}
+_COMPLETED_STATUSES = {"completed"}
+_FAILED_STATUSES = {"failed", "error", "errored", "cancelled", "canceled"}
+_EARLY_RESULT_MISSING_FIELDS = {"image_url", "video_url", "character_orientation"}
 
 
 def _mask(value: str, visible: int = 4) -> str:
     if len(value) <= visible:
         return "***"
     return value[:visible] + "***"
+
+
+def _mask_url(value: Optional[str], visible: int = 18) -> str:
+    if not isinstance(value, str) or not value.strip():
+        return ""
+    candidate = value.strip()
+    if len(candidate) <= visible:
+        return "***"
+    return candidate[:visible] + "***"
 
 
 def _is_balance_error(text: Optional[str]) -> bool:
@@ -108,6 +123,27 @@ class KlingVideoClient(BaseProviderClient):
             _mask(self._fal_key),
             KLING_FAL_IMPL_REV,
         )
+
+    def _queue_target(self, url_or_path: Optional[str], *, fallback: str) -> str:
+        candidate = str(url_or_path or "").strip()
+        if not candidate:
+            return fallback
+        if candidate.startswith("http://") or candidate.startswith("https://"):
+            parsed = urlparse(candidate)
+            base = urlparse(self._base_url)
+            if parsed.scheme != base.scheme or parsed.netloc != base.netloc:
+                log.warning(
+                    "kling.queue_url_host_mismatch requested=%s expected_base=%s using_fallback=%s",
+                    candidate,
+                    self._base_url,
+                    fallback,
+                )
+                return fallback
+            path = parsed.path or "/"
+            if parsed.query:
+                path = f"{path}?{parsed.query}"
+            return path
+        return candidate
 
     def _build_headers(self) -> Dict[str, str]:
         # Content-Type is required even for GET requests so that fal.ai
@@ -377,7 +413,7 @@ class KlingVideoClient(BaseProviderClient):
                     ),
                 )
 
-            body: Dict[str, Any] = {
+            input_payload: Dict[str, Any] = {
                 "image_url": image_url,
                 "video_url": video_url,
                 "character_orientation": character_orientation,
@@ -385,10 +421,24 @@ class KlingVideoClient(BaseProviderClient):
             }
 
             if prompt and prompt.strip():
-                body["prompt"] = prompt.strip()[:2500]
+                input_payload["prompt"] = prompt.strip()[:2500]
 
             request_idempotency_key = str(idempotency_key or uuid.uuid4())
-            body["idempotency_key"] = request_idempotency_key
+            input_payload["idempotency_key"] = request_idempotency_key
+            submit_payload = {"input": input_payload}
+
+            input_block = submit_payload.get("input")
+            input_keys = sorted(input_block.keys()) if isinstance(input_block, dict) else []
+            log.debug(
+                "kling.submit_payload has_input=%s input_keys=%s has_image_url=%s has_video_url=%s has_character_orientation=%s image_url=%s video_url=%s",
+                isinstance(input_block, dict),
+                input_keys,
+                bool(input_block.get("image_url")) if isinstance(input_block, dict) else False,
+                bool(input_block.get("video_url")) if isinstance(input_block, dict) else False,
+                bool(input_block.get("character_orientation")) if isinstance(input_block, dict) else False,
+                _mask_url(input_block.get("image_url")) if isinstance(input_block, dict) else "",
+                _mask_url(input_block.get("video_url")) if isinstance(input_block, dict) else "",
+            )
 
             log.info(
                 "kling.enqueue model=%s mode=%s has_image_url=%s has_video_url=%s keep_original_sound=%s prompt_len=%s duration_seconds=%.2f",
@@ -396,7 +446,7 @@ class KlingVideoClient(BaseProviderClient):
                 mode,
                 bool(image_url),
                 bool(video_url),
-                body.get("keep_original_sound"),
+                input_payload.get("keep_original_sound"),
                 len(prompt or ""),
                 duration_seconds,
             )
@@ -404,7 +454,7 @@ class KlingVideoClient(BaseProviderClient):
             data, status_code, duration_ms = await self._request_with_legacy_fallback(
                 "POST",
                 f"/{submit_model}",
-                json_payload={"input": body},
+                json_payload=submit_payload,
             )
         except ProviderAPIError as exc:
             ffprobe_hint = f"{exc.message or ''} {exc.provider_message or ''}".lower()
@@ -441,14 +491,21 @@ class KlingVideoClient(BaseProviderClient):
                 provider_message=json.dumps(data, ensure_ascii=False),
             )
 
-        self._cache[task_id] = data
+        self._cache[task_id] = {
+            **data,
+            "request_id": str(task_id),
+            "status_url": data.get("status_url"),
+            "response_url": data.get("response_url"),
+        }
         self._submit_models[task_id] = submit_model
         log.info(
-            "kling.enqueue success task_id=%s status_code=%s duration_ms=%s submit_model=%s cached_keys=%s",
+            "kling.enqueue success task_id=%s status_code=%s duration_ms=%s submit_model=%s status_url=%s response_url=%s cached_keys=%s",
             task_id,
             status_code,
             duration_ms,
             submit_model,
+            data.get("status_url") or "",
+            data.get("response_url") or "",
             list(data.keys()),
         )
         return ProviderJobSubmission(
@@ -491,6 +548,15 @@ class KlingVideoClient(BaseProviderClient):
             status_path,
         )
         status = self._extract_status(data)
+        error = self._extract_error(data)
+        assets = self._extract_assets(data)
+        polled_status = status
+        state, should_fetch_result, _retry_after_seconds = self._poll_status(
+            status_code=status_code,
+            status=status,
+            error=error,
+            assets=assets,
+        )
 
         if status == "completed":
             result_path = f"/{FAL_KLING_MODEL_BASE}/requests/{job_id}"
@@ -499,13 +565,45 @@ class KlingVideoClient(BaseProviderClient):
                 "GET",
                 result_path,
             )
-            self._cache[job_id] = result_data
-            data = result_data
+            try:
+                result_data, _, _ = await self.fetch_result(job_id=job_id, result_path=result_path)
+            except ProviderAPIError as exc:
+                if self._is_early_result_error(exc):
+                    log.info(
+                        "kling.result_not_ready job_id=%s status_code=%s message=%s",
+                        job_id,
+                        exc.status_code,
+                        (exc.message or "")[:300],
+                    )
+                    self._cache[job_id] = data
+                    status = "running"
+                    error = None
+                    assets = {}
+                else:
+                    raise
+            else:
+                if isinstance(data, dict):
+                    result_data.setdefault("status_url", data.get("status_url"))
+                    result_data.setdefault("response_url", data.get("response_url"))
+                    result_data.setdefault("request_id", data.get("request_id") or job_id)
+                self._cache[job_id] = result_data
+                data = result_data
+                status = self._extract_status(data)
+                error = self._extract_error(data)
+                assets = self._extract_assets(data)
+                if polled_status == "completed" and status == "running" and not error:
+                    status = "completed"
+                if status == "completed" and not assets and not error:
+                    log.info(
+                        "kling.result_pending_media job_id=%s result_path=%s",
+                        job_id,
+                        result_path,
+                    )
+                    status = "running"
         else:
             self._cache[job_id] = data
-
-        error = self._extract_error(data)
-        assets = self._extract_assets(data)
+            if state == "running":
+                status = "running"
 
         log.info(
             "kling.status task_id=%s request_id=%s status=%s queue_position=%s assets=%s duration_ms=%s status_path=%s error=%s",
@@ -527,6 +625,53 @@ class KlingVideoClient(BaseProviderClient):
             status_code=status_code,
             duration_ms=duration_ms,
         )
+
+    async def poll_status(self, *, job_id: str, status_path: str) -> tuple[Dict[str, Any], int, int]:
+        """Single status polling request for queue state."""
+
+        data, status_code, duration_ms = await self._request_with_legacy_fallback("GET", status_path)
+        status_value = data.get("status") if isinstance(data, dict) else None
+        log.info(
+            "kling.status_parsed status_code=%s status=%s job_id=%s",
+            status_code,
+            status_value,
+            job_id,
+        )
+        return data, status_code, duration_ms
+
+    async def fetch_result(self, *, job_id: str, result_path: str) -> tuple[Dict[str, Any], int, int]:
+        """Fetch queue response payload only after completed state."""
+
+        log.info("kling.result_fetch job_id=%s result_path=%s", job_id, result_path)
+        return await self._request_with_legacy_fallback("GET", result_path)
+
+    def _is_early_result_error(self, exc: ProviderAPIError) -> bool:
+        if exc.status_code == 400:
+            return True
+        return False
+
+    def _poll_status(
+        self,
+        *,
+        status_code: int,
+        status: str,
+        error: Optional[str],
+        assets: Dict[str, str],
+    ) -> tuple[str, bool, float]:
+        """Return (state, should_fetch_result, retry_after_seconds) for queue polling."""
+
+        normalised = (status or "").strip().lower()
+        if error:
+            return "failed", False, 0.0
+        if status_code == 202 or normalised in _RUNNING_STATUSES:
+            return "running", False, 2.0
+        if status_code == 200 and normalised in _COMPLETED_STATUSES:
+            if assets:
+                return "completed", False, 0.0
+            return "completed", True, 0.0
+        if normalised in _FAILED_STATUSES:
+            return "failed", False, 0.0
+        return "running", False, 2.0
 
     async def download_content(self, video_id: str, format: str = "mp4") -> Path:
         """Download video from the asset URL stored in cache."""

@@ -1,4 +1,5 @@
 """Background job queue for video generation."""
+
 from __future__ import annotations
 
 import asyncio
@@ -78,7 +79,7 @@ ASSET_KIND_IMAGE = "image"
 
 _DOWNLOAD_MAX_ATTEMPTS = 3
 _POLL_MAX_ATTEMPTS = 5
-_POLL_MAX_ATTEMPTS_KLING = 24
+_POLL_MAX_ATTEMPTS_KLING = 60
 _POLL_BACKOFF_BASE = 1.5
 
 _IMAGE_ARTIFACTS_DIR = Path("attached_assets") / "images"
@@ -147,6 +148,10 @@ def _poll_max_attempts_for_provider(*, provider: Optional[str], default_attempts
     return default_attempts
 
 
+def _is_kling_provider(provider: Optional[str]) -> bool:
+    return (provider or "").strip().lower().startswith("kling")
+
+
 @dataclass(slots=True)
 class _FallbackSubmissionResult:
     submission: ProviderJobSubmission
@@ -206,13 +211,17 @@ def _store_image_artifacts(job_id: str, assets: List[Dict[str, Any]]) -> List[Di
             with path.open("wb") as handle:
                 handle.write(payload)
         except Exception:
-            log.warning("Failed to persist image artifact job_id=%s path=%s", job_id, path, exc_info=True)
+            log.warning(
+                "Failed to persist image artifact job_id=%s path=%s", job_id, path, exc_info=True
+            )
             continue
-        stored.append({
-            "path": str(path),
-            "mime": mime,
-            "bytes": len(payload),
-        })
+        stored.append(
+            {
+                "path": str(path),
+                "mime": mime,
+                "bytes": len(payload),
+            }
+        )
     return stored
 
 
@@ -229,18 +238,22 @@ def hydrate_image_artifacts(job_id: str) -> List[Dict[str, Any]]:
         try:
             payload = path.read_bytes()
         except Exception:
-            log.warning("Failed to read image artifact job_id=%s path=%s", job_id, path, exc_info=True)
+            log.warning(
+                "Failed to read image artifact job_id=%s path=%s", job_id, path, exc_info=True
+            )
             continue
         mime = mimetypes.guess_type(str(path))[0] or "image/png"
         encoded = base64.b64encode(payload).decode("ascii")
         data_uri = f"data:{mime};base64,{encoded}"
-        artifacts.append({
-            "kind": "image",
-            "mime": mime,
-            "bytes": len(payload),
-            "data_uri": data_uri,
-            "path": str(path),
-        })
+        artifacts.append(
+            {
+                "kind": "image",
+                "mime": mime,
+                "bytes": len(payload),
+                "data_uri": data_uri,
+                "path": str(path),
+            }
+        )
     return artifacts
 
 
@@ -399,9 +412,15 @@ def _map_error_reason(
         http_status = next(iter(numeric_codes))
     if upper_codes.intersection({"PERMISSION_DENIED", "SERVICE_DISABLED"}) or http_status == 403:
         return "api_access_disabled"
-    if any("RESOURCE_EXHAUSTED" in code or "QUOTA" in code for code in upper_codes) or http_status == 429:
+    if (
+        any("RESOURCE_EXHAUSTED" in code or "QUOTA" in code for code in upper_codes)
+        or http_status == 429
+    ):
         return "service_busy"
-    if upper_codes.intersection({"INVALID_ARGUMENT", "FAILED_PRECONDITION"}) or http_status in {400, 422}:
+    if upper_codes.intersection({"INVALID_ARGUMENT", "FAILED_PRECONDITION"}) or http_status in {
+        400,
+        422,
+    }:
         return "invalid_request"
     if upper_codes.intersection({"INTERNAL", "UNAVAILABLE"}) or (
         http_status is not None and http_status >= 500
@@ -445,9 +464,9 @@ def _build_failure_reason(
         provider_error_message = "operation timed out"
     reason_code = _map_error_reason(status_code, tuple(codes), provider_timeout=provider_timeout)
     fallback_text = (fallback_message or "").strip()
-    user_message = fallback_text or _REASON_MESSAGES.get(reason_code) or _REASON_MESSAGES[
-        "provider_error"
-    ]
+    user_message = (
+        fallback_text or _REASON_MESSAGES.get(reason_code) or _REASON_MESSAGES["provider_error"]
+    )
     return _FailureReason(
         reason=reason_code,
         user_message=user_message,
@@ -529,7 +548,9 @@ class JobQueue:
         self._queue: asyncio.Queue[PendingJob] = asyncio.Queue()
         self._workers: list[asyncio.Task[None]] = []
         self._stopped = asyncio.Event()
-        self._notification_callbacks: Dict[str, Callable[[GenerationJobRecord], Awaitable[None]]] = {}
+        self._notification_callbacks: Dict[
+            str, Callable[[GenerationJobRecord], Awaitable[None]]
+        ] = {}
         self._environment = (config.environment or "dev").lower()
         self._debug_enabled = bool(getattr(config, "debug_gemini", False))
         if self._debug_enabled and log.getEffectiveLevel() > logging.DEBUG:
@@ -574,9 +595,7 @@ class JobQueue:
     def _debug_event(self, name: str, **details: Any) -> None:
         try:
             payload = {
-                key: value
-                for key, value in details.items()
-                if value not in (None, "", [], {}, ())
+                key: value for key, value in details.items() if value not in (None, "", [], {}, ())
             }
             message = json.dumps(payload, ensure_ascii=False, sort_keys=True)
         except Exception:
@@ -755,6 +774,14 @@ class JobQueue:
         high = max(high_value, low)
         return random.uniform(low, high)
 
+    def _poll_sleep_seconds(self, *, provider: Optional[str], attempt: int = 0) -> float:
+        delay = self._poll_interval_seconds()
+        if _is_kling_provider(provider):
+            delay = max(delay, 3.0)
+        if attempt > 0:
+            delay *= _POLL_BACKOFF_BASE**attempt
+        return min(delay, 60.0)
+
     def _ensure_operation_tracker(
         self,
         *,
@@ -930,7 +957,6 @@ class JobQueue:
         increment_metric("veo_running_timeout_total")
         increment_metric("veo_failed_total", tags={"reason": reason_code})
         await self._release_gate(pending, reason="provider_timeout", status="timeout")
-
 
     async def start(self) -> None:
         if self._workers:
@@ -1142,7 +1168,9 @@ class JobQueue:
 
         job_id = submission.job_id
         video_id = _extract_video_id(submission.data, client=client)
-        operation_name = submission_payload.get("operation_name") if isinstance(submission.data, dict) else None
+        operation_name = (
+            submission_payload.get("operation_name") if isinstance(submission.data, dict) else None
+        )
         record = GenerationJobRecord(
             id=job_id,
             user_id=user_id,
@@ -1195,7 +1223,11 @@ class JobQueue:
             user_id,
             self._queue.qsize(),
         )
-        gemini_mask = self._gemini_key_mask if provider_key.startswith("veo") or provider_key.startswith("gemini") else ""
+        gemini_mask = (
+            self._gemini_key_mask
+            if provider_key.startswith("veo") or provider_key.startswith("gemini")
+            else ""
+        )
         log_event(
             level="INFO",
             event="request",
@@ -1253,7 +1285,9 @@ class JobQueue:
         extras_payload = dict(extra or {})
         existing = await self._db.get_job(job_id)
         asset_kind = (
-            ASSET_KIND_IMAGE if (content_type or "video").strip().lower() == "image" else ASSET_KIND_VIDEO
+            ASSET_KIND_IMAGE
+            if (content_type or "video").strip().lower() == "image"
+            else ASSET_KIND_VIDEO
         )
         if existing is not None:
             if extras_payload:
@@ -1359,15 +1393,22 @@ class JobQueue:
                 "preflight_scope": preflight_scope,
                 "preflight_auto_sanitized": auto_sanitized,
                 "video_id": video_id,
-                **({} if not extras_payload else {
-                    key: value for key, value in extras_payload.items() if key not in {
-                        "preflight_blocked",
-                        "preflight_reason",
-                        "preflight_scope",
-                        "preflight_auto_sanitized",
-                        "video_id",
+                **(
+                    {}
+                    if not extras_payload
+                    else {
+                        key: value
+                        for key, value in extras_payload.items()
+                        if key
+                        not in {
+                            "preflight_blocked",
+                            "preflight_reason",
+                            "preflight_scope",
+                            "preflight_auto_sanitized",
+                            "video_id",
+                        }
                     }
-                }),
+                ),
             },
         )
         return record
@@ -1452,11 +1493,7 @@ class JobQueue:
             )
             model_lower = (job.model or "").strip().lower()
             has_timestamp = bool(job.created_at and job.created_at > epoch)
-            if (
-                model_lower.startswith("veo")
-                and has_timestamp
-                and job.created_at < stale_cutoff
-            ):
+            if model_lower.startswith("veo") and has_timestamp and job.created_at < stale_cutoff:
                 message = "Veo operation not accessible; marked failed on startup"
                 log.warning(
                     "Marking stale Veo pending job as failed job_id=%s created_at=%s",
@@ -1593,8 +1630,7 @@ class JobQueue:
                     )
                     return
 
-                delay = self._poll_interval_seconds() * (_POLL_BACKOFF_BASE ** attempt)
-                delay = min(delay, 60.0)
+                delay = self._poll_sleep_seconds(provider=provider_key, attempt=attempt)
                 await asyncio.sleep(delay)
                 await self.enqueue(
                     job_id=pending.job_id,
@@ -1617,6 +1653,7 @@ class JobQueue:
                     attempt=attempt + 1,
                     max_attempts=max_attempts,
                 )
+
             try:
                 log.debug(
                     "Polling provider job job_id=%s provider_job=%s provider=%s corr_id=%s",
@@ -1634,7 +1671,9 @@ class JobQueue:
                     status=result.status,
                     status_code=result.status_code,
                     inline_assets=len(
-                        result.data.get("inline_assets", []) if isinstance(result.data, dict) else []
+                        result.data.get("inline_assets", [])
+                        if isinstance(result.data, dict)
+                        else []
                     ),
                     assets=len(result.assets),
                     error=result.error,
@@ -1643,7 +1682,9 @@ class JobQueue:
             except ProviderAPIError as exc:
                 error_code_upper = (exc.error_code or exc.error_type or "").upper()
                 non_retryable = {403}
-                is_permission_denied = exc.status_code in non_retryable or error_code_upper == "PERMISSION_DENIED"
+                is_permission_denied = (
+                    exc.status_code in non_retryable or error_code_upper == "PERMISSION_DENIED"
+                )
                 is_veo_poll = is_veo_provider and task_type == ASSET_TASK_RETRIEVE
                 if is_permission_denied and is_veo_poll:
                     terminal_reason = "provider_forbidden"
@@ -1725,7 +1766,9 @@ class JobQueue:
                 }
                 if is_client_error:
                     terminal_reason = "invalid_request"
-                    terminal_message = f"Provider rejected request ({exc.status_code}); not retryable"
+                    terminal_message = (
+                        f"Provider rejected request ({exc.status_code}); not retryable"
+                    )
                     log.warning(
                         "poll_terminal_client_error job_id=%s corr_id=%s provider=%s status_code=%s message=%s provider_message=%s",
                         pending.job_id,
@@ -1856,13 +1899,22 @@ class JobQueue:
 
             provider_request_id = str(provider_data.get("request_id") or "").strip()
             if provider_request_id and provider_request_id != provider_job_id:
-                log.info(
-                    "jobs.poll provider_request_id_switch job_id=%s old_provider_job_id=%s new_provider_job_id=%s",
-                    pending.job_id,
-                    provider_job_id,
-                    provider_request_id,
-                )
-                provider_job_id = provider_request_id
+                if task_type == ASSET_TASK_RETRIEVE or provider_key == "kling":
+                    log.error(
+                        "jobs.poll unexpected_request_id_on_status job_id=%s provider=%s provider_job_id=%s incoming_request_id=%s",
+                        pending.job_id,
+                        provider_key,
+                        provider_job_id,
+                        provider_request_id,
+                    )
+                else:
+                    log.info(
+                        "jobs.poll provider_request_id_switch job_id=%s old_provider_job_id=%s new_provider_job_id=%s",
+                        pending.job_id,
+                        provider_job_id,
+                        provider_request_id,
+                    )
+                    provider_job_id = provider_request_id
 
             raw_inline = provider_data.get("inline_assets") if provider_data else []
             inline_assets = (
@@ -1902,8 +1954,7 @@ class JobQueue:
                 data_uri = provider_payload.get("data_uri")
                 if isinstance(data_uri, str):
                     already_inline = any(
-                        isinstance(asset.get("data_uri"), str)
-                        and asset.get("data_uri") == data_uri
+                        isinstance(asset.get("data_uri"), str) and asset.get("data_uri") == data_uri
                         for asset in inline_assets
                     )
                     if not already_inline:
@@ -1969,7 +2020,9 @@ class JobQueue:
                 if isinstance(payload_source, dict):
                     raw_candidates = payload_source.get("candidates")
                     if isinstance(raw_candidates, list):
-                        candidates_payload = [candidate for candidate in raw_candidates if isinstance(candidate, dict)]
+                        candidates_payload = [
+                            candidate for candidate in raw_candidates if isinstance(candidate, dict)
+                        ]
                 finish_reason = ""
                 if candidates_payload:
                     primary = candidates_payload[0]
@@ -2124,7 +2177,7 @@ class JobQueue:
             )
             if result.status == "completed":
                 self._reset_operation_tracker(pending.job_id)
-                
+
                 video_url_value = asset_value or asset_label_display or ""
                 display_label = asset_label_display or video_url_value or ""
                 log.debug(
@@ -2152,7 +2205,7 @@ class JobQueue:
                 if pending.video_id:
                     done_extra["video_id"] = pending.video_id
                 done_extra["video_label"] = display_label
-                
+
                 download_handler = getattr(client, "download_content", None)
                 if callable(download_handler) and pending.video_id:
                     handled = await self._handle_inline_download(
@@ -2404,7 +2457,7 @@ class JobQueue:
                     )
                     return
                 log.debug(
-                    "Job still running job_id=%s corr_id=%s provider=%s status=%s requeueing", 
+                    "Job still running job_id=%s corr_id=%s provider=%s status=%s requeueing",
                     pending.job_id,
                     pending.corr_id,
                     provider_key,
@@ -2415,7 +2468,7 @@ class JobQueue:
                     result.status,
                     video_id=pending.video_id,
                 )
-                await asyncio.sleep(self._poll_interval_seconds())
+                await asyncio.sleep(self._poll_sleep_seconds(provider=provider_key))
                 await self.enqueue(
                     job_id=pending.job_id,
                     user_id=pending.user_id,
@@ -2441,9 +2494,11 @@ class JobQueue:
         finally:
             job = await self._db.get_job(pending.job_id)
             if job:
-                if "payload" not in job_extra and isinstance(
-                    job_extra.get("provider_data"), dict
-                ) and "payload" in job_extra["provider_data"]:
+                if (
+                    "payload" not in job_extra
+                    and isinstance(job_extra.get("provider_data"), dict)
+                    and "payload" in job_extra["provider_data"]
+                ):
                     job_extra["payload"] = job_extra["provider_data"]["payload"]
                 if job_extra:
                     job.extra.update(job_extra)
@@ -2684,7 +2739,11 @@ class JobQueue:
         content_type = ""
         if isinstance(headers, dict):
             for key, value in headers.items():
-                if isinstance(key, str) and key.lower() == "content-type" and isinstance(value, str):
+                if (
+                    isinstance(key, str)
+                    and key.lower() == "content-type"
+                    and isinstance(value, str)
+                ):
                     content_type = value
                     break
         download_meta["bytes"] = size_bytes
@@ -2998,7 +3057,9 @@ class JobQueue:
         except Exception:
             log.exception("Refunding credits failed for no-media job %s", pending.job_id)
 
-        snippet_source: Any = provider_data.get("operation") if isinstance(provider_data, dict) else None
+        snippet_source: Any = (
+            provider_data.get("operation") if isinstance(provider_data, dict) else None
+        )
         if not isinstance(snippet_source, dict):
             snippet_source = provider_data
         try:
@@ -3038,14 +3099,16 @@ class JobQueue:
                 "gsheets_ok": sheet_ok,
                 "provider": provider_key,
                 "operation_snippet": operation_snippet,
-                "assets_recovery_attempted": provider_data.get(
-                    "assets_recovery_attempted"
-                )
-                if isinstance(provider_data, dict)
-                else None,
-                "no_media_confirmed": provider_data.get("no_media_confirmed")
-                if isinstance(provider_data, dict)
-                else None,
+                "assets_recovery_attempted": (
+                    provider_data.get("assets_recovery_attempted")
+                    if isinstance(provider_data, dict)
+                    else None
+                ),
+                "no_media_confirmed": (
+                    provider_data.get("no_media_confirmed")
+                    if isinstance(provider_data, dict)
+                    else None
+                ),
             },
         )
 

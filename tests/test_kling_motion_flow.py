@@ -350,6 +350,39 @@ def test_kling_enqueue_uses_provided_idempotency_key() -> None:
     assert payload["idempotency_key"] == "job-123"
 
 
+
+
+def test_kling_enqueue_submit_payload_wraps_required_input_fields() -> None:
+    class _CaptureClient(KlingVideoClient):
+        async def _request_with_legacy_fallback(self, _method, _path, *, json_payload=None):  # type: ignore[override]
+            self.last_json = json_payload
+            return {"request_id": "req_submit"}, 200, 10
+
+        async def _validate_public_asset_url(self, *, url: str, kind: str) -> None:  # type: ignore[override]
+            return None
+
+        async def _probe_video_duration_seconds(self, url: str) -> float:  # type: ignore[override]
+            return 8.0
+
+    client = _CaptureClient.__new__(_CaptureClient)
+    client._cache = {}
+    client._submit_models = {}
+
+    asyncio.run(
+        client.enqueue_job(
+            prompt="",
+            settings={
+                "image_url": "https://example.com/ref.png",
+                "motion_video_url": "https://example.com/ref.mp4",
+            },
+        )
+    )
+
+    assert set(client.last_json.keys()) == {"input"}
+    assert client.last_json["input"]["image_url"] == "https://example.com/ref.png"
+    assert client.last_json["input"]["video_url"] == "https://example.com/ref.mp4"
+    assert client.last_json["input"]["character_orientation"] == "video"
+
 def test_kling_enqueue_recovers_from_legacy_jwt_name_error() -> None:
     class _NameErrorKlingClient(KlingVideoClient):
         async def _request(self, *_args, **_kwargs):  # type: ignore[override]
@@ -430,7 +463,13 @@ def test_kling_status_uses_get_with_base_model_path() -> None:
             return {"status": "IN_PROGRESS"}, 200, 52
 
     client = _StatusClient.__new__(_StatusClient)
-    client._cache = {}
+    client._cache = {
+        "req-poll": {
+            "request_id": "req-poll",
+            "status_url": "https://queue.fal.run/fal-ai/kling-video/requests/req-poll/status",
+            "response_url": "https://queue.fal.run/fal-ai/kling-video/requests/req-poll",
+        }
+    }
     client._submit_models = {}
     client._base_url = "https://queue.fal.run"
     client.calls = []
@@ -455,13 +494,7 @@ def test_kling_status_ignores_cached_status_url_uses_base_model_path() -> None:
 
     client = _CachedUrlClient.__new__(_CachedUrlClient)
     client._base_url = "https://queue.fal.run"
-    client._cache = {
-        "req-cached": {
-            "status": "IN_QUEUE",
-            "status_url": "https://queue.fal.run/fal-ai/kling-video/requests/req-cached/status",
-            "response_url": "https://queue.fal.run/fal-ai/kling-video/requests/req-cached",
-        }
-    }
+    client._cache = {"req-cached": {"status": "IN_QUEUE"}}
     client._submit_models = {"req-cached": FAL_KLING_MODEL_PRO}
     client.calls = []
 
@@ -472,6 +505,191 @@ def test_kling_status_ignores_cached_status_url_uses_base_model_path() -> None:
     assert client.calls[0][:2] == ("GET", f"/{FAL_KLING_MODEL_BASE}/requests/req-cached/status")
     assert len(client.calls) == 1
 
+
+def test_kling_completed_fetches_result_with_base_model_get() -> None:
+    class _CompletedClient(KlingVideoClient):
+        async def _request_with_legacy_fallback(  # type: ignore[override]
+            self, method: str, path: str, *, json_payload=None
+        ):
+            self.calls.append((method, path, json_payload))
+            if path.endswith("/status"):
+                return {
+                    "status": "COMPLETED",
+                    "response_url": "https://queue.fal.run/fal-ai/kling-video/requests/req-finished",
+                }, 200, 25
+            return (
+                {"status": "COMPLETED", "output": {"video": {"url": "https://cdn.example/x.mp4"}}},
+                200,
+                30,
+            )
+
+    client = _CompletedClient.__new__(_CompletedClient)
+    client._cache = {
+        "req-finished": {
+            "request_id": "req-finished",
+            "status_url": "https://queue.fal.run/fal-ai/kling-video/requests/req-finished/status",
+            "response_url": "https://queue.fal.run/fal-ai/kling-video/requests/req-finished",
+        }
+    }
+    client._submit_models = {"req-finished": FAL_KLING_MODEL_PRO}
+    client._base_url = "https://queue.fal.run"
+    client.calls = []
+
+    result = asyncio.run(client.get_job_status("req-finished"))
+
+    assert result.status == "completed"
+    assert result.assets["video"] == "https://cdn.example/x.mp4"
+    assert client.calls == [
+        ("GET", f"/{FAL_KLING_MODEL_BASE}/requests/req-finished/status", None),
+        ("GET", f"/{FAL_KLING_MODEL_BASE}/requests/req-finished", None),
+    ]
+
+
+def test_kling_running_202_does_not_fetch_result() -> None:
+    class _RunningClient(KlingVideoClient):
+        async def _request_with_legacy_fallback(  # type: ignore[override]
+            self, method: str, path: str, *, json_payload=None
+        ):
+            self.calls.append((method, path, json_payload))
+            if path.endswith("/status"):
+                return {"status": "IN_PROGRESS"}, 202, 20
+            raise AssertionError("response_url must not be requested while queue is running")
+
+    client = _RunningClient.__new__(_RunningClient)
+    client._cache = {
+        "req-202": {
+            "request_id": "req-202",
+            "status_url": "https://queue.fal.run/fal-ai/kling-video/requests/req-202/status",
+            "response_url": "https://queue.fal.run/fal-ai/kling-video/requests/req-202",
+        }
+    }
+    client._submit_models = {}
+    client._base_url = "https://queue.fal.run"
+    client.calls = []
+
+    result = asyncio.run(client.get_job_status("req-202"))
+
+    assert result.status == "running"
+    assert client.calls == [("GET", f"/{FAL_KLING_MODEL_BASE}/requests/req-202/status", None)]
+
+
+def test_kling_running_202_never_reaches_result_422() -> None:
+    class _RunningClient(KlingVideoClient):
+        async def _request_with_legacy_fallback(  # type: ignore[override]
+            self, method: str, path: str, *, json_payload=None
+        ):
+            self.calls.append((method, path, json_payload))
+            if path.endswith("/status"):
+                return {"status": "running"}, 202, 18
+            raise ProviderAPIError(
+                provider="kling",
+                status_code=422,
+                message="field required: image_url/video_url/character_orientation",
+                error_type="invalid_request",
+            )
+
+    client = _RunningClient.__new__(_RunningClient)
+    client._cache = {
+        "req-202": {
+            "request_id": "req-202",
+            "status_url": "https://queue.fal.run/fal-ai/kling-video/requests/req-202/status",
+            "response_url": "https://queue.fal.run/fal-ai/kling-video/requests/req-202",
+        }
+    }
+    client._submit_models = {}
+    client._base_url = "https://queue.fal.run"
+    client.calls = []
+
+    result = asyncio.run(client.get_job_status("req-202"))
+
+    assert result.status == "running"
+    assert client.calls == [("GET", f"/{FAL_KLING_MODEL_BASE}/requests/req-202/status", None)]
+
+
+
+
+def test_kling_completed_result_422_missing_fields_is_terminal_invalid_request() -> None:
+    class _EarlyResultClient(KlingVideoClient):
+        async def _request_with_legacy_fallback(  # type: ignore[override]
+            self, method: str, path: str, *, json_payload=None
+        ):
+            self.calls.append((method, path, json_payload))
+            if path.endswith("/status"):
+                return {
+                    "status": "COMPLETED",
+                    "response_url": "https://queue.fal.run/fal-ai/kling-video/requests/req-early",
+                }, 200, 21
+            raise ProviderAPIError(
+                provider="kling",
+                status_code=422,
+                message="field required",
+                error_type="invalid_request",
+                provider_message=(
+                    '{"detail":[{"loc":["body","image_url"],"msg":"field required"},'
+                    '{"loc":["body","video_url"],"msg":"field required"},'
+                    '{"loc":["body","character_orientation"],"msg":"field required"}]}'
+                ),
+                retryable=False,
+            )
+
+    client = _EarlyResultClient.__new__(_EarlyResultClient)
+    client._cache = {
+        "req-early": {
+            "request_id": "req-early",
+            "status_url": "https://queue.fal.run/fal-ai/kling-video/requests/req-early/status",
+            "response_url": "https://queue.fal.run/fal-ai/kling-video/requests/req-early",
+        }
+    }
+    client._submit_models = {}
+    client._base_url = "https://queue.fal.run"
+    client.calls = []
+
+    with pytest.raises(ProviderAPIError) as exc_info:
+        asyncio.run(client.get_job_status("req-early"))
+
+    assert exc_info.value.status_code == 422
+    assert exc_info.value.error_type == "invalid_request"
+    assert exc_info.value.retryable is False
+    assert client.calls == [
+        ("GET", f"/{FAL_KLING_MODEL_BASE}/requests/req-early/status", None),
+        ("GET", f"/{FAL_KLING_MODEL_BASE}/requests/req-early", None),
+    ]
+
+
+
+def test_kling_completed_result_without_video_keeps_polling() -> None:
+    class _NoMediaYetClient(KlingVideoClient):
+        async def _request_with_legacy_fallback(  # type: ignore[override]
+            self, method: str, path: str, *, json_payload=None
+        ):
+            self.calls.append((method, path, json_payload))
+            if path.endswith("/status"):
+                return {
+                    "status": "COMPLETED",
+                    "response_url": "https://queue.fal.run/fal-ai/kling-video/requests/req-empty",
+                }, 200, 21
+            return {"status": "COMPLETED", "output": {}}, 200, 16
+
+    client = _NoMediaYetClient.__new__(_NoMediaYetClient)
+    client._cache = {
+        "req-empty": {
+            "request_id": "req-empty",
+            "status_url": "https://queue.fal.run/fal-ai/kling-video/requests/req-empty/status",
+            "response_url": "https://queue.fal.run/fal-ai/kling-video/requests/req-empty",
+        }
+    }
+    client._submit_models = {}
+    client._base_url = "https://queue.fal.run"
+    client.calls = []
+
+    result = asyncio.run(client.get_job_status("req-empty"))
+
+    assert result.status == "running"
+    assert result.assets == {}
+    assert client.calls == [
+        ("GET", f"/{FAL_KLING_MODEL_BASE}/requests/req-empty/status", None),
+        ("GET", f"/{FAL_KLING_MODEL_BASE}/requests/req-empty", None),
+    ]
 
 def test_kling_submit_model_selection() -> None:
     assert KlingVideoClient._pick_submit_model("std") == FAL_KLING_MODEL_STANDARD
