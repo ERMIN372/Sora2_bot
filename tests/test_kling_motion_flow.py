@@ -382,6 +382,7 @@ def test_kling_enqueue_submit_payload_contains_required_root_fields() -> None:
     assert client.last_json["image_url"] == "https://example.com/ref.png"
     assert client.last_json["video_url"] == "https://example.com/ref.mp4"
     assert client.last_json["character_orientation"] == "video"
+    assert "input" not in client.last_json
 
 def test_kling_enqueue_recovers_from_legacy_jwt_name_error() -> None:
     class _NameErrorKlingClient(KlingVideoClient):

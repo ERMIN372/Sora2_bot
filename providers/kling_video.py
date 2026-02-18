@@ -56,6 +56,10 @@ _EARLY_RESULT_MISSING_FIELDS = {"image_url", "video_url", "character_orientation
 _EMPTY_RESULT_MAX_POLLS = 10
 
 
+def _is_dev_environment(value: Optional[str]) -> bool:
+    return str(value or "").strip().lower() in {"dev", "development", "local"}
+
+
 def _mask(value: str, visible: int = 4) -> str:
     if len(value) <= visible:
         return "***"
@@ -461,17 +465,22 @@ class KlingVideoClient(BaseProviderClient):
                     break
 
             payload_keys = sorted(submit_payload.keys())
-            log.debug(
-                "kling.submit_payload submit_payload_top_keys=%s has_root_image_url=%s has_root_video_url=%s has_root_character_orientation=%s image_url=%s video_url=%s image_url_source=%s video_url_source=%s",
-                payload_keys,
-                bool(submit_payload.get("image_url")),
-                bool(submit_payload.get("video_url")),
-                bool(submit_payload.get("character_orientation")),
-                _safe_url_preview(submit_payload.get("image_url")),
-                _safe_url_preview(submit_payload.get("video_url")),
-                image_url_source,
-                video_url_source,
-            )
+            has_root_image_url = bool(submit_payload.get("image_url"))
+            has_root_video_url = bool(submit_payload.get("video_url"))
+            has_root_character_orientation = bool(submit_payload.get("character_orientation"))
+            if _is_dev_environment(getattr(getattr(self, "_config", None), "environment", "")):
+                log.debug(
+                    "kling.submit_payload submit_url=%s submit_payload_top_keys=%s has_root_image_url=%s has_root_video_url=%s has_root_character_orientation=%s image_url=%s video_url=%s image_url_source=%s video_url_source=%s",
+                    f"/{submit_model}",
+                    payload_keys,
+                    has_root_image_url,
+                    has_root_video_url,
+                    has_root_character_orientation,
+                    _safe_url_preview(submit_payload.get("image_url")),
+                    _safe_url_preview(submit_payload.get("video_url")),
+                    image_url_source,
+                    video_url_source,
+                )
 
             log.info(
                 "kling.enqueue model=%s mode=%s has_image_url=%s has_video_url=%s keep_original_sound=%s prompt_len=%s duration_seconds=%.2f",
@@ -529,6 +538,9 @@ class KlingVideoClient(BaseProviderClient):
             "request_id": str(task_id),
             "status_url": data.get("status_url"),
             "response_url": data.get("response_url"),
+            "submitted_image_url": submit_payload.get("image_url"),
+            "submitted_video_url": submit_payload.get("video_url"),
+            "submitted_character_orientation": submit_payload.get("character_orientation"),
         }
         self._submit_models[task_id] = submit_model
         log.info(
@@ -595,6 +607,20 @@ class KlingVideoClient(BaseProviderClient):
                 result_data, _, _ = await self.fetch_result(job_id=job_id, result_path=result_path)
             except ProviderAPIError as exc:
                 if exc.status_code == 422 and self._is_missing_motion_fields_error(exc):
+                    cached_payload = self._cache.get(job_id) or {}
+                    has_root_image_url = bool(cached_payload.get("submitted_image_url"))
+                    has_root_video_url = bool(cached_payload.get("submitted_video_url"))
+                    has_root_character_orientation = bool(
+                        cached_payload.get("submitted_character_orientation")
+                    )
+                    log.error(
+                        "kling.result_invalid_request terminal=true error_code=missing_motion_fields job_id=%s provider_message=%s has_root_image_url=%s has_root_video_url=%s has_root_character_orientation=%s",
+                        job_id,
+                        exc.provider_message or exc.message,
+                        has_root_image_url,
+                        has_root_video_url,
+                        has_root_character_orientation,
+                    )
                     raise ProviderAPIError(
                         provider="kling",
                         status_code=422,

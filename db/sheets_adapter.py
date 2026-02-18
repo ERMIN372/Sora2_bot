@@ -303,6 +303,7 @@ class SheetsDatabase(DatabaseInterface):
             status=normalise_job_status(job.status),
             idempotency_key=job.idempotency_key,
             content_type=job.content_type,
+            video_url=job.video_url,
             metadata=job.extra,
         )
 
