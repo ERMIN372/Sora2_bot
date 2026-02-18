@@ -171,7 +171,7 @@ TOPUP_UI_PACKS = [
 UI_MODEL_LABELS = {
     # UI labels only, the actual API model identifiers remain unchanged
     "veo": "💚Gemini veo3",
-    "veo-3.0-generate-001": "💚Gemini veo3",
+    "veo-3.1-fast-generate-preview": "💚Gemini veo3",
     "veo-3.1-generate-preview": "💎Gemini veo 3.1",
     "sora": "☁️OpenAI Sora 2",
     "sora-2": "☁️OpenAI Sora 2",
@@ -344,7 +344,7 @@ class Config:
     gemini_model_text: str = "gemini-2.0-flash"
     gemini_model_text_fallback: str = "gemini-1.5-flash"
     gemini_model_image: str = "gemini-2.5-flash-image"
-    gemini_model_video: str = "veo-3.0-generate-001"
+    gemini_model_video: str = "veo-3.1-fast-generate-preview"
     gemini_api_mode: str = "developer"
     vertex_project_id: Optional[str] = None
     vertex_location: Optional[str] = None
@@ -363,7 +363,7 @@ class Config:
     openai_beta_header: str = DEFAULT_OPENAI_BETA_HEADER
     sora_requests_per_minute: int = 60
     gemini_requests_per_minute: int = 120
-    default_video_model: str = "veo-3.0-generate-001"
+    default_video_model: str = "veo-3.1-fast-generate-preview"
     database_url: str = ""
     postgres_enabled: bool = False
     postgres_pool_min_size: int = 1
@@ -1063,7 +1063,7 @@ class RoutingCfg:
 class Models:
     TEXT_MODEL = "gemini-2.5-flash"
     IMAGE_MODEL = "gemini-2.5-flash-image"
-    VIDEO_MODEL = "veo-3.0-generate-001"
+    VIDEO_MODEL = "veo-3.1-fast-generate-preview"
 
 
 # Apply runtime overrides derived from environment variables.
