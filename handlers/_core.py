@@ -4183,9 +4183,12 @@ async def _launch_order(
     session.pending_order = None
 
     queue_pos = await db.count_active_jobs(user_id)
-    confirmation_key = (
-        "flow.order_submitted_image" if task_label == "image_generate" else "flow.order_submitted"
-    )
+    if task_label == "image_generate":
+        confirmation_key = "flow.order_submitted_image"
+    elif _is_kling_context(provider_key, order.product, order.model):
+        confirmation_key = "flow.order_submitted_kling"
+    else:
+        confirmation_key = "flow.order_submitted"
     await callback.message.answer(i18n.t(confirmation_key, queue_pos=queue_pos))
     await STATUS_MESSAGES.ensure_started(
         bot=callback.message.bot,

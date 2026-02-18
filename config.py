@@ -154,7 +154,7 @@ PRODUCT_PRICING_UI = {
     "sora": 99,
     "veo3": 89,
     "veo31": 299,
-    "kling_mc": 79,
+    "kling_mc": 110,
     "image": 5,
     "image_pro": 25,
     "tarot": TAROT_READING_PRICE_CREDITS,
