@@ -71,14 +71,18 @@ def _list_veo_model_methods(config: Config) -> dict[str, set[str]]:
         page_token = next_token
 
     catalog: dict[str, set[str]] = {}
+    total_models = 0
+    veo_candidates = 0
     for response in responses:
         for entry in _iter_response(response):
             raw_name = _extract_model_name(entry)
             if not raw_name:
                 continue
+            total_models += 1
             short = _normalise_model_name(raw_name)
             if not _is_supported_model(short):
                 continue
+            veo_candidates += 1
             supported = getattr(entry, "supported_generation_methods", None)
             if supported is None:
                 supported = getattr(entry, "supportedGenerationMethods", None)
@@ -93,6 +97,12 @@ def _list_veo_model_methods(config: Config) -> dict[str, set[str]]:
                     continue
                 existing = catalog.setdefault(name.lower(), set())
                 existing.update(methods)
+    log.info(
+        "veo.catalog total_models_listed=%d veo_candidates=%d catalog_keys=%s",
+        total_models,
+        veo_candidates,
+        sorted(catalog.keys()),
+    )
     return catalog
 
 
@@ -317,8 +327,14 @@ def preflight_check_veo_model(config: Config, model_id: str) -> VeoPreflightResu
                 reason="vertex_not_configured",
             )
 
+    required_method = "generate_videos or predict_long_running"
     catalog = _list_veo_model_methods(config)
     if not catalog:
+        log.info(
+            "veo.preflight model_id=%s required_method=%s result=no_models catalog_empty=True",
+            normalised_model,
+            required_method,
+        )
         return VeoPreflightResult(
             available=False,
             model_id=normalised_model,
@@ -327,6 +343,13 @@ def preflight_check_veo_model(config: Config, model_id: str) -> VeoPreflightResu
         )
     matched_methods = catalog.get(normalised_model.lower())
     if matched_methods is None:
+        log.info(
+            "veo.preflight model_id=%s required_method=%s result=model_not_found "
+            "catalog_keys=%s",
+            normalised_model,
+            required_method,
+            sorted(catalog.keys()),
+        )
         return VeoPreflightResult(
             available=False,
             model_id=normalised_model,
@@ -334,12 +357,16 @@ def preflight_check_veo_model(config: Config, model_id: str) -> VeoPreflightResu
             reason="model_not_found",
         )
     sorted_methods = sorted(matched_methods)
+    has_video = _contains_video_method(matched_methods)
     log.info(
-        "veo.preflight model_id=%s supportedGenerationMethods=%s",
+        "veo.preflight model_id=%s supportedGenerationMethods=%s "
+        "required_method=%s has_video_method=%s",
         normalised_model,
         sorted_methods,
+        required_method,
+        has_video,
     )
-    if not _contains_video_method(matched_methods):
+    if not has_video:
         if normalised_model.lower().startswith("veo-"):
             return VeoPreflightResult(
                 available=True,

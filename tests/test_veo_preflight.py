@@ -114,6 +114,39 @@ def test_veo_preflight_allows_veo_model_without_advertised_predict_method(monkey
     assert preflight.available is True
 
 
+def test_veo_preflight_empty_catalog_returns_no_models(monkeypatch) -> None:
+    """When models.list returns nothing, reason must be 'no_models'."""
+    config = _config()
+    monkeypatch.setattr(
+        "services.gemini_catalog._list_veo_model_methods",
+        lambda *_args, **_kwargs: {},
+    )
+
+    preflight = preflight_check_veo_model(config, "veo-3.1-fast-generate-preview")
+
+    assert preflight.available is False
+    assert preflight.reason == "no_models"
+
+
+def test_veo_preflight_model_not_found_vs_method_not_supported(monkeypatch) -> None:
+    """Preflight must distinguish 'model_not_found' from 'method_not_supported'."""
+    config = _config()
+
+    # Model present but no video method — veo-* override should still pass
+    monkeypatch.setattr(
+        "services.gemini_catalog._list_veo_model_methods",
+        lambda *_args, **_kwargs: {"veo-3.1-fast-generate-preview": {"generate_content"}},
+    )
+    result = preflight_check_veo_model(config, "veo-3.1-fast-generate-preview")
+    assert result.available is True
+    assert result.reason == "ok"
+
+    # Model absent from catalog
+    result2 = preflight_check_veo_model(config, "veo-3.1-generate-preview")
+    assert result2.available is False
+    assert result2.reason == "model_not_found"
+
+
 def test_trend_veo_choice_does_not_resolve_to_veo31_model(monkeypatch) -> None:
     from handlers._core import _resolve_trend_model
 

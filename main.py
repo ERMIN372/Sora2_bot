@@ -200,6 +200,8 @@ def _init_application(config: Config) -> ApplicationState:
         providers.update(
             {
                 "gemini-image": gemini_client,
+                "gemini-image-pro": gemini_client,
+                "gemini-3-pro-image-preview": gemini_client,
                 "gemini": gemini_client,
                 config.gemini_model_image: gemini_client,
             }
