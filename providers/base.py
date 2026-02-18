@@ -289,6 +289,10 @@ class ModelUnavailable(ProviderAPIError):
 class BaseProviderClient:
     """Base HTTP client for generation providers."""
 
+    # Subclasses may set this to True to keep Content-Type on GET/HEAD
+    # requests even when there is no request body.
+    _keep_content_type_on_get: bool = False
+
     def __init__(
         self,
         *,
@@ -561,17 +565,16 @@ class BaseProviderClient:
             context_text,
         )
         try:
-            # fal.ai requires GET/HEAD requests to be sent without Content-Type
-            # when there is no request body.
+            # Some providers (e.g. fal.ai base) require GET/HEAD without
+            # Content-Type when there is no body.  Others (e.g. fal.ai Kling
+            # queue) need Content-Type to correctly route the request.
             method_upper = method.upper()
-            if method_upper in {"GET", "HEAD"}:
-                if json_payload in (None, {}):
-                    kwargs.pop("json", None)
-                    json_payload = None
-                if data_payload in (None, b"", ""):
-                    kwargs.pop("data", None)
-                    data_payload = None
-            if method_upper in {"GET", "HEAD"} and not json_payload and not data_payload:
+            if (
+                method_upper in {"GET", "HEAD"}
+                and not json_payload
+                and not data_payload
+                and not self._keep_content_type_on_get
+            ):
                 headers = {k: v for k, v in headers.items() if k.lower() != "content-type"}
             if "queue.fal.run" in url:
                 log.info(
