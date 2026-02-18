@@ -83,3 +83,15 @@ def test_veo_series_label_fast_is_veo3() -> None:
     assert _veo_series_label("veo-3.0-generate-001", "veo") == "Veo 3"
     assert _veo_series_label(None, "veo") == "Veo 3"
     assert _veo_series_label(None, "veo31") == "Veo 3.1"
+
+
+def test_router_accepts_gemini_3_pro_image_preview() -> None:
+    """GeminiRouter must accept gemini-3-pro-image-preview for image tasks."""
+    from services.gemini_router import GeminiRouter
+
+    config = Config(bot_token="test-token", gemini_api_key="test-key")
+    router = GeminiRouter(config)
+    # Should NOT raise GeminiRoutingError
+    router._validate_task_model("image", "gemini-3-pro-image-preview")
+    # Standard image model should also work
+    router._validate_task_model("image", "gemini-2.5-flash-image")

@@ -80,6 +80,7 @@ ASSET_KIND_IMAGE = "image"
 
 _DOWNLOAD_MAX_ATTEMPTS = 3
 _POLL_MAX_ATTEMPTS = 5
+_POLL_MAX_ATTEMPTS_VEO = 20
 _POLL_MAX_ATTEMPTS_KLING = 180
 _POLL_BACKOFF_BASE = 1.5
 
@@ -146,6 +147,8 @@ def _poll_max_attempts_for_provider(*, provider: Optional[str], default_attempts
     provider_key = (provider or "").strip().lower()
     if provider_key.startswith("kling"):
         return max(default_attempts, _POLL_MAX_ATTEMPTS_KLING)
+    if provider_key.startswith(("veo", "gemini-video")):
+        return max(default_attempts, _POLL_MAX_ATTEMPTS_VEO)
     return default_attempts
 
 
