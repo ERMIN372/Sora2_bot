@@ -278,6 +278,8 @@ _PRO_REQUEST_PATTERN = re.compile(
 )
 
 _SUPPORTED_VEO_PREFIXES: Tuple[str, ...] = ("veo-3.0-", "veo-3.1-")
+_DEFAULT_VEO3_MODEL = "veo-3.0-generate-001"
+_DEFAULT_VEO31_MODEL = "veo-3.1-generate-preview"
 _SUPPORTED_SORA_PREFIXES: Tuple[str, ...] = (
     "sora-",
     "sora2",
@@ -706,6 +708,12 @@ def _is_veo31_model(name: str) -> bool:
     return normalised.lower().startswith("veo-3.1-")
 
 
+def _veo_series_label(model: Optional[str], provider: Optional[str]) -> str:
+    if _is_veo31_model(model or "") or (provider or "").strip().lower() == "veo31":
+        return "Veo 3.1"
+    return "Veo 3"
+
+
 def _is_kling_mc_model(name: str) -> bool:
     """Return True if *name* refers to a Kling Motion Control model."""
     normalised = _normalise_video_model_name(name).lower()
@@ -849,8 +857,9 @@ def _video_model_options(config: Config) -> list[VideoModelOption]:
             if _is_veo_video_model_name(normalised):
                 provider_tag = "veo31" if _is_veo31_model(normalised) else "veo"
                 _register(normalised, provider_tag)
-        # Always offer veo-3.1 if it wasn't discovered automatically
-        _register("veo-3.1-generate-preview", "veo31")
+        # Always offer core Veo generations even if listModels is temporarily empty.
+        _register(_DEFAULT_VEO3_MODEL, "veo")
+        _register(_DEFAULT_VEO31_MODEL, "veo31")
 
     if config.sora_video_enabled:
         default_sora = _normalise_video_model_name(config.sora_model_video)
@@ -1058,7 +1067,7 @@ async def _download_remote_asset_http(
 def _provider_for_model(model: Optional[str], config: Config) -> str:
     name = _normalise_video_model_name(model or "")
     if name and _is_veo_video_model_name(name):
-        return "veo"
+        return "veo31" if _is_veo31_model(name) else "veo"
     if name and _is_sora_video_model_name(name):
         return "sora"
     if (
@@ -2187,9 +2196,13 @@ def _resolve_trend_model(choice: str, config: Config) -> tuple[str, str]:
     if lowered == "sora":
         model = (config.sora_model_video or "sora").strip() or "sora"
         return "sora", model
-    model = (config.gemini_model_video or config.default_video_model or "").strip()
-    if not model:
-        model = "veo-3.0-generate-001"
+    model = _DEFAULT_VEO3_MODEL
+    available = {_normalise_video_model_name(name) for name in list_veo_video_models(config)}
+    if available and model not in available:
+        return "veo", model
+    configured = _normalise_video_model_name(config.gemini_model_video)
+    if configured and _is_veo_video_model_name(configured) and not _is_veo31_model(configured):
+        model = configured
     return "veo", model
 
 
@@ -2664,6 +2677,17 @@ async def trend_answers_handler(
         caption = ""
 
     provider, model_name = _resolve_trend_model(model_choice, config)
+    if provider == "veo":
+        veo_preflight = preflight_check_veo_model(config, model_name)
+        if not veo_preflight.available:
+            model_series = _veo_series_label(model_name, provider)
+            await message.answer(
+                i18n.t("errors.veo_model_unavailable_no_charge", model_name=model_series),
+                reply_markup=_main_keyboard(config),
+            )
+            await state.finish()
+            return
+
     aspect_ratio = ASPECT_RATIO_OPTIONS["vertical"]
     size = _resolve_video_size(aspect_ratio, DEFAULT_HD_ENABLED)
     provider_settings = {
@@ -3548,7 +3572,16 @@ async def _launch_order(
     )
 
     if order.category == "video" and _is_veo_context(provider_key, order.product, order.model):
+        selected_label = order.model_label or _resolve_model_label(order.model, config)
         veo_preflight = preflight_check_veo_model(config, order.model)
+        log.info(
+            "veo.preflight selected_label=%s provider=%s model_id=%s api_used=%s reason=%s",
+            selected_label,
+            provider_key,
+            order.model,
+            veo_preflight.api_used,
+            veo_preflight.reason,
+        )
         log.info(
             "veo.preflight result available=%s model_id=%s api_used=%s reason=%s",
             veo_preflight.available,
@@ -3558,7 +3591,10 @@ async def _launch_order(
         )
         if not veo_preflight.available:
             await _release_lock("submit_failed", "provider_unavailable")
-            await callback.message.answer(i18n.t("errors.veo_model_unavailable_no_charge"))
+            model_series = _veo_series_label(order.model, provider_key)
+            await callback.message.answer(
+                i18n.t("errors.veo_model_unavailable_no_charge", model_name=model_series)
+            )
             return
 
     if not await db.deduct_credit(user_id, credits_cost):

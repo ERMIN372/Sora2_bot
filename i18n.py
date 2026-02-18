@@ -471,7 +471,7 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "status.delivery_telegram_error": "Не удалось отправить видео в Telegram: {error}. Кредиты вернули.",
         "status.delivery_too_large": "Видео слишком большое для Telegram. Кредиты вернули.",
         "errors.video_models_unavailable": "Нет доступных моделей видеогенерации. Обратитесь к оператору или попробуйте позже.",
-        "errors.veo_model_unavailable_no_charge": "⚠️ Veo 3.1 сейчас недоступна (модель не найдена/не поддерживается). Деньги не списаны. Попробуйте позже или выберите другую модель.",
+        "errors.veo_model_unavailable_no_charge": "⚠️ {model_name} сейчас недоступна (модель не найдена/не поддерживается). Деньги не списаны. Попробуйте позже или выберите другую модель.",
         "errors.image_generation_disabled": "Генерация изображений недоступна. Обратитесь к оператору или попробуйте позже.",
         "errors.unknown": "неизвестная ошибка",
         "errors.chatgpt_unavailable": "ChatGPT временно недоступен. Попробуйте позже.",
