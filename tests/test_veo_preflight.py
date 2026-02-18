@@ -31,8 +31,8 @@ def _config(**overrides):
 def test_veo_preflight_blocks_charge_when_model_missing(monkeypatch) -> None:
     config = _config()
     monkeypatch.setattr(
-        "services.gemini_catalog.list_models_with_capability",
-        lambda *_args, **_kwargs: ["veo-3.0-generate-001"],
+        "services.gemini_catalog._list_veo_model_methods",
+        lambda *_args, **_kwargs: {"veo-3.0-generate-001": {"generate_videos"}},
     )
 
     charge_called = False
@@ -80,3 +80,51 @@ def test_veo_model_id_mapping_valid(monkeypatch) -> None:
     for path in source_roots:
         text = path.read_text(encoding="utf-8")
         assert "veo-3.1-generate-001" not in text
+
+
+def test_veo_option_routing_keeps_veo3_and_veo31_separate(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "handlers._core.list_veo_video_models",
+        lambda _config: ["veo-3.1-generate-preview"],
+    )
+    options = _video_model_options(_config())
+
+    veo3 = next((item for item in options if item.model == "veo-3.0-generate-001"), None)
+    veo31 = next((item for item in options if item.model == "veo-3.1-generate-preview"), None)
+
+    assert veo3 is not None
+    assert veo3.provider == "veo"
+    assert "veo-3.1" not in veo3.model
+
+    assert veo31 is not None
+    assert veo31.provider == "veo31"
+    assert "veo-3.1" in veo31.model
+
+
+def test_veo_preflight_reports_method_not_supported(monkeypatch) -> None:
+    config = _config()
+    monkeypatch.setattr(
+        "services.gemini_catalog._list_veo_model_methods",
+        lambda _config: {"veo-3.0-generate-001": {"generate_content"}},
+    )
+
+    preflight = preflight_check_veo_model(config, "veo-3.0-generate-001")
+
+    assert preflight.available is False
+    assert preflight.reason == "method_not_supported"
+
+
+def test_trend_veo_choice_does_not_resolve_to_veo31_model(monkeypatch) -> None:
+    from handlers._core import _resolve_trend_model
+
+    config = _config(gemini_model_video="veo-3.1-generate-preview")
+    monkeypatch.setattr(
+        "handlers._core.list_veo_video_models",
+        lambda _config: ["veo-3.1-generate-preview"],
+    )
+
+    provider, model = _resolve_trend_model("veo", config)
+
+    assert provider == "veo"
+    assert model == "veo-3.0-generate-001"
+    assert "veo-3.1" not in model

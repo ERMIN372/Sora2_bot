@@ -19,6 +19,7 @@ _CACHE_TTL_SECONDS = 900.0
 _CACHE_LOCK = threading.Lock()
 _CACHE: dict[str, tuple[float, List[str]]] = {}
 _SUPPORTED_PREFIXES = ("veo-3.0-", "veo-3.1-")
+_VIDEO_METHOD_ALIASES = {"generate_videos", "predict_long_running"}
 
 
 @dataclass(frozen=True)
@@ -27,6 +28,70 @@ class VeoPreflightResult:
     model_id: str
     api_used: str
     reason: str
+
+
+def _contains_video_method(methods: Iterable[str]) -> bool:
+    return any(_normalise_method_name(item) in _VIDEO_METHOD_ALIASES for item in methods)
+
+
+def _list_veo_model_methods(config: Config) -> dict[str, set[str]]:
+    """Return Veo model names and advertised generation methods."""
+
+    try:
+        client = get_media_client(config)
+    except Exception:
+        log.warning("Gemini media client initialisation failed", exc_info=True)
+        return {}
+
+    responses: List[object] = []
+    page_token: Optional[str] = None
+    while True:
+        try:
+            response = client.models.list(page_token=page_token) if page_token else client.models.list()
+        except _genai_errors.APIError as exc:  # pragma: no cover - network guard
+            log.warning("Gemini models.list failed: %s", exc, exc_info=True)
+            return {}
+        except Exception:  # pragma: no cover - defensive
+            log.warning("Unexpected error listing Gemini models", exc_info=True)
+            return {}
+        responses.append(response)
+        next_token = None
+        for attr in ("next_page_token", "nextPageToken"):
+            candidate = getattr(response, attr, None)
+            if isinstance(candidate, str) and candidate:
+                next_token = candidate
+                break
+            if isinstance(response, dict):
+                candidate = response.get(attr)
+                if isinstance(candidate, str) and candidate:
+                    next_token = candidate
+                    break
+        if not next_token or next_token == page_token:
+            break
+        page_token = next_token
+
+    catalog: dict[str, set[str]] = {}
+    for response in responses:
+        for entry in _iter_response(response):
+            raw_name = _extract_model_name(entry)
+            if not raw_name:
+                continue
+            short = _normalise_model_name(raw_name)
+            if not _is_supported_model(short):
+                continue
+            supported = getattr(entry, "supported_generation_methods", None)
+            if supported is None and isinstance(entry, dict):
+                supported = entry.get("supported_generation_methods")
+            methods = {
+                _normalise_method_name(value)
+                for value in (supported or [])
+            }
+            for name in (raw_name, short):
+                if not name:
+                    continue
+                existing = catalog.setdefault(name.lower(), set())
+                existing.update(methods)
+    return catalog
 
 
 def _is_supported_model(name: str) -> bool:
@@ -131,6 +196,24 @@ def list_models_with_capability(
     if not capability_key:
         return []
 
+    names: List[str] = []
+    seen: set[str] = set()
+
+    def _register(name: str) -> None:
+        if not name:
+            return
+        if name not in seen:
+            names.append(name)
+            seen.add(name)
+
+    if _normalise_method_name(capability_key) in _VIDEO_METHOD_ALIASES:
+        catalog = _list_veo_model_methods(config)
+        for lowered_name, methods in catalog.items():
+            if capability_key not in methods:
+                continue
+            _register(lowered_name)
+        return names
+
     try:
         client = _pick_client(config, capability_key)
     except Exception:
@@ -141,14 +224,11 @@ def list_models_with_capability(
     page_token: Optional[str] = None
     while True:
         try:
-            if page_token:
-                response = client.models.list(page_token=page_token)
-            else:
-                response = client.models.list()
+            response = client.models.list(page_token=page_token) if page_token else client.models.list()
         except _genai_errors.APIError as exc:  # pragma: no cover - network guard
             log.warning("Gemini models.list failed capability=%s: %s", capability_key, exc, exc_info=True)
             return []
-        except Exception as exc:  # pragma: no cover - defensive
+        except Exception:  # pragma: no cover - defensive
             log.warning("Unexpected error listing Gemini models capability=%s", capability_key, exc_info=True)
             return []
         responses.append(response)
@@ -163,40 +243,28 @@ def list_models_with_capability(
                 if isinstance(candidate, str) and candidate:
                     next_token = candidate
                     break
-        if not next_token:
-            break
-        if next_token == page_token:
+        if not next_token or next_token == page_token:
             break
         page_token = next_token
-
-    names: List[str] = []
-    seen: set[str] = set()
-
-    def _register(name: str) -> None:
-        if not name:
-            return
-        if name not in seen:
-            names.append(name)
-            seen.add(name)
 
     for response in responses:
         for entry in _iter_response(response):
             supported = getattr(entry, "supported_generation_methods", None)
             if supported is None and isinstance(entry, dict):
                 supported = entry.get("supported_generation_methods")
-        method_names = {
-            _normalise_method_name(value)
-            for value in (supported or [])
-        }
-        if capability_key not in method_names:
-            continue
-        raw_name = _extract_model_name(entry)
-        if not raw_name:
-            continue
-        short = _normalise_model_name(raw_name)
-        if short:
-            _register(short)
-        _register(raw_name)
+            method_names = {
+                _normalise_method_name(value)
+                for value in (supported or [])
+            }
+            if capability_key not in method_names:
+                continue
+            raw_name = _extract_model_name(entry)
+            if not raw_name:
+                continue
+            short = _normalise_model_name(raw_name)
+            if short:
+                _register(short)
+            _register(raw_name)
 
     return names
 
@@ -245,25 +313,32 @@ def preflight_check_veo_model(config: Config, model_id: str) -> VeoPreflightResu
                 reason="vertex_not_configured",
             )
 
-    available = list_veo_video_models(config)
-    if not available:
+    catalog = _list_veo_model_methods(config)
+    if not catalog:
         return VeoPreflightResult(
             available=False,
             model_id=normalised_model,
             api_used=api_used,
             reason="no_models",
         )
-    lookup = {name.lower(): name for name in available}
-    if normalised_model.lower() not in lookup:
+    matched_methods = catalog.get(normalised_model.lower())
+    if matched_methods is None:
         return VeoPreflightResult(
             available=False,
             model_id=normalised_model,
             api_used=api_used,
             reason="model_not_found",
         )
+    if not _contains_video_method(matched_methods):
+        return VeoPreflightResult(
+            available=False,
+            model_id=normalised_model,
+            api_used=api_used,
+            reason="method_not_supported",
+        )
     return VeoPreflightResult(
         available=True,
-        model_id=lookup[normalised_model.lower()],
+        model_id=normalised_model,
         api_used=api_used,
         reason="ok",
     )
