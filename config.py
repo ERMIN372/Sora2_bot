@@ -172,7 +172,7 @@ UI_MODEL_LABELS = {
     # UI labels only, the actual API model identifiers remain unchanged
     "veo": "💚Gemini veo3",
     "veo-3.0-generate-001": "💚Gemini veo3",
-    "veo-3.1-generate-001": "💎Gemini veo 3.1",
+    "veo-3.1-generate-preview": "💎Gemini veo 3.1",
     "sora": "☁️OpenAI Sora 2",
     "sora-2": "☁️OpenAI Sora 2",
     "sora-2-pro": "☁️OpenAI Sora 2",

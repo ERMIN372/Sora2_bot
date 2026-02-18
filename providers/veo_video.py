@@ -447,10 +447,24 @@ def _extract_inline_video_assets(
 class VeoVideoClient(BaseProviderClient):
     """Asynchronous wrapper around the Gemini video generation API."""
 
+    @staticmethod
+    def _resolve_api_base(config: Config) -> str:
+        mode = (config.gemini_api_mode or "developer").strip().lower()
+        if mode == "vertex":
+            region = (config.vertex_location or "").strip()
+            project = (config.vertex_project_id or "").strip()
+            if region and project:
+                return (
+                    f"https://{region}-aiplatform.googleapis.com/v1/"
+                    f"projects/{project}/locations/{region}/publishers/google/models"
+                )
+            return "https://aiplatform.googleapis.com"
+        return "https://generativelanguage.googleapis.com"
+
     def __init__(self, *, config: Config) -> None:
         super().__init__(
             config=config,
-            base_url="https://generativelanguage.googleapis.com",
+            base_url=self._resolve_api_base(config),
             api_key=config.gemini_api_key,
             provider_name="veo",
         )
