@@ -556,6 +556,33 @@ def test_decode_data_uri_supports_urlsafe_base64() -> None:
     assert payload == original
 
 
+def test_decode_data_uri_supports_percent_encoded_base64() -> None:
+    original = b"\xff\xd8\xffjpeg-bytes"
+    encoded = base64.b64encode(original).decode("ascii")
+    percent_encoded = encoded.replace("+", "%2B").replace("/", "%2F")
+
+    decoded = handlers_core.decode_data_uri(f"data:image/jpeg;base64,{percent_encoded}")
+
+    assert decoded is not None
+    mime, payload = decoded
+    assert mime == "image/jpeg"
+    assert payload == original
+
+
+def test_decode_data_uri_supports_double_wrapped_data_uri() -> None:
+    inner_payload = b"\xff\xd8\xffdouble-wrapped-jpeg"
+    inner_b64 = base64.b64encode(inner_payload).decode("ascii")
+    inner_uri = f"data:image/jpeg;base64,{inner_b64}"
+    outer_b64 = base64.b64encode(inner_uri.encode("utf-8")).decode("ascii")
+
+    decoded = handlers_core.decode_data_uri(f"data:text/plain;base64,{outer_b64}")
+
+    assert decoded is not None
+    mime, payload = decoded
+    assert mime == "image/jpeg"
+    assert payload == inner_payload
+
+
 def test_send_inline_assets_falls_back_to_document_when_photo_fails(
     monkeypatch: pytest.MonkeyPatch, make_openai_video_config
 ) -> None:
