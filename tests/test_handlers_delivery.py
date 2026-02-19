@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import sys
 import types
 from datetime import datetime, timezone
@@ -375,7 +376,7 @@ def test_deliver_remote_media_sends_image_mime_as_photo_even_for_veo(
 
     async def fake_http(*_args: Any, **_kwargs: Any) -> DownloadedAsset:
         return DownloadedAsset(
-            content=b"jpeg-bytes",
+            content=b"\xff\xd8\xffvalid-jpeg",
             mime="image/jpeg",
             filename="generated.jpg",
             size=1024,
@@ -423,7 +424,7 @@ def test_deliver_remote_media_falls_back_to_document_when_photo_fails(
 
     async def fake_http(*_args: Any, **_kwargs: Any) -> DownloadedAsset:
         return DownloadedAsset(
-            content=b"jpeg-bytes",
+            content=b"\xff\xd8\xffvalid-jpeg",
             mime="image/jpeg",
             filename="generated.jpg",
             size=1024,
@@ -447,3 +448,62 @@ def test_deliver_remote_media_falls_back_to_document_when_photo_fails(
     assert sent is not None
     assert sent.method == "document"
     assert [entry["method"] for entry in bot.sent[:2]] == ["photo", "document"]
+
+
+def test_deliver_remote_media_rejects_html_payload_for_image(
+    monkeypatch: pytest.MonkeyPatch, make_openai_video_config
+) -> None:
+    config = make_openai_video_config()
+    job = _make_job(cost=5)
+    job.model = "gemini-3-pro-image-preview"
+    job.content_type = "image"
+    job.extra["provider"] = "gemini-image-pro"
+    asset = {
+        "key": "primary",
+        "url": "https://example.com/generated.jpg",
+        "mime": "image/jpeg",
+        "filename": "generated.jpg",
+    }
+    status_stub = _StubStatusMessages()
+    db = _FakeDB()
+    reporter = _FakeErrorReporter()
+    bot = _FakeBot(file_size=1024)
+    dp = _FakeDispatcher(bot)
+
+    async def fake_http(*_args: Any, **_kwargs: Any) -> DownloadedAsset:
+        return DownloadedAsset(
+            content=b"<!DOCTYPE html><html>error</html>",
+            mime="image/jpeg",
+            filename="generated.jpg",
+            size=33,
+            key_mask="MASK",
+        )
+
+    monkeypatch.setattr(handlers_core, "STATUS_MESSAGES", status_stub)
+    monkeypatch.setattr(handlers_core, "_download_remote_asset_http", fake_http)
+
+    sent = _run(
+        handlers_core._deliver_remote_media(
+            dp=dp,
+            job=job,
+            asset=asset,
+            config=config,
+            db=db,
+            error_reporter=reporter,
+        )
+    )
+
+    assert sent is None
+    assert bot.sent == []
+    assert db.refunds
+
+
+def test_decode_image_base64_payload_supports_plain_base64() -> None:
+    payload = base64.b64encode(b"\xff\xd8\xffvalid-jpeg").decode("ascii")
+    decoded = handlers_core._decode_image_base64_payload(payload, mime_hint="image/jpeg")
+
+    assert decoded is not None
+    mime, content, source_kind = decoded
+    assert mime == "image/jpeg"
+    assert content.startswith(b"\xff\xd8\xff")
+    assert source_kind == "base64"
