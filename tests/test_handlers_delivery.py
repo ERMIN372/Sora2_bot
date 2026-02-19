@@ -69,8 +69,9 @@ class _StubStatusMessages:
 
 
 class _FakeBot:
-    def __init__(self, *, file_size: int) -> None:
+    def __init__(self, *, file_size: int, fail_photo: bool = False) -> None:
         self.file_size = file_size
+        self.fail_photo = fail_photo
         self.sent: List[Dict[str, Any]] = []
 
     async def send_video(
@@ -98,8 +99,16 @@ class _FakeBot:
         return SimpleNamespace(video=video, document=None)
 
     async def send_document(self, *args: Any, **kwargs: Any) -> Any:  # pragma: no cover
+        self.sent.append({"method": "document", "args": args, "kwargs": kwargs})
         document = SimpleNamespace(file_id="file-doc", file_size=self.file_size)
-        return SimpleNamespace(video=None, document=document)
+        return SimpleNamespace(video=None, document=document, photo=None)
+
+    async def send_photo(self, user_id: int, file: Any, *args: Any, **kwargs: Any) -> Any:
+        self.sent.append({"method": "photo", "user_id": user_id, "file": file})
+        if self.fail_photo:
+            raise handlers_core.TelegramAPIError("photo failed")
+        photo = SimpleNamespace(file_id="file-photo", file_size=self.file_size)
+        return SimpleNamespace(photo=[photo], document=None, video=None)
 
 
 class _FakeDispatcher:
@@ -342,3 +351,99 @@ def test_delivery_accepts_gemini_files_only_for_generativelanguage_host(
     )
 
     assert calls == ["gemini"]
+
+
+def test_deliver_remote_media_sends_image_mime_as_photo_even_for_veo(
+    monkeypatch: pytest.MonkeyPatch, make_openai_video_config
+) -> None:
+    config = make_openai_video_config()
+    job = _make_job(cost=5)
+    job.model = "gemini-3-pro-image-preview"
+    job.content_type = "video"
+    job.extra["provider"] = "veo"
+    asset = {
+        "key": "primary",
+        "url": "https://example.com/generated.jpg",
+        "mime": "image/jpeg",
+        "filename": "generated.jpg",
+    }
+    status_stub = _StubStatusMessages()
+    db = _FakeDB()
+    reporter = _FakeErrorReporter()
+    bot = _FakeBot(file_size=1024)
+    dp = _FakeDispatcher(bot)
+
+    async def fake_http(*_args: Any, **_kwargs: Any) -> DownloadedAsset:
+        return DownloadedAsset(
+            content=b"jpeg-bytes",
+            mime="image/jpeg",
+            filename="generated.jpg",
+            size=1024,
+            key_mask="MASK",
+        )
+
+    monkeypatch.setattr(handlers_core, "STATUS_MESSAGES", status_stub)
+    monkeypatch.setattr(handlers_core, "_download_remote_asset_http", fake_http)
+
+    sent = _run(
+        handlers_core._deliver_remote_media(
+            dp=dp,
+            job=job,
+            asset=asset,
+            config=config,
+            db=db,
+            error_reporter=reporter,
+        )
+    )
+
+    assert sent is not None
+    assert sent.method == "photo"
+    assert bot.sent[0]["method"] == "photo"
+
+
+def test_deliver_remote_media_falls_back_to_document_when_photo_fails(
+    monkeypatch: pytest.MonkeyPatch, make_openai_video_config
+) -> None:
+    config = make_openai_video_config()
+    job = _make_job(cost=5)
+    job.model = "gemini-3-pro-image-preview"
+    job.content_type = "image"
+    job.extra["provider"] = "veo"
+    asset = {
+        "key": "primary",
+        "url": "https://example.com/generated.jpg",
+        "mime": "image/jpeg",
+        "filename": "generated.jpg",
+    }
+    status_stub = _StubStatusMessages()
+    db = _FakeDB()
+    reporter = _FakeErrorReporter()
+    bot = _FakeBot(file_size=1024, fail_photo=True)
+    dp = _FakeDispatcher(bot)
+
+    async def fake_http(*_args: Any, **_kwargs: Any) -> DownloadedAsset:
+        return DownloadedAsset(
+            content=b"jpeg-bytes",
+            mime="image/jpeg",
+            filename="generated.jpg",
+            size=1024,
+            key_mask="MASK",
+        )
+
+    monkeypatch.setattr(handlers_core, "STATUS_MESSAGES", status_stub)
+    monkeypatch.setattr(handlers_core, "_download_remote_asset_http", fake_http)
+
+    sent = _run(
+        handlers_core._deliver_remote_media(
+            dp=dp,
+            job=job,
+            asset=asset,
+            config=config,
+            db=db,
+            error_reporter=reporter,
+        )
+    )
+
+    assert sent is not None
+    assert sent.method == "document"
+    assert [entry["method"] for entry in bot.sent[:2]] == ["photo", "document"]

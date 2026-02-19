@@ -4624,6 +4624,35 @@ def _extract_telegram_error_details(exc: TelegramAPIError) -> tuple[str, Dict[st
     return description, details
 
 
+async def _send_photo_with_document_fallback(
+    *,
+    bot: Bot,
+    user_id: int,
+    payload: bytes,
+    filename: str,
+    mime_type: Optional[str],
+) -> tuple[Message, Literal["photo", "document"]]:
+    try:
+        message = await bot.send_photo(
+            user_id,
+            BufferedInputFile(payload, filename=filename, mime_type=mime_type),
+        )
+        return message, "photo"
+    except TelegramAPIError:
+        log.warning(
+            "delivery.photo_failed_fallback_document user_id=%s filename=%s mime=%s",
+            user_id,
+            filename,
+            mime_type,
+            exc_info=True,
+        )
+        message = await bot.send_document(
+            user_id,
+            BufferedInputFile(payload, filename=filename, mime_type=mime_type),
+        )
+        return message, "document"
+
+
 def _select_remote_media_asset(job: GenerationJobRecord) -> Optional[Dict[str, Any]]:
     candidates: List[Dict[str, Any]] = []
     target_media = (job.content_type or "video").lower()
@@ -4735,10 +4764,15 @@ async def _send_inline_image(
     error_reporter: ErrorReporter,
 ) -> Optional[SentMediaInfo]:
     mime, payload = inline_image
-    filename = "image.png"
-    input_file = BufferedInputFile(payload, filename=filename, mime_type=mime)
+    filename = "image.jpg" if mime == "image/jpeg" else "image.png"
     try:
-        message = await dp.bot.send_photo(job.user_id, input_file)
+        message, method = await _send_photo_with_document_fallback(
+            bot=dp.bot,
+            user_id=job.user_id,
+            payload=payload,
+            filename=filename,
+            mime_type=mime,
+        )
     except Exception:
         log.exception("Failed to send inline image to user_id=%s", job.user_id)
         await _handle_delivery_failure(
@@ -4747,21 +4781,25 @@ async def _send_inline_image(
             config,
             db,
             error_reporter=error_reporter,
-            message=i18n.t("status.delivery_generic"),
+            message=i18n.t("status.delivery_image_generic"),
             reason="telegram_error",
             extra_log={"stage": "inline_image"},
         )
         return None
     photo = message.photo[-1] if message.photo else None
-    if photo is None:
-        size = len(payload)
-        file_id = ""
-    else:
+    document = message.document
+    if method == "photo" and photo is not None:
         size = photo.file_size or len(payload)
         file_id = photo.file_id
+    elif method == "document" and document is not None:
+        size = document.file_size or len(payload)
+        file_id = document.file_id
+    else:
+        size = len(payload)
+        file_id = ""
     return SentMediaInfo(
         message=message,
-        method="photo",
+        method=method,
         file_id=file_id,
         file_size=size,
         duration_seconds=None,
@@ -4821,15 +4859,34 @@ async def _send_inline_assets(
         if not base_name:
             base_name = "asset"
         filename = f"{base_name}_{index}{suffix}"
-        if send_as_photo and mime.startswith("image/"):
-            filename = "image.png"
+        if mime.startswith("image/"):
+            filename = "image.jpg" if mime == "image/jpeg" else "image.png"
+        delivery_method = "send_document"
+        delivery_mode = "upload"
+        if mime.startswith("image/"):
+            delivery_method = "send_photo"
+        elif send_as_photo:
+            delivery_method = "send_document"
+        log.debug(
+            "delivery.inline_asset job_id=%s provider=%s model=%s asset_index=%s mime=%s size_bytes=%s telegram_method=%s delivery_mode=%s",
+            job.id,
+            _provider_from_job(job, config),
+            job.model,
+            index,
+            mime,
+            size,
+            delivery_method,
+            delivery_mode,
+        )
         try:
-            if send_as_photo and mime.startswith("image/") and size <= _INLINE_ASSET_MAX_BYTES:
-                message = await dp.bot.send_photo(
-                    job.user_id,
-                    BufferedInputFile(payload, filename=filename, mime_type=mime),
+            if mime.startswith("image/") and size <= _INLINE_ASSET_MAX_BYTES:
+                message, method = await _send_photo_with_document_fallback(
+                    bot=dp.bot,
+                    user_id=job.user_id,
+                    payload=payload,
+                    filename=filename,
+                    mime_type=mime,
                 )
-                method: Literal["photo", "document"] = "photo"
             else:
                 input_file = BufferedInputFile(payload, filename=filename, mime_type=mime)
                 message = await dp.bot.send_document(job.user_id, input_file)
@@ -4842,7 +4899,11 @@ async def _send_inline_assets(
                 config,
                 db,
                 error_reporter=error_reporter,
-                message=i18n.t("status.delivery_generic"),
+                message=(
+                    i18n.t("status.delivery_image_generic")
+                    if mime.startswith("image/")
+                    else i18n.t("status.delivery_generic")
+                ),
                 reason="telegram_error",
                 extra_log={"stage": "inline_asset", "asset_index": index},
             )
@@ -5212,7 +5273,7 @@ async def _deliver_remote_media(
     message: Optional[Message] = None
     duration_seconds = _extract_video_duration(job)
     download_mime = downloaded.mime or mime_hint or ""
-    send_as_image = target_media == "image" and download_mime.startswith("image/")
+    send_as_image = download_mime.startswith("image/")
     filename = downloaded.filename or ("image.png" if send_as_image else "video.mp4")
     if send_as_image:
         if not filename.lower().endswith((".png", ".jpg", ".jpeg", ".webp")):
@@ -5220,18 +5281,35 @@ async def _deliver_remote_media(
     elif not filename.lower().endswith(".mp4"):
         filename = "video.mp4"
 
+    selected_method = (
+        "send_photo"
+        if send_as_image and downloaded.size <= _TELEGRAM_PHOTO_MAX_BYTES
+        else "send_document"
+        if send_as_image
+        else "send_video"
+        if downloaded.size <= _TELEGRAM_VIDEO_MAX_BYTES
+        else "send_document"
+    )
+    log.debug(
+        "delivery.telegram_select job_id=%s provider=%s model=%s mime=%s size_bytes=%s telegram_method=%s delivery_mode=upload",
+        job.id,
+        provider_key,
+        job.model,
+        download_mime,
+        downloaded.size,
+        selected_method,
+    )
+
     try:
         if send_as_image:
             if downloaded.size <= _TELEGRAM_PHOTO_MAX_BYTES:
-                message = await dp.bot.send_photo(
-                    job.user_id,
-                    BufferedInputFile(
-                        downloaded.content,
-                        filename=filename,
-                        mime_type=downloaded.mime,
-                    ),
+                message, method = await _send_photo_with_document_fallback(
+                    bot=dp.bot,
+                    user_id=job.user_id,
+                    payload=downloaded.content,
+                    filename=filename,
+                    mime_type=downloaded.mime,
                 )
-                method = "photo"
             elif downloaded.size <= _TELEGRAM_DOCUMENT_MAX_BYTES:
                 message = await dp.bot.send_document(
                     job.user_id,
@@ -5404,6 +5482,8 @@ async def _deliver_remote_media(
         failure_message = (
             i18n.t("status.delivery_telegram_error", error=visible_error)
             if provider_key == "sora"
+            else i18n.t("status.delivery_image_generic")
+            if send_as_image
             else i18n.t("status.delivery_generic")
         )
         extra_payload = {"asset_bytes": downloaded.size, "delivery_route": asset_route.value, **error_details}
@@ -5432,6 +5512,8 @@ async def _deliver_remote_media(
         failure_message = (
             i18n.t("status.delivery_telegram_error", error=generic_error)
             if provider_key == "sora"
+            else i18n.t("status.delivery_image_generic")
+            if send_as_image
             else i18n.t("status.delivery_generic")
         )
         await _handle_delivery_failure(
