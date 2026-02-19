@@ -4565,10 +4565,13 @@ def decode_data_uri(data_uri: str) -> Optional[tuple[str, bytes]]:
         if padding:
             normalized += "=" * padding
         try:
-            payload = base64.b64decode(normalized, validate=False)
+            if "-" in normalized or "_" in normalized:
+                payload = base64.urlsafe_b64decode(normalized)
+            else:
+                payload = base64.b64decode(normalized, validate=False)
         except (binascii.Error, ValueError):
             try:
-                payload = base64.urlsafe_b64decode(normalized)
+                payload = base64.b64decode(normalized, validate=False)
             except (binascii.Error, ValueError):
                 return None
     else:
@@ -4588,7 +4591,46 @@ def decode_data_uri(data_uri: str) -> Optional[tuple[str, bytes]]:
                 nested_mime, nested_payload = nested
                 if _detect_image_mime_by_signature(nested_payload):
                     return nested_mime, nested_payload
+    if mime.startswith("image/") and _detect_image_mime_by_signature(payload) is None:
+        second_decoded = _decode_nested_base64_text_payload(payload)
+        if second_decoded is not None and _detect_image_mime_by_signature(second_decoded):
+            payload = second_decoded
     return mime, payload
+
+
+def _decode_nested_base64_text_payload(payload: bytes) -> Optional[bytes]:
+    if len(payload) <= 20:
+        return None
+    try:
+        ascii_payload = payload.decode("ascii")
+    except UnicodeDecodeError:
+        return None
+    if any((ord(ch) < 32 and ch not in "\r\n\t") or ord(ch) > 126 for ch in ascii_payload):
+        return None
+    normalized = ascii_payload.strip().replace(" ", "+")
+    normalized = "".join(normalized.split())
+    if not normalized:
+        return None
+    looks_like_base64_prefix = (
+        normalized.startswith("/9j/")
+        or normalized.startswith("_9j_")
+        or normalized.startswith("iVBORw0")
+        or normalized.startswith("UklGR")
+        or normalized.startswith("R0lGOD")
+    )
+    if not looks_like_base64_prefix:
+        return None
+    normalized = normalized.replace(" ", "+")
+    padding = (-len(normalized)) % 4
+    if padding:
+        normalized += "=" * padding
+    try:
+        return base64.urlsafe_b64decode(normalized)
+    except (binascii.Error, ValueError):
+        try:
+            return base64.b64decode(normalized, validate=False)
+        except (binascii.Error, ValueError):
+            return None
 
 
 def _decode_data_uri(data_uri: str) -> Optional[tuple[str, bytes]]:
@@ -4962,6 +5004,22 @@ async def _send_inline_assets(
                     payload_has_pct = "%" in raw_payload
                 decoded_head_ascii = payload[:32].decode("ascii", errors="replace")
                 detected_sig = _detect_image_signature_label(payload)
+                second_decode_attempted = False
+                second_decoded_len = 0
+                second_decoded_head_hex = ""
+                second_detected_sig = "unknown"
+                if _detect_image_mime_by_signature(payload) is None:
+                    second_decode_attempted = True
+                    second_payload = _decode_nested_base64_text_payload(payload)
+                    if second_payload is not None:
+                        second_decoded_len = len(second_payload)
+                        second_decoded_head_hex = second_payload[:16].hex()
+                        second_detected_sig = _detect_image_signature_label(second_payload)
+                        if _detect_image_mime_by_signature(second_payload):
+                            payload = second_payload
+                            size = len(payload)
+                            decoded_head_ascii = payload[:32].decode("ascii", errors="replace")
+                            detected_sig = _detect_image_signature_label(payload)
                 diagnostic_extra = {
                     "data_uri_header": data_uri_header,
                     "payload_len": payload_len,
@@ -4971,6 +5029,10 @@ async def _send_inline_assets(
                     "decoded_head_hex": payload[:16].hex(),
                     "decoded_head_ascii": decoded_head_ascii,
                     "detected_sig": detected_sig,
+                    "second_decode_attempted": second_decode_attempted,
+                    "second_decoded_len": second_decoded_len,
+                    "second_decoded_head_hex": second_decoded_head_hex,
+                    "second_detected_sig": second_detected_sig,
                 }
                 log.debug(
                     "delivery.data_uri_decode job_id=%s asset_index=%s model=%s provider=%s data_uri_header=%s payload_len=%s decoded_len=%s head_hex=%s",

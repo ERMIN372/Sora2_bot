@@ -583,6 +583,19 @@ def test_decode_data_uri_supports_double_wrapped_data_uri() -> None:
     assert payload == inner_payload
 
 
+def test_decode_data_uri_supports_double_base64_wrapped() -> None:
+    jpeg_bytes = b"\xFF\xD8\xFF\xE0" + b"JFIF\x00" + b"\x00" * 16
+    inner = base64.urlsafe_b64encode(jpeg_bytes).decode("ascii")
+    outer = base64.b64encode(inner.encode("ascii")).decode("ascii")
+
+    decoded = handlers_core.decode_data_uri(f"data:image/jpeg;base64,{outer}")
+
+    assert decoded is not None
+    mime, payload = decoded
+    assert mime == "image/jpeg"
+    assert payload == jpeg_bytes
+
+
 def test_send_inline_assets_falls_back_to_document_when_photo_fails(
     monkeypatch: pytest.MonkeyPatch, make_openai_video_config
 ) -> None:
