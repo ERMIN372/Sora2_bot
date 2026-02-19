@@ -4097,7 +4097,7 @@ class GeminiGenerativeClient(BaseProviderClient):
                 if not isinstance(candidate, dict):
                     continue
                 finish_reason = candidate.get("finishReason") or candidate.get("finish_reason")
-                if finish_reason and not error and str(finish_reason).upper() in {"SAFETY", "STOP"}:
+                if finish_reason and not error and str(finish_reason).upper() == "SAFETY":
                     status = "failed"
                     error = str(finish_reason)
                 content = candidate.get("content")
@@ -4192,6 +4192,11 @@ class GeminiGenerativeClient(BaseProviderClient):
         if isinstance(generated_images, list):
             return self._extract_legacy_image_result(payload, generated_images)
 
+        # STOP is normal completion for generate_content; if the response
+        # contains inline image assets the generation succeeded.
+        if inline_assets and error and str(error).upper() == "STOP":
+            status = "completed"
+            error = None
         if status == "completed" and not assets:
             status = "failed"
             if not error:

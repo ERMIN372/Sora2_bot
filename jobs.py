@@ -1164,9 +1164,9 @@ class JobQueue:
             inline_assets_payload = submission_payload.get("inline_assets")  # type: ignore[assignment]
         now = datetime.now(timezone.utc)
         effective_cost = credits_cost or self._config.generation_cost_credits
+        _inline_image_providers = {"gemini-image", "gemini-image-pro"}
         is_flash_inline = (
-            provider_key == "gemini-image"
-            and (model_key or "").strip().lower() == "gemini-2.5-flash-image"
+            provider_key in _inline_image_providers
             and not submission.job_id
             and bool(inline_assets_payload)
         )
@@ -2405,7 +2405,7 @@ class JobQueue:
                 error_message = failure_reason.user_message or raw_error_text
                 if scope != "unknown":
                     error_message = policy_text
-                elif raw_error_text.strip().upper() in {"STOP", "SAFETY"}:
+                elif raw_error_text.strip().upper() == "SAFETY":
                     error_message = policy_message("unknown")
                 if scope and scope != "unknown":
                     job_extra["error_scope"] = scope
