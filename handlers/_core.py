@@ -20,9 +20,10 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Literal, Mapping, Optional, Sequence, Set, Tuple
-from urllib.parse import urlparse
+from urllib.parse import unquote_to_bytes, urlparse
 
 import aiohttp
+from PIL import Image
 
 from aiogram import Bot, Dispatcher
 from aiogram.dispatcher import FSMContext
@@ -708,8 +709,6 @@ def _is_veo31_model(name: str) -> bool:
     return normalised.lower().startswith("veo-3.1-")
 
 
-
-
 def _veo_provider_tag(model_name: str) -> str:
     normalised = _normalise_video_model_name(model_name).lower()
     if normalised.startswith("veo-3.1-fast-"):
@@ -717,6 +716,7 @@ def _veo_provider_tag(model_name: str) -> str:
     if normalised.startswith("veo-3.1-"):
         return "veo31"
     return "veo"
+
 
 def _veo_series_label(model: Optional[str], provider: Optional[str]) -> str:
     normalised = _normalise_video_model_name(model or "").lower()
@@ -1027,8 +1027,6 @@ def _infer_category_from_model(model: Optional[str], config: Config) -> str:
     return "video"
 
 
-
-
 def _provider_from_job(job: GenerationJobRecord, config: Config) -> str:
     extra = getattr(job, "extra", {}) or {}
     if isinstance(extra, dict):
@@ -1093,6 +1091,8 @@ async def _download_remote_asset_http(
                 status_code=0,
                 error_status="NETWORK_ERROR",
             ) from exc
+
+
 def _provider_for_model(model: Optional[str], config: Config) -> str:
     name = _normalise_video_model_name(model or "")
     if name and _is_veo_video_model_name(name):
@@ -4547,7 +4547,7 @@ def _parse_inline_image(data_uri: Optional[str]) -> Optional[tuple[str, bytes]]:
     return mime, payload
 
 
-def _decode_data_uri(data_uri: str) -> Optional[tuple[str, bytes]]:
+def decode_data_uri(data_uri: str) -> Optional[tuple[str, bytes]]:
     uri = (data_uri or "").strip()
     if not uri.lower().startswith("data:"):
         return None
@@ -4555,15 +4555,30 @@ def _decode_data_uri(data_uri: str) -> Optional[tuple[str, bytes]]:
         header, encoded = uri.split(",", 1)
     except ValueError:
         return None
-    if ";base64" not in header.lower():
-        return None
     mime = header[5:].split(";", 1)[0] or "application/octet-stream"
-    normalized = "".join(encoded.split())
-    try:
-        payload = base64.b64decode(normalized)
-    except (binascii.Error, ValueError):
-        return None
+    encoded = encoded.strip().strip('"').strip("'")
+    if ";base64" in header.lower():
+        normalized = "".join(encoded.replace(" ", "+").split())
+        padding = (-len(normalized)) % 4
+        if padding:
+            normalized += "=" * padding
+        try:
+            payload = base64.b64decode(normalized, validate=True)
+        except (binascii.Error, ValueError):
+            try:
+                payload = base64.urlsafe_b64decode(normalized)
+            except (binascii.Error, ValueError):
+                return None
+    else:
+        try:
+            payload = unquote_to_bytes(encoded)
+        except (TypeError, ValueError):
+            return None
     return mime, payload
+
+
+def _decode_data_uri(data_uri: str) -> Optional[tuple[str, bytes]]:
+    return decode_data_uri(data_uri)
 
 
 def _decode_image_base64_payload(
@@ -4590,13 +4605,27 @@ def _decode_image_base64_payload(
 
 
 def _detect_image_mime_by_signature(payload: bytes) -> Optional[str]:
-    if payload.startswith(b"\xFF\xD8\xFF"):
+    if payload.startswith(b"\xff\xd8\xff"):
         return "image/jpeg"
     if payload.startswith(b"\x89PNG\r\n\x1a\n"):
         return "image/png"
     if payload.startswith(b"RIFF") and payload[8:12] == b"WEBP":
         return "image/webp"
     return None
+
+
+def _validate_image_payload(payload: bytes) -> tuple[bool, bool]:
+    signature_ok = _detect_image_mime_by_signature(payload) is not None
+    if not signature_ok:
+        return False, False
+    try:
+        with Image.open(io.BytesIO(payload)) as image:
+            image.verify()
+        with Image.open(io.BytesIO(payload)) as image:
+            image.load()
+    except Exception:
+        return True, False
+    return True, True
 
 
 def _collect_inline_assets(job: GenerationJobRecord) -> List[Dict[str, Any]]:
@@ -4858,6 +4887,10 @@ async def _send_inline_assets(
     error_reporter: ErrorReporter,
 ) -> Optional[SentMediaInfo]:
     send_as_photo = (job.content_type or "video") == "image"
+    provider_key = _provider_from_job(job, config)
+    is_nanobanana_data_uri_flow = (
+        job.model or ""
+    ).strip().lower() == "gemini-3-pro-image-preview" or provider_key == "veo"
     for index, asset in enumerate(assets):
         data_value = asset.get("data_uri")
         source_kind = "inline_bytes"
@@ -4883,10 +4916,31 @@ async def _send_inline_assets(
             return None
         mime, payload, source_kind = decoded
         size = len(payload)
-        signature_mime = _detect_image_mime_by_signature(payload) if mime.startswith("image/") else None
-        signature_ok = (not mime.startswith("image/")) or signature_mime is not None
-        pil_verify_ok = signature_ok
-        if not signature_ok:
+        signature_ok = True
+        pil_verify_ok = True
+        if mime.startswith("image/"):
+            if source_kind == "data_uri" and is_nanobanana_data_uri_flow:
+                data_uri_header = ""
+                payload_len = 0
+                if isinstance(data_value, str) and "," in data_value:
+                    data_uri_header, raw_payload = data_value.split(",", 1)
+                    payload_len = len(raw_payload)
+                log.debug(
+                    "delivery.data_uri_decode job_id=%s asset_index=%s model=%s provider=%s data_uri_header=%s payload_len=%s decoded_len=%s head_hex=%s",
+                    job.id,
+                    index,
+                    job.model,
+                    provider_key,
+                    data_uri_header,
+                    payload_len,
+                    size,
+                    payload[:16].hex(),
+                )
+                signature_ok, pil_verify_ok = _validate_image_payload(payload)
+            else:
+                signature_ok = _detect_image_mime_by_signature(payload) is not None
+                pil_verify_ok = signature_ok
+        if not signature_ok or not pil_verify_ok:
             await _handle_delivery_failure(
                 dp,
                 job,
@@ -4928,7 +4982,12 @@ async def _send_inline_assets(
             base_name = "asset"
         filename = f"{base_name}_{index}{suffix}"
         if mime.startswith("image/"):
-            filename = "image.jpg" if mime == "image/jpeg" else "image.png"
+            if mime == "image/jpeg":
+                filename = "image.jpg"
+            elif mime == "image/webp":
+                filename = "image.webp"
+            else:
+                filename = "image.png"
         delivery_method = "send_document"
         delivery_mode = "upload"
         if mime.startswith("image/"):
@@ -5382,11 +5441,11 @@ async def _deliver_remote_media(
     selected_method = (
         "send_photo"
         if send_as_image and downloaded.size <= _TELEGRAM_PHOTO_MAX_BYTES
-        else "send_document"
-        if send_as_image
-        else "send_video"
-        if downloaded.size <= _TELEGRAM_VIDEO_MAX_BYTES
-        else "send_document"
+        else (
+            "send_document"
+            if send_as_image
+            else "send_video" if downloaded.size <= _TELEGRAM_VIDEO_MAX_BYTES else "send_document"
+        )
     )
     log.debug(
         "delivery.telegram_select job_id=%s provider=%s model=%s mime=%s size_bytes=%s source_kind=%s signature_ok=%s pil_verify_ok=%s telegram_method=%s delivery_mode=upload",
@@ -5583,11 +5642,17 @@ async def _deliver_remote_media(
         failure_message = (
             i18n.t("status.delivery_telegram_error", error=visible_error)
             if provider_key == "sora"
-            else i18n.t("status.delivery_image_generic")
-            if send_as_image
-            else i18n.t("status.delivery_generic")
+            else (
+                i18n.t("status.delivery_image_generic")
+                if send_as_image
+                else i18n.t("status.delivery_generic")
+            )
         )
-        extra_payload = {"asset_bytes": downloaded.size, "delivery_route": asset_route.value, **error_details}
+        extra_payload = {
+            "asset_bytes": downloaded.size,
+            "delivery_route": asset_route.value,
+            **error_details,
+        }
         await _handle_delivery_failure(
             dp,
             job,
@@ -5613,9 +5678,11 @@ async def _deliver_remote_media(
         failure_message = (
             i18n.t("status.delivery_telegram_error", error=generic_error)
             if provider_key == "sora"
-            else i18n.t("status.delivery_image_generic")
-            if send_as_image
-            else i18n.t("status.delivery_generic")
+            else (
+                i18n.t("status.delivery_image_generic")
+                if send_as_image
+                else i18n.t("status.delivery_generic")
+            )
         )
         await _handle_delivery_failure(
             dp,

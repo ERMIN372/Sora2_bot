@@ -13,5 +13,6 @@ tenacity>=9.0,<10
 openai>=1.23.0,<2
 asyncpg>=0.29,<1
 sentry-sdk>=2.0.0,<3
+Pillow>=10.0,<12
 
 httpx>=0.26.0,<1
