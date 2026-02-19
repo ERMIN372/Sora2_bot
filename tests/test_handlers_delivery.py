@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import io
 import sys
 import types
 from datetime import datetime, timezone
@@ -9,6 +10,7 @@ from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
 
 import pytest
+from PIL import Image
 
 from tests.aiogram_stub import ensure_aiogram_stub
 
@@ -260,7 +262,6 @@ def test_send_job_update_remote_failure(
     assert job.status == "failed"
 
 
-
 def test_delivery_routes_fal_media_to_http_not_gemini(
     monkeypatch: pytest.MonkeyPatch, make_openai_video_config
 ) -> None:
@@ -312,9 +313,9 @@ def test_delivery_accepts_gemini_files_only_for_generativelanguage_host(
     job = _make_job(cost=5)
     job.model = "veo-3.0-generate-001"
     job.extra["provider"] = "veo"
-    job.extra["assets_meta"][0]["url"] = (
-        "https://generativelanguage.googleapis.com/v1beta/files/abc123:download?alt=media"
-    )
+    job.extra["assets_meta"][0][
+        "url"
+    ] = "https://generativelanguage.googleapis.com/v1beta/files/abc123:download?alt=media"
 
     status_stub = _StubStatusMessages()
     db = _FakeDB()
@@ -507,3 +508,120 @@ def test_decode_image_base64_payload_supports_plain_base64() -> None:
     assert mime == "image/jpeg"
     assert content.startswith(b"\xff\xd8\xff")
     assert source_kind == "base64"
+
+
+def _valid_png_data_uri() -> str:
+    buffer = io.BytesIO()
+    Image.new("RGB", (1, 1), color=(255, 0, 0)).save(buffer, format="PNG")
+    encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
+    return f"data:image/png;base64,{encoded}"
+
+
+def _make_inline_image_job(
+    *, model: str = "gemini-3-pro-image-preview", provider: str = "veo"
+) -> GenerationJobRecord:
+    job = _make_job(cost=5)
+    job.content_type = "image"
+    job.model = model
+    job.extra = {
+        "provider": provider,
+        "inline_assets": [
+            {"data_uri": _valid_png_data_uri(), "mime": "image/png", "kind": "image"}
+        ],
+    }
+    return job
+
+
+def test_decode_data_uri_tolerates_spaces_as_plus() -> None:
+    original = b"abc+def"
+    encoded = base64.b64encode(original).decode("ascii").replace("+", " ")
+
+    decoded = handlers_core.decode_data_uri(f"data:image/jpeg;base64,{encoded}")
+
+    assert decoded is not None
+    mime, payload = decoded
+    assert mime == "image/jpeg"
+    assert payload == original
+
+
+def test_decode_data_uri_supports_urlsafe_base64() -> None:
+    original = b"\xfb\xef\xffbinary"
+    encoded = base64.urlsafe_b64encode(original).decode("ascii")
+
+    decoded = handlers_core.decode_data_uri(f"data:image/webp;base64,{encoded}")
+
+    assert decoded is not None
+    mime, payload = decoded
+    assert mime == "image/webp"
+    assert payload == original
+
+
+def test_send_inline_assets_falls_back_to_document_when_photo_fails(
+    monkeypatch: pytest.MonkeyPatch, make_openai_video_config
+) -> None:
+    config = make_openai_video_config()
+    job = _make_inline_image_job()
+    status_stub = _StubStatusMessages()
+    db = _FakeDB()
+    reporter = _FakeErrorReporter()
+    bot = _FakeBot(file_size=1024, fail_photo=True)
+    dp = _FakeDispatcher(bot)
+
+    monkeypatch.setattr(handlers_core, "STATUS_MESSAGES", status_stub)
+
+    sent = _run(
+        handlers_core._send_inline_assets(
+            dp=dp,
+            job=job,
+            assets=job.extra["inline_assets"],
+            config=config,
+            db=db,
+            error_reporter=reporter,
+        )
+    )
+
+    assert sent is not None
+    assert sent.method == "document"
+    assert [entry["method"] for entry in bot.sent[:2]] == ["photo", "document"]
+
+
+def test_send_job_update_video_path_unchanged(
+    monkeypatch: pytest.MonkeyPatch, make_openai_video_config
+) -> None:
+    config = make_openai_video_config()
+    job = _make_job(cost=8)
+    status_stub = _StubStatusMessages()
+    db = _FakeDB()
+    reporter = _FakeErrorReporter()
+    downloaded = DownloadedAsset(
+        content=b"video-bytes",
+        mime="video/mp4",
+        filename="result.mp4",
+        size=4096,
+        key_mask="MASK",
+    )
+
+    async def fake_download_asset(*_args: Any, **_kwargs: Any) -> DownloadedAsset:
+        return downloaded
+
+    bot = _FakeBot(file_size=downloaded.size)
+    dp = _FakeDispatcher(bot)
+
+    monkeypatch.setattr(handlers_core, "STATUS_MESSAGES", status_stub)
+    monkeypatch.setattr(handlers_core, "download_asset", fake_download_asset)
+    monkeypatch.setattr(handlers_core, "increment_metric", lambda *a, **k: None)
+    monkeypatch.setattr(handlers_core, "log_event", lambda *a, **k: None)
+    monkeypatch.setattr(handlers_core, "record_timing_metric", lambda *a, **k: None)
+
+    _run(
+        _send_job_update(
+            dp=dp,
+            job=job,
+            archive=None,
+            config=config,
+            db=db,
+            error_reporter=reporter,
+        )
+    )
+
+    assert bot.sent and bot.sent[0]["method"] == "video"
