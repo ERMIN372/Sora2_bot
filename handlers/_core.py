@@ -20,7 +20,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Literal, Mapping, Optional, Sequence, Set, Tuple
-from urllib.parse import unquote_to_bytes, urlparse
+from urllib.parse import unquote, unquote_to_bytes, urlparse
 
 import aiohttp
 from PIL import Image
@@ -4558,12 +4558,14 @@ def decode_data_uri(data_uri: str) -> Optional[tuple[str, bytes]]:
     mime = header[5:].split(";", 1)[0] or "application/octet-stream"
     encoded = encoded.strip().strip('"').strip("'")
     if ";base64" in header.lower():
+        if "%" in encoded:
+            encoded = unquote(encoded)
         normalized = "".join(encoded.replace(" ", "+").split())
         padding = (-len(normalized)) % 4
         if padding:
             normalized += "=" * padding
         try:
-            payload = base64.b64decode(normalized, validate=True)
+            payload = base64.b64decode(normalized, validate=False)
         except (binascii.Error, ValueError):
             try:
                 payload = base64.urlsafe_b64decode(normalized)
@@ -4574,6 +4576,18 @@ def decode_data_uri(data_uri: str) -> Optional[tuple[str, bytes]]:
             payload = unquote_to_bytes(encoded)
         except (TypeError, ValueError):
             return None
+    nested_prefix = payload[:32].lower()
+    if nested_prefix.startswith(b"data:") or nested_prefix.startswith(b"data:image"):
+        try:
+            nested_uri = payload.decode("utf-8", "ignore")
+        except Exception:
+            nested_uri = ""
+        if nested_uri:
+            nested = decode_data_uri(nested_uri)
+            if nested:
+                nested_mime, nested_payload = nested
+                if _detect_image_mime_by_signature(nested_payload):
+                    return nested_mime, nested_payload
     return mime, payload
 
 
@@ -4611,7 +4625,21 @@ def _detect_image_mime_by_signature(payload: bytes) -> Optional[str]:
         return "image/png"
     if payload.startswith(b"RIFF") and payload[8:12] == b"WEBP":
         return "image/webp"
+    if payload.startswith(b"GIF87a") or payload.startswith(b"GIF89a"):
+        return "image/gif"
     return None
+
+
+def _detect_image_signature_label(payload: bytes) -> str:
+    if payload.startswith(b"\xff\xd8\xff"):
+        return "jpeg"
+    if payload.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "png"
+    if payload.startswith(b"RIFF") and payload[8:12] == b"WEBP":
+        return "webp"
+    if payload.startswith(b"GIF87a") or payload.startswith(b"GIF89a"):
+        return "gif"
+    return "unknown"
 
 
 def _validate_image_payload(payload: bytes) -> tuple[bool, bool]:
@@ -4888,9 +4916,6 @@ async def _send_inline_assets(
 ) -> Optional[SentMediaInfo]:
     send_as_photo = (job.content_type or "video") == "image"
     provider_key = _provider_from_job(job, config)
-    is_nanobanana_data_uri_flow = (
-        job.model or ""
-    ).strip().lower() == "gemini-3-pro-image-preview" or provider_key == "veo"
     for index, asset in enumerate(assets):
         data_value = asset.get("data_uri")
         source_kind = "inline_bytes"
@@ -4918,13 +4943,35 @@ async def _send_inline_assets(
         size = len(payload)
         signature_ok = True
         pil_verify_ok = True
+        diagnostic_extra: Dict[str, Any] = {}
         if mime.startswith("image/"):
+            is_nanobanana_data_uri_flow = (
+                job.model or ""
+            ).strip().lower() == "gemini-3-pro-image-preview" or (
+                provider_key == "veo" and source_kind == "data_uri" and mime.startswith("image/")
+            )
             if source_kind == "data_uri" and is_nanobanana_data_uri_flow:
                 data_uri_header = ""
+                payload_prefix = ""
                 payload_len = 0
+                payload_has_pct = False
                 if isinstance(data_value, str) and "," in data_value:
                     data_uri_header, raw_payload = data_value.split(",", 1)
                     payload_len = len(raw_payload)
+                    payload_prefix = raw_payload[:80]
+                    payload_has_pct = "%" in raw_payload
+                decoded_head_ascii = payload[:32].decode("ascii", errors="replace")
+                detected_sig = _detect_image_signature_label(payload)
+                diagnostic_extra = {
+                    "data_uri_header": data_uri_header,
+                    "payload_len": payload_len,
+                    "payload_prefix": payload_prefix,
+                    "payload_has_pct": payload_has_pct,
+                    "decoded_len": size,
+                    "decoded_head_hex": payload[:16].hex(),
+                    "decoded_head_ascii": decoded_head_ascii,
+                    "detected_sig": detected_sig,
+                }
                 log.debug(
                     "delivery.data_uri_decode job_id=%s asset_index=%s model=%s provider=%s data_uri_header=%s payload_len=%s decoded_len=%s head_hex=%s",
                     job.id,
@@ -4941,6 +4988,16 @@ async def _send_inline_assets(
                 signature_ok = _detect_image_mime_by_signature(payload) is not None
                 pil_verify_ok = signature_ok
         if not signature_ok or not pil_verify_ok:
+            extra_log = {
+                "asset_index": index,
+                "source_kind": source_kind,
+                "mime": mime,
+                "size_bytes": size,
+                "signature_ok": signature_ok,
+                "pil_verify_ok": pil_verify_ok,
+            }
+            if diagnostic_extra:
+                extra_log.update(diagnostic_extra)
             await _handle_delivery_failure(
                 dp,
                 job,
@@ -4949,14 +5006,7 @@ async def _send_inline_assets(
                 error_reporter=error_reporter,
                 message=i18n.t("status.delivery_image_generic"),
                 reason="invalid_image",
-                extra_log={
-                    "asset_index": index,
-                    "source_kind": source_kind,
-                    "mime": mime,
-                    "size_bytes": size,
-                    "signature_ok": signature_ok,
-                    "pil_verify_ok": pil_verify_ok,
-                },
+                extra_log=extra_log,
             )
             return None
         if size > _INLINE_ASSET_MAX_BYTES:
@@ -5821,6 +5871,19 @@ async def _handle_delivery_failure(
         )
     else:
         provider_error_message = ""
+    diagnostics_keys = {
+        "data_uri_header",
+        "payload_len",
+        "payload_prefix",
+        "payload_has_pct",
+        "decoded_len",
+        "decoded_head_hex",
+        "decoded_head_ascii",
+        "detected_sig",
+    }
+    diagnostics_payload = {
+        key: extra_payload[key] for key in diagnostics_keys if key in extra_payload
+    }
     error_record = ErrorLogRecord(
         ts=datetime.now(timezone.utc),
         user_id=job.user_id,
@@ -5838,7 +5901,11 @@ async def _handle_delivery_failure(
         auto_sanitized=False,
         sanitized_prompt=job.prompt,
         error_scope="delivery",
-        error_json="",
+        error_json=(
+            json.dumps(diagnostics_payload, ensure_ascii=False, separators=(",", ":"))
+            if diagnostics_payload
+            else ""
+        ),
         job_status="failed",
         reason=reason,
         provider_error_code=provider_error_code[:120],
