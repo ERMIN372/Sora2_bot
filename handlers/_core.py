@@ -1056,6 +1056,7 @@ async def _download_remote_asset_http(
     asset_name: str,
     mime_hint: Optional[str],
     filename_hint: Optional[str],
+    expected_media: Optional[str] = None,
 ) -> DownloadedAsset:
     timeout = aiohttp.ClientTimeout(total=max(20.0, float(config.request_timeout or 20.0)))
     headers = {"User-Agent": "sora2-bot-delivery/1.0"}
@@ -1063,13 +1064,19 @@ async def _download_remote_asset_http(
         try:
             async with session.get(asset_url, headers=headers) as response:
                 body = await response.read()
-                if response.status >= 400:
+                if response.status != 200:
                     raise GeminiDownloadError(
                         f"Не удалось скачать remote asset: {response.status}",
                         status_code=response.status,
                         error_status="HTTP_ERROR",
                     )
                 mime = (mime_hint or response.headers.get("Content-Type") or "video/mp4").strip()
+                if expected_media == "image" and not mime.lower().startswith("image/"):
+                    raise GeminiDownloadError(
+                        "remote asset returned non-image content",
+                        status_code=response.status,
+                        error_status="INVALID_CONTENT_TYPE",
+                    )
                 parsed = urlparse(asset_url)
                 fallback_name = (parsed.path or "").rstrip("/").rsplit("/", 1)[-1]
                 filename = filename_hint or fallback_name or f"{asset_name}.mp4"
@@ -4559,6 +4566,39 @@ def _decode_data_uri(data_uri: str) -> Optional[tuple[str, bytes]]:
     return mime, payload
 
 
+def _decode_image_base64_payload(
+    payload: str,
+    *,
+    mime_hint: Optional[str] = None,
+) -> Optional[tuple[str, bytes, str]]:
+    value = (payload or "").strip()
+    if not value:
+        return None
+    if value.lower().startswith("data:"):
+        decoded = _decode_data_uri(value)
+        if not decoded:
+            return None
+        mime, content = decoded
+        return mime, content, "data_uri"
+    normalized = "".join(value.split())
+    try:
+        content = base64.b64decode(normalized, validate=True)
+    except (binascii.Error, ValueError):
+        return None
+    mime = mime_hint or "image/jpeg"
+    return mime, content, "base64"
+
+
+def _detect_image_mime_by_signature(payload: bytes) -> Optional[str]:
+    if payload.startswith(b"\xFF\xD8\xFF"):
+        return "image/jpeg"
+    if payload.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if payload.startswith(b"RIFF") and payload[8:12] == b"WEBP":
+        return "image/webp"
+    return None
+
+
 def _collect_inline_assets(job: GenerationJobRecord) -> List[Dict[str, Any]]:
     extra = getattr(job, "extra", {}) or {}
     raw_assets = extra.get("inline_assets") if isinstance(extra, dict) else None
@@ -4819,10 +4859,16 @@ async def _send_inline_assets(
 ) -> Optional[SentMediaInfo]:
     send_as_photo = (job.content_type or "video") == "image"
     for index, asset in enumerate(assets):
-        data_uri = asset.get("data_uri")
-        if not isinstance(data_uri, str):
+        data_value = asset.get("data_uri")
+        source_kind = "inline_bytes"
+        if not isinstance(data_value, str):
+            data_value = asset.get("base64")
+        if not isinstance(data_value, str):
             continue
-        decoded = _decode_data_uri(data_uri)
+        decoded = _decode_image_base64_payload(
+            data_value,
+            mime_hint=asset.get("mime") if isinstance(asset.get("mime"), str) else None,
+        )
         if not decoded:
             await _handle_delivery_failure(
                 dp,
@@ -4835,8 +4881,30 @@ async def _send_inline_assets(
                 extra_log={"asset_index": index},
             )
             return None
-        mime, payload = decoded
+        mime, payload, source_kind = decoded
         size = len(payload)
+        signature_mime = _detect_image_mime_by_signature(payload) if mime.startswith("image/") else None
+        signature_ok = (not mime.startswith("image/")) or signature_mime is not None
+        pil_verify_ok = signature_ok
+        if not signature_ok:
+            await _handle_delivery_failure(
+                dp,
+                job,
+                config,
+                db,
+                error_reporter=error_reporter,
+                message=i18n.t("status.delivery_image_generic"),
+                reason="invalid_image",
+                extra_log={
+                    "asset_index": index,
+                    "source_kind": source_kind,
+                    "mime": mime,
+                    "size_bytes": size,
+                    "signature_ok": signature_ok,
+                    "pil_verify_ok": pil_verify_ok,
+                },
+            )
+            return None
         if size > _INLINE_ASSET_MAX_BYTES:
             await _handle_delivery_failure(
                 dp,
@@ -4868,13 +4936,16 @@ async def _send_inline_assets(
         elif send_as_photo:
             delivery_method = "send_document"
         log.debug(
-            "delivery.inline_asset job_id=%s provider=%s model=%s asset_index=%s mime=%s size_bytes=%s telegram_method=%s delivery_mode=%s",
+            "delivery.inline_asset job_id=%s provider=%s model=%s asset_index=%s mime=%s size_bytes=%s source_kind=%s signature_ok=%s pil_verify_ok=%s telegram_method=%s delivery_mode=%s",
             job.id,
             _provider_from_job(job, config),
             job.model,
             index,
             mime,
             size,
+            source_kind,
+            signature_ok,
+            pil_verify_ok,
             delivery_method,
             delivery_mode,
         )
@@ -5171,6 +5242,7 @@ async def _deliver_remote_media(
                     asset_name=asset_name,
                     mime_hint=mime_hint,
                     filename_hint=filename_hint,
+                    expected_media=target_media,
                 )
         except GeminiKeyMismatchError as exc:
             log.error(
@@ -5281,6 +5353,32 @@ async def _deliver_remote_media(
     elif not filename.lower().endswith(".mp4"):
         filename = "video.mp4"
 
+    source_kind = "url_fetch"
+    signature_ok = True
+    pil_verify_ok = True
+    if send_as_image:
+        signature_ok = _detect_image_mime_by_signature(downloaded.content) is not None
+        pil_verify_ok = signature_ok
+        if not signature_ok:
+            await _handle_delivery_failure(
+                dp,
+                job,
+                config,
+                db,
+                error_reporter=error_reporter,
+                message=i18n.t("status.delivery_image_generic"),
+                reason="invalid_image",
+                extra_log={
+                    "mime": download_mime,
+                    "size_bytes": downloaded.size,
+                    "source_kind": source_kind,
+                    "signature_ok": signature_ok,
+                    "pil_verify_ok": pil_verify_ok,
+                },
+                key_mask=downloaded.key_mask or expected_mask,
+            )
+            return None
+
     selected_method = (
         "send_photo"
         if send_as_image and downloaded.size <= _TELEGRAM_PHOTO_MAX_BYTES
@@ -5291,12 +5389,15 @@ async def _deliver_remote_media(
         else "send_document"
     )
     log.debug(
-        "delivery.telegram_select job_id=%s provider=%s model=%s mime=%s size_bytes=%s telegram_method=%s delivery_mode=upload",
+        "delivery.telegram_select job_id=%s provider=%s model=%s mime=%s size_bytes=%s source_kind=%s signature_ok=%s pil_verify_ok=%s telegram_method=%s delivery_mode=upload",
         job.id,
         provider_key,
         job.model,
         download_mime,
         downloaded.size,
+        source_kind,
+        signature_ok,
+        pil_verify_ok,
         selected_method,
     )
 
