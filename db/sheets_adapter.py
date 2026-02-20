@@ -458,4 +458,28 @@ class SheetsDatabase(DatabaseInterface):
             log.warning("Failed to append archive log corr_id=%s", record.corr_id, exc_info=True)
 
 
+    # Referrals (RevShare) — no-op stubs; referrals live in PostgreSQL only.
+    async def create_referral(self, referrer_id: int, referred_id: int) -> bool:
+        log.debug("SheetsDatabase.create_referral is a no-op; use PostgreSQL")
+        return False
+
+    async def get_referrer_id(self, referred_id: int) -> Optional[int]:
+        return None
+
+    async def record_referral_payout(
+        self,
+        *,
+        referrer_id: int,
+        payer_id: int,
+        payment_ext_id: str,
+        topup_amount_cp: int,
+        payout_credits: int,
+        payout_pct: float,
+    ) -> None:
+        pass
+
+    async def get_referral_stats(self, referrer_id: int) -> Dict[str, Any]:
+        return {"invited_count": 0, "total_earned": 0, "total_payouts": 0}
+
+
 __all__ = ["SheetsDatabase"]

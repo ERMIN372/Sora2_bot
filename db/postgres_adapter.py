@@ -857,4 +857,115 @@ class PostgresDatabase(DatabaseInterface):
                 )
 
 
+    # ------------------------------------------------------------------
+    # Referrals (RevShare)
+    # ------------------------------------------------------------------
+
+    async def create_referral(self, referrer_id: int, referred_id: int) -> bool:
+        pool = self._require_pool()
+        async with pool.acquire() as conn:
+            try:
+                result = await conn.execute(
+                    """
+                    INSERT INTO referrals (referrer_id, referred_id, created_at)
+                    VALUES ($1, $2, $3)
+                    ON CONFLICT (referred_id) DO NOTHING
+                    """,
+                    referrer_id,
+                    referred_id,
+                    _now(),
+                )
+            except Exception:
+                log.exception(
+                    "Failed to create referral referrer=%s referred=%s",
+                    referrer_id,
+                    referred_id,
+                )
+                return False
+        created = str(result).endswith("1")
+        if created:
+            log.info(
+                "Referral created referrer=%s referred=%s", referrer_id, referred_id
+            )
+        return created
+
+    async def get_referrer_id(self, referred_id: int) -> Optional[int]:
+        pool = self._require_pool()
+        async with pool.acquire() as conn:
+            value = await conn.fetchval(
+                "SELECT referrer_id FROM referrals WHERE referred_id = $1",
+                referred_id,
+            )
+        return int(value) if value is not None else None
+
+    async def record_referral_payout(
+        self,
+        *,
+        referrer_id: int,
+        payer_id: int,
+        payment_ext_id: str,
+        topup_amount_cp: int,
+        payout_credits: int,
+        payout_pct: float,
+    ) -> None:
+        pool = self._require_pool()
+        async with pool.acquire() as conn:
+            # Fetch the referral id for the audit record.
+            referral_id = await conn.fetchval(
+                "SELECT id FROM referrals WHERE referred_id = $1",
+                payer_id,
+            )
+            if referral_id is None:
+                log.warning(
+                    "record_referral_payout: no referral row for payer=%s", payer_id
+                )
+                return
+            await conn.execute(
+                """
+                INSERT INTO referral_payouts
+                    (referral_id, payment_ext_id, payer_id, referrer_id,
+                     topup_amount_cp, payout_credits, payout_pct, created_at)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                """,
+                referral_id,
+                payment_ext_id,
+                payer_id,
+                referrer_id,
+                topup_amount_cp,
+                payout_credits,
+                payout_pct,
+                _now(),
+            )
+        log.info(
+            "Referral payout recorded referrer=%s payer=%s credits=%s pct=%s payment=%s",
+            referrer_id,
+            payer_id,
+            payout_credits,
+            payout_pct,
+            payment_ext_id,
+        )
+
+    async def get_referral_stats(self, referrer_id: int) -> Dict[str, Any]:
+        pool = self._require_pool()
+        async with pool.acquire() as conn:
+            invited = await conn.fetchval(
+                "SELECT COUNT(*) FROM referrals WHERE referrer_id = $1",
+                referrer_id,
+            )
+            row = await conn.fetchrow(
+                """
+                SELECT COALESCE(SUM(payout_credits), 0) AS total_earned,
+                       COUNT(*) AS total_payouts
+                FROM referral_payouts
+                WHERE referrer_id = $1
+                """,
+                referrer_id,
+            )
+        return {
+            "invited_count": int(invited or 0),
+            "total_earned": int(row["total_earned"]) if row else 0,
+            "total_payouts": int(row["total_payouts"]) if row else 0,
+        }
+
+
 __all__ = ["PostgresDatabase"]

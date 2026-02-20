@@ -148,7 +148,6 @@ from services.download_router import AssetUrlRoute, classify_asset_url
 from services.sora_downloader import SoraDownloadError, download_sora_asset
 from services.error_reporter import ErrorReporter
 from services.status_tracker import StatusMessageManager
-from services import gsheets_ref
 from trend_presets import TREND_PRESETS, TrendPreset, get_trend_by_id
 from telegram_files import BufferedInputFile
 from tarot_data import draw_cards
@@ -1899,7 +1898,7 @@ def _build_balance_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text=i18n.t("buttons.top_up_short"), callback_data="menu:topup")],
-            [InlineKeyboardButton(text="💌 Реферальная ссылка", callback_data="balance:ref_link")],
+            [InlineKeyboardButton(text="💸 Реферальная ссылка (15%)", callback_data="balance:ref_link")],
         ]
     )
 
@@ -1968,11 +1967,15 @@ async def _send_balance_info(message: Message, db: Database) -> None:
             video_count=video_count,
             image_count=image_count,
         )
-    balance_text += "\n\n🎁 За пополнение по твоей ссылке: <b>+100 кредитов</b>"
+    balance_text += (
+        "\n\n💸 <b>Пригласи друга</b> и получай <b>15%</b> от ВСЕХ его пополнений пожизненно!"
+    )
     await message.answer(balance_text, reply_markup=_build_balance_keyboard(), parse_mode="HTML")
 
 
-async def _build_referral_response(bot: Bot, user_id: int) -> tuple[Optional[str], Optional[str]]:
+async def _build_referral_response(
+    bot: Bot, user_id: int, db: Optional[Database] = None
+) -> tuple[Optional[str], Optional[str]]:
     bot_username = await _get_bot_username(bot)
     if not bot_username:
         return None, (
@@ -1981,14 +1984,34 @@ async def _build_referral_response(bot: Bot, user_id: int) -> tuple[Optional[str
     bot_username = bot_username.lstrip("@")
     ref_link = f"https://t.me/{bot_username}?start=ref_{user_id}"
     response = (
-        "Твоя реферальная ссылка:\n"
-        f"{ref_link}\n\n"
-        "Когда друг перейдёт по ней и пополнит баланс на любую сумму — тебе начислится 100 кредитов."
+        "💸 <b>Реферальная программа — пассивный доход!</b>\n"
+        "━━━━━━━━━━━━━━━\n\n"
+        f"🔗 Твоя ссылка:\n<code>{ref_link}</code>\n\n"
+        "Пригласи друга и получай <b>15%</b> от ВСЕХ его пополнений <b>пожизненно</b>!\n\n"
+        "📌 <b>Как это работает:</b>\n"
+        "1. Друг переходит по твоей ссылке\n"
+        "2. Каждый раз, когда он пополняет баланс — тебе капает 15%\n"
+        "3. Без ограничений по сумме и количеству пополнений\n\n"
+        "💡 <i>Пример: друг закинул 300₽ → тебе +45 кредитов</i>"
     )
+    # Show referral stats if db is available.
+    if db is not None:
+        try:
+            stats = await db.get_referral_stats(user_id)
+            invited = stats.get("invited_count", 0)
+            earned = stats.get("total_earned", 0)
+            if invited > 0 or earned > 0:
+                response += (
+                    "\n\n📊 <b>Твоя статистика:</b>\n"
+                    f"├ Приглашено друзей: <b>{invited}</b>\n"
+                    f"└ Заработано: <b>{format_credits(earned)}</b>"
+                )
+        except Exception:
+            log.debug("Failed to fetch referral stats for user=%s", user_id, exc_info=True)
     return response, None
 
 
-async def balance_callback_handler(callback: CallbackQuery) -> None:
+async def balance_callback_handler(callback: CallbackQuery, db: Database) -> None:
     data = callback.data or ""
     if data != "balance:ref_link":
         await safe_callback_answer(callback)
@@ -1997,31 +2020,31 @@ async def balance_callback_handler(callback: CallbackQuery) -> None:
     user = callback.from_user
     if not user:
         return
-    response, error = await _build_referral_response(callback.bot, user.id)
+    response, error = await _build_referral_response(callback.bot, user.id, db)
     if error:
         if callback.message:
-            await callback.message.answer(error)
+            await callback.message.answer(error, parse_mode="HTML")
         else:
-            await callback.bot.send_message(user.id, error)
+            await callback.bot.send_message(user.id, error, parse_mode="HTML")
         return
     if callback.message:
-        await callback.message.answer(response)
+        await callback.message.answer(response, parse_mode="HTML")
     else:
-        await callback.bot.send_message(user.id, response)
+        await callback.bot.send_message(user.id, response, parse_mode="HTML")
 
 
-async def referral_command(message: Message) -> None:
+async def referral_command(message: Message, db: Database) -> None:
     user = message.from_user
     if not user:
         return
-    response, error = await _build_referral_response(message.bot, user.id)
+    response, error = await _build_referral_response(message.bot, user.id, db)
     if error:
-        await message.answer(error)
+        await message.answer(error, parse_mode="HTML")
         return
-    await message.answer(response)
+    await message.answer(response, parse_mode="HTML")
 
 
-async def _process_referral_payload(message: Message, payload: str) -> None:
+async def _process_referral_payload(message: Message, payload: str, db: Database) -> None:
     payload = payload.strip()
     if not payload.startswith("ref_"):
         return
@@ -2038,27 +2061,29 @@ async def _process_referral_payload(message: Message, payload: str) -> None:
     if referrer_id == new_user_id:
         log.debug("Ignored self-referral start user=%s", new_user_id)
         return
+    # Check if this user already has a referrer (permanent bond).
     try:
-        existing = await gsheets_ref.find_ref_by_new_user_id(new_user_id)
+        existing_referrer = await db.get_referrer_id(new_user_id)
     except Exception:
-        log.exception("Failed to lookup referral row for user=%s", new_user_id)
+        log.exception("Failed to lookup referral for user=%s", new_user_id)
         return
-    if existing:
+    if existing_referrer is not None:
         log.debug(
             "Referral already tracked new_user=%s referrer=%s",
             new_user_id,
-            existing.get("referrer_user_id"),
+            existing_referrer,
         )
         return
+    # Create the permanent referral link in PostgreSQL.
     try:
-        appended = await gsheets_ref.append_ref_row(referrer_id, new_user_id)
+        created = await db.create_referral(referrer_id, new_user_id)
     except Exception:
         log.exception(
-            "Failed to append referral row new_user=%s referrer=%s", new_user_id, referrer_id
+            "Failed to create referral new_user=%s referrer=%s", new_user_id, referrer_id
         )
         return
-    if appended:
-        log.debug("ref track ok new_user=%s referrer=%s", new_user_id, referrer_id)
+    if created:
+        log.info("Referral created new_user=%s referrer=%s", new_user_id, referrer_id)
 
 
 def _build_help_keyboard(config: Config) -> InlineKeyboardMarkup:
@@ -3186,7 +3211,7 @@ def _build_packages_keyboard(config: Config) -> Optional[InlineKeyboardMarkup]:
             ]
         )
     rows.append(
-        [InlineKeyboardButton(text="💌 Реферальная ссылка", callback_data="balance:ref_link")]
+        [InlineKeyboardButton(text="💸 Реферальная ссылка (15%)", callback_data="balance:ref_link")]
     )
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -6058,7 +6083,7 @@ async def start_command(message: Message, db: Database, state: FSMContext, confi
             payload = ""
         if payload:
             try:
-                await _process_referral_payload(message, payload)
+                await _process_referral_payload(message, payload, db)
             except Exception:
                 log.exception(
                     "Failed to process referral payload for user=%s",
@@ -8728,7 +8753,7 @@ def register_handlers(
         state="*",
     )
     dp.register_message_handler(
-        lambda message: referral_command(message),
+        lambda message: referral_command(message, db),
         Command("reff"),
         state="*",
     )
@@ -8950,7 +8975,7 @@ def register_handlers(
         state="*",
     )
     dp.register_callback_query_handler(
-        balance_callback_handler,
+        lambda call, state: balance_callback_handler(call, db),
         lambda call: call.data == "balance:ref_link",
         state="*",
     )

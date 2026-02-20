@@ -385,6 +385,35 @@ class DualWriteDatabase(DatabaseInterface):
         await self._primary.log_archive_record(record)
         await self._mirror(self._secondary.log_archive_record, record)
 
+    # Referrals (RevShare) — primary-only, referrals live in PostgreSQL
+    async def create_referral(self, referrer_id: int, referred_id: int) -> bool:
+        return await self._primary.create_referral(referrer_id, referred_id)
+
+    async def get_referrer_id(self, referred_id: int) -> Optional[int]:
+        return await self._primary.get_referrer_id(referred_id)
+
+    async def record_referral_payout(
+        self,
+        *,
+        referrer_id: int,
+        payer_id: int,
+        payment_ext_id: str,
+        topup_amount_cp: int,
+        payout_credits: int,
+        payout_pct: float,
+    ) -> None:
+        await self._primary.record_referral_payout(
+            referrer_id=referrer_id,
+            payer_id=payer_id,
+            payment_ext_id=payment_ext_id,
+            topup_amount_cp=topup_amount_cp,
+            payout_credits=payout_credits,
+            payout_pct=payout_pct,
+        )
+
+    async def get_referral_stats(self, referrer_id: int) -> Dict[str, Any]:
+        return await self._primary.get_referral_stats(referrer_id)
+
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
