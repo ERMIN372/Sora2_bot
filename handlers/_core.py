@@ -1556,6 +1556,35 @@ def _main_keyboard(config: Config) -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True)
 
 
+def _build_welcome_inline_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="\U0001f680 Сгенерировать контент",
+                    callback_data="welcome:generate",
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    text="\U0001f464 Мой профиль",
+                    callback_data="welcome:profile",
+                ),
+                InlineKeyboardButton(
+                    text="\U0001f381 Заработать",
+                    callback_data="welcome:referral",
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    text="\U0001f4d6 Помощь",
+                    callback_data="welcome:help",
+                ),
+            ],
+        ]
+    )
+
+
 def _back_button(target: str) -> InlineKeyboardButton:
     return InlineKeyboardButton(text=i18n.t("buttons.back"), callback_data=f"flow:back:{target}")
 
@@ -6081,9 +6110,11 @@ async def start_command(message: Message, db: Database, state: FSMContext, confi
             payload = message.get_args()
         except AttributeError:
             payload = ""
+        is_referred = False
         if payload:
             try:
                 await _process_referral_payload(message, payload, db)
+                is_referred = payload.startswith("ref_")
             except Exception:
                 log.exception(
                     "Failed to process referral payload for user=%s",
@@ -6091,7 +6122,13 @@ async def start_command(message: Message, db: Database, state: FSMContext, confi
                 )
         await state.finish()
         await _ensure_user(message, db)
-        await _send_main_menu(message, config)
+        # Send the new welcome message with inline keyboard.
+        welcome_key = "start.welcome_referred" if is_referred else "start.welcome"
+        await message.answer(
+            i18n.t(welcome_key),
+            reply_markup=_build_welcome_inline_keyboard(),
+            parse_mode="HTML",
+        )
     except Exception:
         success = False
         raise
@@ -7193,6 +7230,41 @@ async def payment_callback_handler(
 
         await _mark_payment_button_created(callback.message)
         await _send_payment_link(callback.message, confirmation_url)
+
+
+async def welcome_callback_handler(
+    callback: CallbackQuery,
+    db: Database,
+    config: Config,
+    state: FSMContext,
+) -> None:
+    """Handle inline buttons from the /start welcome message."""
+    await safe_callback_answer(callback)
+    data = callback.data or ""
+    action = data.removeprefix("welcome:")
+    message = callback.message
+    if not message:
+        return
+
+    if action == "generate":
+        # Open the main menu with Reply keyboard so user can pick video/photo.
+        await state.finish()
+        await _send_main_menu(message, config)
+    elif action == "profile":
+        await _send_balance_info(message, db)
+    elif action == "referral":
+        user = callback.from_user
+        if user:
+            response, error = await _build_referral_response(message.bot, user.id, db)
+            text = error if error else response
+            if text:
+                await message.answer(text, parse_mode="HTML")
+    elif action == "help":
+        await message.answer(
+            _render_help_text(config),
+            reply_markup=_build_help_keyboard(config),
+            parse_mode="HTML",
+        )
 
 
 async def menu_callback_handler(
@@ -8947,6 +9019,11 @@ def register_handlers(
     dp.register_callback_query_handler(
         lambda call: payment_callback_handler(call, db, config),
         lambda call: call.data and call.data.startswith("pay:"),
+        state="*",
+    )
+    dp.register_callback_query_handler(
+        lambda call, state: welcome_callback_handler(call, db, config, state),
+        lambda call: call.data and call.data.startswith("welcome:"),
         state="*",
     )
     dp.register_callback_query_handler(
