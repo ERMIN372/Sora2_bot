@@ -10,7 +10,7 @@ import logging
 import os
 import time
 from datetime import datetime, timezone
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from ipaddress import ip_address, ip_network
 from typing import Any, Dict, Optional
 
@@ -25,7 +25,6 @@ from db import DatabaseInterface
 from handlers import resend_pending_order
 from i18n import format_credits, i18n
 from monitoring.metrics import router as metrics_router
-from services import gsheets_ref
 import yookassa_client
 
 log = logging.getLogger(__name__)
@@ -354,11 +353,10 @@ class YooKassaProcessor:
             balance_after,
             amount_cp,
         )
-        await self._apply_referral_bonus(
+        await self._apply_referral_revshare(
             payer_user_id=user_id_int,
             payment_id=payment_id,
-            amount_value=amount_value_str,
-            currency=amount_currency,
+            amount_cp=amount_cp or 0,
         )
         await self._notify_success(user_id_int, purchased_credits)
 
@@ -412,100 +410,99 @@ class YooKassaProcessor:
         except Exception:  # pragma: no cover - Telegram API interaction
             log.exception("Failed to notify user %s about YooKassa success", user_id)
 
-    async def _apply_referral_bonus(
+    # RevShare: 15% of every referral top-up
+    REFERRAL_REVSHARE_PCT = 15.0
+
+    async def _apply_referral_revshare(
         self,
         *,
         payer_user_id: int,
         payment_id: str,
-        amount_value: str,
-        currency: str,
+        amount_cp: int,
     ) -> None:
+        """Calculate and credit 15% RevShare to the referrer on every top-up."""
+        # 1. Look up the permanent referrer for this payer.
         try:
-            referral_row = await gsheets_ref.find_ref_by_new_user_id(
-                payer_user_id, only_pending=True
-            )
+            referrer_id = await self._db.get_referrer_id(payer_user_id)
         except Exception:
             log.exception(
-                "Failed to lookup referral for payer=%s payment=%s",
+                "Failed to lookup referrer for payer=%s payment=%s",
                 payer_user_id,
                 payment_id,
             )
             return
-        if not referral_row:
-            return
-        referrer_raw = referral_row.get("referrer_user_id")
-        try:
-            referrer_id = int(str(referrer_raw))
-        except (TypeError, ValueError):
-            log.warning(
-                "Invalid referrer id %r for referral payer=%s payment=%s",
-                referrer_raw,
-                payer_user_id,
-                payment_id,
-            )
-            return
+        if referrer_id is None:
+            return  # No referral link for this user.
         if referrer_id == payer_user_id:
             log.warning(
-                "Skipping referral bonus for self-referral referrer=%s payment=%s",
+                "Skipping RevShare for self-referral referrer=%s payment=%s",
                 referrer_id,
                 payment_id,
             )
             return
-        bonus_credits = 100
+
+        # 2. Calculate 15% of the top-up amount (in kopeks → credits).
+        #    amount_cp is in kopeks; 100 kopeks = 1 ruble = 1 credit.
+        amount_rub = Decimal(amount_cp) / Decimal(100)
+        payout_exact = amount_rub * Decimal(self.REFERRAL_REVSHARE_PCT) / Decimal(100)
+        payout_credits = int(payout_exact.to_integral_value(rounding=ROUND_HALF_UP))
+        if payout_credits <= 0:
+            log.debug(
+                "RevShare payout too small for payer=%s payment=%s amount_cp=%s",
+                payer_user_id,
+                payment_id,
+                amount_cp,
+            )
+            return
+
+        # 3. Credit the referrer.
         try:
             await self._db.ensure_user(referrer_id, None)
-            await self._db.add_credits(referrer_id, bonus_credits)
+            await self._db.add_credits(referrer_id, payout_credits)
         except Exception:
             log.exception(
-                "Failed to credit referral bonus referrer=%s payer=%s payment=%s",
+                "Failed to credit RevShare referrer=%s payer=%s payment=%s",
                 referrer_id,
                 payer_user_id,
                 payment_id,
             )
             return
+
+        # 4. Record audit trail.
         try:
-            marked = await gsheets_ref.mark_credited(
-                referral_row,
-                amount=amount_value,
-                currency=currency,
-                payment_id=payment_id,
+            await self._db.record_referral_payout(
+                referrer_id=referrer_id,
+                payer_id=payer_user_id,
+                payment_ext_id=payment_id,
+                topup_amount_cp=amount_cp,
+                payout_credits=payout_credits,
+                payout_pct=self.REFERRAL_REVSHARE_PCT,
             )
         except Exception:
             log.exception(
-                "Failed to mark referral credited referrer=%s payer=%s payment=%s",
+                "Failed to record referral payout referrer=%s payer=%s payment=%s",
                 referrer_id,
                 payer_user_id,
                 payment_id,
             )
-            marked = False
-        if not marked:
-            log.warning(
-                "Referral row not marked credited referrer=%s payer=%s payment=%s",
-                referrer_id,
-                payer_user_id,
-                payment_id,
-            )
+
+        # 5. Notify the referrer about the payout.
+        amount_rub_str = amount_rub.quantize(Decimal("0.01"))
         try:
             await self._bot.send_message(
                 referrer_id,
-                "🎉 Твой друг пополнил баланс. +100 кредитов за рефералку начислены.",
+                f"💰 Твой друг пополнил баланс на {amount_rub_str}₽. "
+                f"Тебе начислено {payout_credits} кредитов (15% RevShare)!",
             )
         except Exception:
-            log.exception("Failed to notify referrer %s about referral bonus", referrer_id)
-        try:
-            await self._bot.send_message(
-                payer_user_id,
-                "Спасибо за пополнение! Твоя покупка засчитана по реферал-ссылке друга.",
-            )
-        except Exception:
-            log.exception(
-                "Failed to notify payer %s about referral attribution",
-                payer_user_id,
-            )
+            log.exception("Failed to notify referrer %s about RevShare payout", referrer_id)
+
         log.info(
-            "Referral bonus granted referrer=%s payer=%s payment=%s",
+            "RevShare payout referrer=%s payer=%s credits=%s pct=%s payment=%s",
             referrer_id,
             payer_user_id,
+            payout_credits,
+            self.REFERRAL_REVSHARE_PCT,
             payment_id,
         )
 

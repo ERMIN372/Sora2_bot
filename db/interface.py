@@ -242,5 +242,35 @@ class DatabaseInterface(abc.ABC):
     async def log_archive_record(self, record: ArchiveLogRecord) -> None:
         raise NotImplementedError
 
+    # Referrals (RevShare)
+    @abc.abstractmethod
+    async def create_referral(self, referrer_id: int, referred_id: int) -> bool:
+        """Link referred_id to referrer_id permanently. Return True if created."""
+        raise NotImplementedError
+
+    @abc.abstractmethod
+    async def get_referrer_id(self, referred_id: int) -> Optional[int]:
+        """Return the referrer for *referred_id*, or None."""
+        raise NotImplementedError
+
+    @abc.abstractmethod
+    async def record_referral_payout(
+        self,
+        *,
+        referrer_id: int,
+        payer_id: int,
+        payment_ext_id: str,
+        topup_amount_cp: int,
+        payout_credits: int,
+        payout_pct: float,
+    ) -> None:
+        """Log a RevShare payout in the audit table."""
+        raise NotImplementedError
+
+    @abc.abstractmethod
+    async def get_referral_stats(self, referrer_id: int) -> Dict[str, Any]:
+        """Return aggregate referral stats for the referrer."""
+        raise NotImplementedError
+
 
 __all__ = ["DatabaseInterface"]
